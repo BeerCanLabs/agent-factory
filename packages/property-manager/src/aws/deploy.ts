@@ -1,6 +1,6 @@
 import type { BuildSkill, DeployProvider, SourceRef } from '../runtime.js';
 import { buildAgentImage, buildSkillsImage } from './codebuild.js';
-import { provisionAgentRoles, reconcileAgentTaskRole } from './iam.js';
+import { listAgentTaskRoleIds, provisionAgentRoles, reconcileAgentTaskRole, retireAgentTaskRole } from './iam.js';
 import { registerAgentTaskDefinition } from './ecs.js';
 
 export function awsDeployProvider(): DeployProvider {
@@ -18,10 +18,9 @@ export function awsDeployProvider(): DeployProvider {
       return { identity: taskRoleArn, executionIdentity: executionRoleArn };
     },
 
-    async reconcileIdentity(agentId: string, opts: { memoryPrefix?: string }): Promise<{ skipped?: string; revoked: string[] }> {
-      const { skipped, revoked } = await reconcileAgentTaskRole(agentId, { memoryPrefix: opts.memoryPrefix });
-      return { skipped, revoked };
-    },
+    reconcileIdentity: (agentId: string, opts: { memoryPrefix?: string; narrow?: boolean }) => reconcileAgentTaskRole(agentId, opts),
+    listIdentities: listAgentTaskRoleIds,
+    retireIdentity: retireAgentTaskRole,
 
     async provisionHelperCompute(computeId: string, imageUri: string): Promise<void> {
       const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(computeId, [], { memory: false });

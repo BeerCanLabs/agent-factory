@@ -129,6 +129,18 @@ describe('an agent moves as one bundle (CF3, TSK-266)', { concurrency: false }, 
     assert.equal((await call('GET', '/api/v1/agents/missing/bundle')).status, 404);
   });
 
+  it('refuses a registration whose mind prefix another agent holds (409) or that is not one key segment (400) (GAP-263)', async () => {
+    state.newAgentsFromConfigurationOnly = false;
+    const reg = (id: string, prefix: string) => call('POST', '/api/v1/registry/agents', { repo: 'https://github.com/beercanlabs/SM-x', commit: SHA, cartridge: { id, name: id, memory: { archetype: 'personal-assistant', prefix } } });
+    const ok = await reg('owner-a', 'owner-a-state');
+    const taken = await reg('thief', 'owner-a-state');
+    const bad = await reg('slash', 'owner-a-state/x');
+    state.newAgentsFromConfigurationOnly = true;
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.deepEqual([taken.status, taken.body.error, bad.status, bad.body.error], [409, 'mind_prefix_taken', 400, 'invalid_mind_prefix']);
+    assert.ok(!state.agents.has('thief') && !state.agents.has('slash'), 'nothing recorded');
+  });
+
   it('records an agent that runs from a repository as read-only, and refuses to import it', async () => {
     state.newAgentsFromConfigurationOnly = false;
     const reg = await call('POST', '/api/v1/registry/agents', { repo: 'https://github.com/beercanlabs/SM-old', commit: SHA, cartridge: { id: 'old', name: 'old', memory: { archetype: 'personal-assistant' } } });

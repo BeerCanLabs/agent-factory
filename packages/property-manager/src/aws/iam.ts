@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   IAMClient,
   CreateRoleCommand,
@@ -5,34 +7,24 @@ import {
   DetachRolePolicyCommand,
   GetRoleCommand,
   ListAttachedRolePoliciesCommand,
+  ListRolesCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
+import { DescribeTaskDefinitionCommand, ECSClient } from "@aws-sdk/client-ecs";
 import { agentContainerSecrets } from "./gatekeeper-held.js";
+import { checkMindPrefix, MindPrefixRefusedError } from "../mind-prefix.js";
+
+export { checkMindPrefix };
 
 /** The task role's mind policy. Scoped to the agent's own prefix in the factory's one mind bucket (§6.6, E6). */
 export const MIND_POLICY = "MindPersistenceAccess";
-/**
- * E5, M1 (GAP-249): agents never call a model provider themselves; every model call goes through the gatekeeper-egress,
- * which meters and ledgers it. These grants used to give agent task roles direct Bedrock access and are revoked on
- * every deploy and at control-plane start: the inline policy aws/iam.ts used to write, and the managed policy that was
- * attached to agent task roles by hand on 2026-09-24.
- */
+const TASK_ROLE_PREFIX = "AgentTaskRole-";
+/** E5, M1 (GAP-263): model calls go through the gatekeeper-egress. Direct Bedrock grants, revoked on deploy and at start. */
 export const DIRECT_MODEL_INLINE_POLICIES = ["BedrockConverseAccess"];
 export const DIRECT_MODEL_MANAGED_POLICIES = ["AgentBedrockModelInvocation", "AmazonBedrockFullAccess", "AmazonBedrockLimitedAccess"];
 
 const isNoSuchEntity = (err: any) =>
   err?.name === "NoSuchEntityException" || err?.name === "NoSuchEntity" || err?.Code === "NoSuchEntity";
-
-/**
- * An agent's mind prefix as a key prefix: no wildcard, no `..` segment, no leading or trailing slash, so a policy built
- * from it names exactly one agent's keys.
- */
-export function checkMindPrefix(prefix: string): string {
-  if (!prefix || /[*?$\s]/.test(prefix) || prefix.startsWith("/") || prefix.endsWith("/") || prefix.split("/").includes("..") || prefix.split("/").includes("")) {
-    throw new Error(`invalid mind prefix ${JSON.stringify(prefix)}: the task role would not be scoped to one agent`);
-  }
-  return prefix;
-}
 
 /** The mind bucket's name: from FACTORY_MIND_BUCKET (bare name or s3:// URI). Never a wildcard. */
 export function mindBucketName(env: NodeJS.ProcessEnv = process.env): string {
@@ -43,7 +35,7 @@ export function mindBucketName(env: NodeJS.ProcessEnv = process.env): string {
   return raw;
 }
 
-/** The task role's mind policy: read, write and delete under `<bucket>/<prefix>/`, and list only that prefix. */
+/** Objects under `<bucket>/<prefix>/`; listing `<prefix>/` only (the bare prefix would also list `<prefix>-backups/`). */
 export function mindPolicyDocument(bucket: string, prefix: string): string {
   checkMindPrefix(prefix);
   return JSON.stringify({
@@ -52,7 +44,7 @@ export function mindPolicyDocument(bucket: string, prefix: string): string {
       {
         Sid: "OwnMindObjects",
         Effect: "Allow",
-        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
         Resource: [`arn:aws:s3:::${bucket}/${prefix}/*`],
       },
       {
@@ -60,13 +52,55 @@ export function mindPolicyDocument(bucket: string, prefix: string): string {
         Effect: "Allow",
         Action: ["s3:ListBucket"],
         Resource: [`arn:aws:s3:::${bucket}`],
-        Condition: { StringLike: { "s3:prefix": [prefix, `${prefix}/`, `${prefix}/*`] } },
+        Condition: { StringLike: { "s3:prefix": [`${prefix}/`, `${prefix}/*`] } },
       },
     ],
   });
 }
 
-/** Removes every direct model-provider grant from a task role. Absent grants are fine; any other failure throws. */
+/** liveMindPrefix: MEMORY_PREFIX of the ACTIVE `agent-<id>` task definition. prefixHasObjects: key names only. */
+export type MindProbe = {
+  liveMindPrefix(agentId: string): Promise<{ found: boolean; prefix?: string }>;
+  prefixHasObjects(bucket: string, prefix: string): Promise<boolean>;
+};
+
+const execFileAsync = promisify(execFile);
+
+export const awsMindProbe = (ecs: ECSClient = new ECSClient({})): MindProbe => ({
+  async liveMindPrefix(agentId) {
+    try {
+      const r = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: `agent-${agentId}` }));
+      const env = (r.taskDefinition?.containerDefinitions ?? []).flatMap((c) => c.environment ?? []);
+      const prefix = env.find((e) => e.name === "MEMORY_PREFIX")?.value;
+      return { found: true, ...(prefix ? { prefix } : {}) };
+    } catch (err: any) {
+      if (err?.name === "ClientException" && /unable to describe task definition/i.test(String(err?.message))) return { found: false };
+      throw err;
+    }
+  },
+  async prefixHasObjects(bucket, prefix) {
+    const { stdout } = await execFileAsync(
+      "aws",
+      ["s3api", "list-objects-v2", "--bucket", bucket, "--prefix", `${checkMindPrefix(prefix)}/`, "--max-keys", "1", "--query", "KeyCount", "--output", "text"],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+    return Number(stdout.trim()) > 0;
+  },
+});
+
+/** GAP-263: a prefix is the agent's if its live task definition uses it; otherwise it must hold no data. */
+export async function assertMindPrefixOwned(agentId: string, bucket: string, prefix: string, probe: MindProbe): Promise<void> {
+  checkMindPrefix(prefix);
+  const live = await probe.liveMindPrefix(agentId);
+  if (live.found && live.prefix === prefix) return;
+  if (await probe.prefixHasObjects(bucket, prefix)) {
+    throw new MindPrefixRefusedError(
+      `mind prefix ${JSON.stringify(prefix)} already holds data that ${agentId} does not own (its task definition uses ${live.prefix ? JSON.stringify(live.prefix) : "no prefix"}); refusing to grant it`,
+    );
+  }
+}
+
+/** Absent grants are fine; any other failure throws. */
 async function revokeDirectModelAccess(client: IAMClient, roleName: string): Promise<string[]> {
   const removed: string[] = [];
   for (const name of DIRECT_MODEL_INLINE_POLICIES) {
@@ -94,8 +128,8 @@ async function revokeDirectModelAccess(client: IAMClient, roleName: string): Pro
   return removed;
 }
 
-/** Sets the task role's mind access: its own prefix only, or none (a helper's role). */
-async function setMindAccess(client: IAMClient, roleName: string, memory: { prefix: string } | false): Promise<void> {
+
+async function setMindAccess(client: IAMClient, roleName: string, memory: { bucket: string; prefix: string } | false): Promise<void> {
   if (memory === false) {
     try {
       await client.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: MIND_POLICY }));
@@ -104,31 +138,71 @@ async function setMindAccess(client: IAMClient, roleName: string, memory: { pref
     }
     return;
   }
-  // PutRolePolicy replaces the whole document, so an older bucket-wide grant under this name is gone once it returns.
   await client.send(
-    new PutRolePolicyCommand({ RoleName: roleName, PolicyName: MIND_POLICY, PolicyDocument: mindPolicyDocument(mindBucketName(), memory.prefix) }),
+    new PutRolePolicyCommand({ RoleName: roleName, PolicyName: MIND_POLICY, PolicyDocument: mindPolicyDocument(memory.bucket, memory.prefix) }),
   );
 }
 
+async function roleExists(client: IAMClient, role: string): Promise<boolean> {
+  try {
+    await client.send(new GetRoleCommand({ RoleName: role }));
+    return true;
+  } catch (err: any) {
+    if (isNoSuchEntity(err)) return false;
+    throw err;
+  }
+}
+
+export type ReconcileOutcome = "updated" | "no-role" | "mismatch" | "not-narrowed";
+
 /**
- * GAP-249 migration: brings an existing agent's task role to the current grants (its own mind prefix, no direct model
- * access) without redeploying it. The control plane runs this for every registered agent when it starts, so a deploy
- * of this change re-scopes all existing roles. A role that does not exist (the agent was never deployed on ECS, or is
- * a landing-zone agent with its own Terraform role) is skipped. Idempotent.
+ * GAP-263 migration of one registered agent's existing role. Always revokes direct model access. Narrows the mind grant
+ * only when the live task definition uses the same prefix; otherwise leaves it (`mismatch`). Never creates a role.
  */
 export async function reconcileAgentTaskRole(
   agentId: string,
-  opts: { memoryPrefix?: string; memory?: boolean } = {},
-): Promise<{ role: string; skipped?: "no-role"; revoked: string[] }> {
+  opts: { memoryPrefix?: string; narrow?: boolean; probe?: MindProbe } = {},
+): Promise<{ role: string; outcome: ReconcileOutcome; revoked: string[]; detail?: string }> {
   const client = new IAMClient({});
   const role = `AgentTaskRole-${agentId}`;
-  try {
-    await client.send(new GetRoleCommand({ RoleName: role }));
-  } catch (err: any) {
-    if (isNoSuchEntity(err)) return { role, skipped: "no-role", revoked: [] };
-    throw err;
+  if (!(await roleExists(client, role))) return { role, outcome: "no-role", revoked: [] };
+  const prefix = opts.memoryPrefix || agentId;
+  let outcome: ReconcileOutcome = "not-narrowed";
+  let detail: string | undefined;
+  if (opts.narrow !== false) {
+    checkMindPrefix(prefix);
+    const live = await (opts.probe ?? awsMindProbe()).liveMindPrefix(agentId);
+    if (live.found && live.prefix === prefix) {
+      await setMindAccess(client, role, { bucket: mindBucketName(), prefix });
+      outcome = "updated";
+    } else {
+      outcome = "mismatch";
+      detail = live.found
+        ? `record prefix ${JSON.stringify(prefix)} but task definition agent-${agentId} uses ${live.prefix ? JSON.stringify(live.prefix) : "no MEMORY_PREFIX"}; mind grant left unchanged`
+        : `no ACTIVE task definition agent-${agentId}; mind grant left unchanged`;
+    }
   }
-  await setMindAccess(client, role, opts.memory === false ? false : { prefix: opts.memoryPrefix ?? agentId });
+  const revoked = await revokeDirectModelAccess(client, role);
+  return { role, outcome, revoked, ...(detail ? { detail } : {}) };
+}
+
+export async function listAgentTaskRoleIds(): Promise<string[]> {
+  const client = new IAMClient({});
+  const ids: string[] = [];
+  let marker: string | undefined;
+  do {
+    const page = await client.send(new ListRolesCommand({ Marker: marker }));
+    for (const r of page.Roles ?? []) if (r.RoleName?.startsWith(TASK_ROLE_PREFIX)) ids.push(r.RoleName.slice(TASK_ROLE_PREFIX.length));
+    marker = page.IsTruncated ? page.Marker : undefined;
+  } while (marker);
+  return ids;
+}
+
+/** GAP-263: a role whose agent has no record (the factory does not delete roles) keeps no grants. No prefix is guessed. */
+export async function retireAgentTaskRole(agentId: string): Promise<{ role: string; revoked: string[] }> {
+  const client = new IAMClient({});
+  const role = `AgentTaskRole-${agentId}`;
+  await setMindAccess(client, role, false);
   const revoked = await revokeDirectModelAccess(client, role);
   return { role, revoked };
 }
@@ -136,14 +210,13 @@ export async function reconcileAgentTaskRole(
 export async function provisionAgentRoles(
   agentId: string,
   secrets: string[],
-  /**
-   * E1.4 (#295): `memory: false` (a helper's role) gets no mind-bucket access, and loses any it had.
-   * `memoryPrefix` (GAP-249): the agent's mind prefix (AgentRecord.memoryPrefix, default the agent id); the task role
-   * can reach only that prefix, never another agent's.
-   */
-  opts: { memory?: boolean; memoryPrefix?: string } = {},
+  /** E1.4 (#295): `memory: false` (a helper's role) gets no mind access. GAP-263: else only its own prefix. */
+  opts: { memory?: boolean; memoryPrefix?: string; probe?: MindProbe } = {},
 ): Promise<{ taskRoleArn: string; executionRoleArn: string }> {
   const client = new IAMClient({});
+  // GAP-263: checked before anything is written.
+  const mind = opts.memory === false ? false : { bucket: mindBucketName(), prefix: checkMindPrefix(opts.memoryPrefix || agentId) };
+  if (mind) await assertMindPrefixOwned(agentId, mind.bucket, mind.prefix, opts.probe ?? awsMindProbe());
 
   const assumeRolePolicyDocument = JSON.stringify({
     Version: "2012-10-17",
@@ -181,12 +254,10 @@ export async function provisionAgentRoles(
     }
   }
 
-  // 1b. The task role reaches only this agent's own mind prefix (GAP-249). A failure throws: a deploy must not leave a
-  // role with an older, wider grant in place.
-  await setMindAccess(client, taskRoleName, opts.memory === false ? false : { prefix: opts.memoryPrefix ?? agentId });
+  // 1b. Own mind prefix only (GAP-263). A failure throws rather than leave a wider grant.
+  await setMindAccess(client, taskRoleName, mind);
 
-  // 1c. No direct model access (E5, M1, GAP-249): model calls go through the gatekeeper-egress. Removes any grant an
-  // earlier version of this file, or a hand change, gave the role.
+  // 1c. No direct model access (E5, M1, GAP-263).
   await revokeDirectModelAccess(client, taskRoleName);
 
   // 2. Create Execution Role

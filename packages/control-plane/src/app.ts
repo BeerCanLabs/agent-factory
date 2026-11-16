@@ -40,7 +40,7 @@ import {
   type SkillSource,
   type GroupStore,
 } from '@beercanlabs/factory-registrar';
-import { AdmissionRefusedError, SYSTEM, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, SYSTEM, ownMindPrefix, activeRun, applyKillSwitch, blockRun, createRun, deliverToMailbox, finishRun, haltUnhealthy, isTerminal, markRunReady, resetAgent, routeEvents, scheduleTimeout, unblockRun, type CallbackPolicy, type DeployProvider, type Run, type RunStore, type Runtime, type RunTokens, type SourceRef, type MailboxMessage, type MailboxQueue } from '@beercanlabs/factory-property-manager';
 import { ZERO_BUDGET_LIMITS, isZeroPrice, checkStanding, spendDetail, type BudgetLimits, type Price, type SpendTracker } from '@beercanlabs/factory-budget';
 import {
   AGENT_SCOPED,
@@ -5203,6 +5203,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
     const recordId = typeof cartridge.id === 'string' ? cartridge.id : agentId;
     const previousAgent = state.agents.get(recordId);
+    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
+      ? (cartridge.persistence as { prefix: string }).prefix
+      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
+    // GAP-263: refuse an invalid mind prefix, or one another agent holds, before anything is recorded.
+    try {
+      ownMindPrefix(state.agents.values(), { id: recordId, memoryPrefix });
+    } catch (err: any) {
+      const taken = /already belongs/.test(err.message);
+      json(res, taken ? 409 : 400, { error: taken ? 'mind_prefix_taken' : 'invalid_mind_prefix', message: err.message });
+      return;
+    }
     const hasCartridgeWrapper = Boolean(body.cartridge && typeof body.cartridge === 'object');
     const rawKind = body.kind !== undefined ? body.kind : cartridge.kind;
     // On re-registration (`previousAgent !== undefined`), `cartridge.accountableLead` inside `body.cartridge` is the
@@ -5373,9 +5384,6 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const ungated = classified.ungated;
     const gated = classified.gated;
     const triggers = (Array.isArray(cartridge.triggers) ? cartridge.triggers : (Array.isArray(body.triggers) ? body.triggers : [])) as Surface['triggers'];
-    const memoryPrefix = (typeof cartridge.persistence === 'object' && cartridge.persistence !== null && 'prefix' in cartridge.persistence)
-      ? (cartridge.persistence as { prefix: string }).prefix
-      : (typeof cartridge.memory === 'object' && cartridge.memory !== null && 'prefix' in cartridge.memory ? (cartridge.memory as { prefix: string }).prefix : agentId);
 
     const warmDownSeconds = (typeof cartridge.runtime === 'object' && cartridge.runtime !== null && 'warmDownSeconds' in cartridge.runtime)
       ? Number((cartridge.runtime as { warmDownSeconds: number }).warmDownSeconds)

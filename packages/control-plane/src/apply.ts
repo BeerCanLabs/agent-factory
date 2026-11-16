@@ -12,7 +12,7 @@
  */
 import { BUILTIN_AGENT_IDS, admissionOf, admit, beginAdmission, pinSource, stateAfterRefusal, interruptedAdmission, type AgentRecord, type ConfigSkill } from '@beercanlabs/factory-registrar';
 import { redactSecrets } from '@beercanlabs/factory-ledger';
-import { AdmissionRefusedError, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-property-manager';
+import { AdmissionRefusedError, ownMindPrefix, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type SourceRef } from '@beercanlabs/factory-property-manager';
 import { type FactoryState } from './app.js';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { skillRegistry } from './skills.js';
@@ -148,7 +148,7 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     agent.admission = admissionOf(outcome);
     row(state, agentId, 'AGENT_ADMITTED', actor, commit);
     console.log(`[control-plane] Provisioning identity for ${agentId}...`);
-    const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires, { memoryPrefix: agent.memoryPrefix ?? agentId });
+    const { identity, executionIdentity } = await dp.provisionIdentity(agentId, agent.requires, { memoryPrefix: ownMindPrefix(state.agents.values(), agent) });
     console.log(`[control-plane] Registering compute for ${agentId} with ${imageUri}...`);
     // SK4: the Landlord names where the skills manifest is; what the cartridge does with it is the cartridge's.
     const launchEnv = skills.length ? { [SKILLS_MANIFEST_ENV]: SKILLS_MANIFEST_PATH } : undefined;

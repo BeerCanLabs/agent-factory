@@ -15,7 +15,7 @@ import {
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createProbeServer, FactoryState, relinkVendorModels } from './app.js';
-import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
+import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createRun, dockerApi, dockerDeployProvider, dockerRuntime, ecsRuntime, FileRunStore, finishRun, memoryRuntime, migrateAgentIdentities, parseImageMap, parseJobMap, parseTaskMap, reconcileRuns, RunTokens, startQueuePollers, SYSTEM, type DeployProvider } from '@beercanlabs/factory-property-manager';
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
@@ -37,7 +37,6 @@ import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
 import { startTransferSweeper } from './transfers.js';
-import { migrateAgentIdentities } from './identity-migration.js';
 
 export {
   convertLegacyOwners,
@@ -375,8 +374,7 @@ try {
 
 recoverInterruptedDeploys(state);
 await reconcileRuns(state);
-// GAP-249: re-scope every existing agent role to its own mind prefix and strip direct model access. In the
-// background: IAM calls must not hold up the API, and the migration never throws.
+// GAP-263: re-scope existing agent roles. In the background; it never throws.
 void migrateAgentIdentities(state.agents.values(), deployProvider);
 
 setInterval(() => void checkHealth(state), 15_000).unref();

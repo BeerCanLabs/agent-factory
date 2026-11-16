@@ -56,7 +56,7 @@ import {
 } from './app.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, parseOwners, recordConfig, removeConfig } from './config-store.js';
-import { SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
+import { ownMindPrefix, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
 import { runActivationSmoke } from './smoke.js';
 import { adoptContextForAgent, agentAuthorityActors, skillRegistry, activeDefaultSkills } from './skills.js';
 
@@ -919,7 +919,7 @@ export async function deployConfigured(state: FactoryState, agent: AgentRecord, 
   agent.state = 'DEPLOYING';
   registryOf(state).save(agent);
   try {
-    const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, [], { memoryPrefix: agent.memoryPrefix ?? agent.id });
+    const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, [], { memoryPrefix: ownMindPrefix(state.agents.values(), agent) });
     await dp.registerCompute(agent.id, pin.image, [], identity, executionIdentity, agent.memoryPrefix ?? agent.id);
     agent.artifact = pin.image;
     agent.deployedCommit = pin.commit;
@@ -1392,7 +1392,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     };
 
     if (validatedSkills.length === 0) {
-      const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires, { memoryPrefix: agent.memoryPrefix ?? agent.id });
+      const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires, { memoryPrefix: ownMindPrefix(state.agents.values(), agent) });
       await dp.registerCompute(agent.id, pin.image, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agent.id);
       agent.artifact = pin.image;
       agent.deployedCommit = pin.commit;
@@ -1529,7 +1529,7 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
   } catch (err: any) {
     if (prevArtifact) {
       try {
-        const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires, { memoryPrefix: agent.memoryPrefix ?? agent.id });
+        const { identity, executionIdentity } = await dp.provisionIdentity(agent.id, agent.requires, { memoryPrefix: ownMindPrefix(state.agents.values(), agent) });
         await dp.registerCompute(
           agent.id,
           prevArtifact,
