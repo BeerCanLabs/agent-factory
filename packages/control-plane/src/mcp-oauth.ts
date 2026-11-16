@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { hashApiKey, sameHash, type Principal } from '@beercanlabs/factory-auth';
+import { hashApiKey, sameHash, type Principal, type KeyScopes } from '@beercanlabs/factory-auth';
 import { MemoryDocBackend, snapshotSha256, type VersionedDocBackend } from '@beercanlabs/factory-bouncer';
 import { actorIsAdmin, identify, json, readBody, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import { sessionEmail } from './login.js';
@@ -59,6 +59,8 @@ export type PendingOAuthRequest = {
   scope?: string;
   resource?: string;
   expiresAt: number;
+  csrfToken?: string;
+  principalId?: string;
 };
 
 export type PendingAuthCode = {
@@ -261,16 +263,7 @@ export class McpOAuthStore {
     if (u.protocol !== 'https:' || u.pathname.length <= 1) {
       throw new Error('invalid_client_uri: must be https with non-root path');
     }
-    const host = u.hostname.toLowerCase();
-    if (
-      host === 'localhost' ||
-      host === '127.0.0.1' ||
-      host === '::1' ||
-      /^10\./.test(host) ||
-      /^192\.168\./.test(host) ||
-      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host) ||
-      /^169\.254\./.test(host)
-    ) {
+    if (isPrivateOrInternalHost(u.hostname)) {
       throw new Error('invalid_client_uri: private hostnames forbidden');
     }
 
@@ -279,13 +272,35 @@ export class McpOAuthStore {
     if (existing) return existing;
 
     const res = await fetchFn(clientUri, {
+      redirect: 'error',
       signal: AbortSignal.timeout(5000),
       headers: { accept: 'application/json' },
     });
     if (!res.ok) throw new Error(`cimd_fetch_failed: HTTP ${res.status}`);
 
-    const raw = await res.text();
-    if (raw.length > 32768) throw new Error('cimd_document_too_large: max 32KB');
+    const cl = res.headers?.get ? res.headers.get('content-length') : undefined;
+    if (cl && Number(cl) > 32768) {
+      throw new Error('cimd_document_too_large: max 32KB');
+    }
+
+    let raw = '';
+    if (res.body && typeof (res.body as any)[Symbol.asyncIterator] === 'function') {
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      for await (const chunk of res.body as any) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        totalBytes += buf.length;
+        if (totalBytes > 32768) {
+          throw new Error('cimd_document_too_large: max 32KB');
+        }
+        chunks.push(buf);
+      }
+      raw = Buffer.concat(chunks).toString('utf8');
+    } else {
+      raw = await res.text();
+      if (raw.length > 32768) throw new Error('cimd_document_too_large: max 32KB');
+    }
+
     let data: any;
     try {
       data = JSON.parse(raw);
@@ -317,8 +332,21 @@ export class McpOAuthStore {
   checkDcrRateLimit(ip: string): boolean {
     const now = Date.now();
     const windowStart = now - 60000;
+    if (this.dcrRateLimits.size > 1000) {
+      for (const [key, times] of this.dcrRateLimits.entries()) {
+        const active = times.filter((t) => t > windowStart);
+        if (active.length === 0) {
+          this.dcrRateLimits.delete(key);
+        } else {
+          this.dcrRateLimits.set(key, active);
+        }
+      }
+    }
     let timestamps = this.dcrRateLimits.get(ip) ?? [];
     timestamps = timestamps.filter((t) => t > windowStart);
+    if (timestamps.length === 0) {
+      this.dcrRateLimits.delete(ip);
+    }
     if (timestamps.length >= 20) {
       this.dcrRateLimits.set(ip, timestamps);
       return false;
@@ -781,6 +809,8 @@ async function handleAuthorizeGet(
     state: clientState,
     scope,
     resource,
+    csrfToken,
+    principalId,
   });
 
   const html = `<!doctype html>
@@ -869,6 +899,22 @@ async function handleAuthorizePost(
     return json(res, 400, { error: 'invalid_request', message: 'Consent request expired or invalid' }), true;
   }
 
+  // F1: Verify authenticated session principal matches consent request
+  if (pending.principalId && pending.principalId !== principalId) {
+    return json(res, 403, { error: 'principal_mismatch', message: 'Authenticated user does not match consent request' }), true;
+  }
+
+  // F1: Verify CSRF token using timingSafeEqual
+  const formCsrf = form.get('csrf_token') ?? '';
+  if (!pending.csrfToken || !formCsrf) {
+    return json(res, 403, { error: 'invalid_csrf_token', message: 'Missing CSRF token' }), true;
+  }
+  const bufExpected = Buffer.from(pending.csrfToken, 'utf8');
+  const bufActual = Buffer.from(formCsrf, 'utf8');
+  if (bufExpected.length !== bufActual.length || !timingSafeEqual(bufExpected, bufActual)) {
+    return json(res, 403, { error: 'invalid_csrf_token', message: 'Invalid CSRF token' }), true;
+  }
+
   const redirectUrl = new URL(pending.redirectUri);
   if (decision === 'deny') {
     redirectUrl.searchParams.set('error', 'access_denied');
@@ -949,25 +995,25 @@ async function handleTokenPost(
     const codeVerifier = body.code_verifier;
 
     if (!code || !clientId || !redirectUri || !codeVerifier) {
-      return json(res, 400, { error: 'invalid_request', message: 'code, client_id, redirect_uri, and code_verifier required' }), true;
+      return json(res, 400, { error: 'invalid_request', error_description: 'code, client_id, redirect_uri, and code_verifier required' }), true;
     }
 
     const auth = store.takeAuthCode(code);
     if (!auth) {
-      return json(res, 400, { error: 'invalid_grant', message: 'Invalid or expired authorization code' }), true;
+      return json(res, 400, { error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }), true;
     }
 
     if (auth.clientId !== clientId) {
-      return json(res, 400, { error: 'invalid_grant', message: 'client_id mismatch' }), true;
+      return json(res, 400, { error: 'invalid_grant', error_description: 'client_id mismatch' }), true;
     }
     if (!matchesRedirectUri(auth.redirectUri, redirectUri)) {
-      return json(res, 400, { error: 'invalid_grant', message: 'redirect_uri mismatch' }), true;
+      return json(res, 400, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' }), true;
     }
 
     // Verify PKCE
     const verifierHash = b64url(sha256(codeVerifier));
     if (verifierHash !== auth.codeChallenge) {
-      return json(res, 400, { error: 'invalid_grant', message: 'PKCE verification failed' }), true;
+      return json(res, 400, { error: 'invalid_grant', error_description: 'PKCE verification failed' }), true;
     }
 
     const client = store.getClient(clientId);
@@ -976,10 +1022,11 @@ async function handleTokenPost(
     const deviceFamily = `mcp:${clientId.slice(0, 60)}`;
 
     if (!state.keys) {
-      return json(res, 503, { error: 'key_store_unavailable' }), true;
+      return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
     }
 
     // Create or rotate 1-hour fk_at_ key in KeyStore
+    const scopes = mapOAuthScopeToKeyScopes(auth.scope);
     const existingKey = state.keys.list({ owner: auth.principalId }).find((k) => k.deviceFamily === deviceFamily);
     const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
     let keyOut: { record: any; plaintext: string };
@@ -992,6 +1039,7 @@ async function handleTokenPost(
         audience: canonicalMcp,
         oauthClientId: clientId,
         oauthClientName: clientName,
+        scopes,
       });
     } else {
       keyOut = await state.keys.create({
@@ -1003,6 +1051,7 @@ async function handleTokenPost(
         audience: canonicalMcp,
         oauthClientId: clientId,
         oauthClientName: clientName,
+        scopes,
       });
     }
 
@@ -1039,7 +1088,7 @@ async function handleTokenPost(
   if (grantType === 'refresh_token') {
     const refreshToken = body.refresh_token;
     if (!refreshToken || typeof refreshToken !== 'string') {
-      return json(res, 400, { error: 'invalid_request', message: 'refresh_token is required' }), true;
+      return json(res, 400, { error: 'invalid_request', error_description: 'refresh_token is required' }), true;
     }
 
     const tokenHash = hashApiKey(refreshToken);
@@ -1063,7 +1112,7 @@ async function handleTokenPost(
         subject: rec.clientId,
         via: `mcp:${rec.clientId}`,
       });
-      return json(res, 400, { error: 'invalid_grant', error_description: 'Refresh token reuse detected' }), true;
+      return json(res, 400, { error: 'invalid_grant', error_description: 'Refresh token reuse detected; family revoked' }), true;
     }
 
     if (!rec || rec.familyRevoked || Date.parse(rec.expiresAt) <= Date.now()) {
@@ -1071,11 +1120,12 @@ async function handleTokenPost(
     }
 
     if (!state.keys) {
-      return json(res, 503, { error: 'key_store_unavailable' }), true;
+      return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
     }
 
     // Advance family generation & rotate KeyStore fk_at_ key (+1h TTL)
     const newExpiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+    const scopes = mapOAuthScopeToKeyScopes(rec.scope);
     const keyOut = await state.keys.rotate(rec.keyId, {
       by: rec.principalId,
       expiresAt: newExpiresAt,
@@ -1083,6 +1133,7 @@ async function handleTokenPost(
       audience: rec.audience,
       oauthClientId: rec.clientId,
       oauthClientName: rec.clientName,
+      scopes,
     });
 
     const newRefreshToken = 'fk_rt_' + b64url(randomBytes(32));
@@ -1100,7 +1151,7 @@ async function handleTokenPost(
     }), true;
   }
 
-  return json(res, 400, { error: 'unsupported_grant_type' }), true;
+  return json(res, 400, { error: 'unsupported_grant_type', error_description: 'Grant type not supported' }), true;
 }
 
 async function handleRevokePost(
@@ -1216,4 +1267,50 @@ async function handleConsentDelete(
   });
 
   return json(res, 200, { ok: true, revoked: existed }), true;
+}
+
+export function isPrivateOrInternalHost(rawHostname: string): boolean {
+  let host = rawHostname.toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) {
+    host = host.slice(1, -1);
+  }
+  if (
+    host === 'localhost' ||
+    host === 'localhost.localdomain' ||
+    host.endsWith('.internal') ||
+    host.endsWith('.local')
+  ) {
+    return true;
+  }
+  // IPv4 checks
+  if (
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^0\./.test(host)
+  ) {
+    return true;
+  }
+  // IPv6 checks
+  if (
+    host === '::1' ||
+    host === '::' ||
+    /^f[cd][0-9a-f]{2}:/i.test(host) ||
+    /^fe[89ab][0-9a-f]:/i.test(host) ||
+    /^::ffff:(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)/i.test(host)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function mapOAuthScopeToKeyScopes(scopeStr?: string): KeyScopes | undefined {
+  if (!scopeStr || scopeStr.trim() === '' || scopeStr.trim() === 'mcp:full') return undefined;
+  const parts = scopeStr.split(/\s+/).filter(Boolean);
+  if (parts.length === 0 || parts.includes('mcp:full')) return undefined;
+  const privs = new Set(parts);
+  privs.add('mcp.use');
+  return { privileges: Array.from(privs) };
 }

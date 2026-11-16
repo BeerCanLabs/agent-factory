@@ -42,7 +42,7 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
   const challenges = new Map<string, string>();
   let lastTokenForm: URLSearchParams | undefined;
 
-  const mockCimdDocs = new Map<string, Record<string, unknown>>();
+  const mockCimdDocs = new Map<string, any>();
 
   const oauthFetch = (async (input: string | URL, init?: RequestInit) => {
     const urlStr = String(input);
@@ -51,7 +51,10 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
 
     if (mockCimdDocs.has(urlStr)) {
-      return j(mockCimdDocs.get(urlStr)!);
+      const val = mockCimdDocs.get(urlStr)!;
+      if (typeof val === 'function') return val(init);
+      if (val instanceof Response) return val;
+      return j(val);
     }
 
     if (u.pathname === '/.well-known/openid-configuration') {
@@ -93,6 +96,12 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     });
 
   const sessionCookieOf = (r: Response) => (r.headers.get('set-cookie') ?? '').split(';')[0];
+
+  function extractConsentForm(html: string): { nonce: string; csrfToken: string } {
+    const nonce = html.match(/name="consent_nonce"\s+value="([^"]+)"/)?.[1] ?? '';
+    const csrfToken = html.match(/name="csrf_token"\s+value="([^"]+)"/)?.[1] ?? '';
+    return { nonce, csrfToken };
+  }
 
   before(async () => {
     dir = mkdtempSync(join(tmpdir(), 'tsk-339-mcp-oauth-'));
@@ -266,6 +275,46 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     assert.equal(cimdAuthRes.status, 200);
     const html = await cimdAuthRes.text();
     assert.ok(html.includes('Verified CIMD App'), 'CIMD metadata was fetched and displayed');
+
+    // D) CIMD SSRF & private host rejection
+    const privateHosts = [
+      'https://[::1]/metadata.json',
+      'https://127.0.0.2/metadata.json',
+      'https://169.254.169.254/latest/meta-data',
+      'https://metadata.internal/oauth.json',
+      'https://service.local/oauth.json',
+    ];
+    for (const hostUri of privateHosts) {
+      await assert.rejects(
+        state.mcpOAuthStore!.fetchCimd(hostUri, state.oauthFetch ?? fetch),
+        /invalid_client_uri: private hostnames forbidden/,
+        `Should reject private host: ${hostUri}`,
+      );
+    }
+
+    // E) CIMD redirect rejection (SSRF redirect protection)
+    const redirectUrl = 'https://redirect-test.example.com/oauth/metadata.json';
+    mockCimdDocs.set(redirectUrl, (init: any) => {
+      if (init?.redirect === 'error') {
+        throw new TypeError('Failed to fetch: redirect forbidden');
+      }
+      return new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/secret' } });
+    });
+    await assert.rejects(
+      state.mcpOAuthStore!.fetchCimd(redirectUrl, state.oauthFetch ?? fetch),
+      /Failed to fetch: redirect forbidden/,
+    );
+
+    // F) CIMD >32KB document rejection
+    const giantUrl = 'https://giant-doc.example.com/oauth/metadata.json';
+    mockCimdDocs.set(giantUrl, new Response('x'.repeat(40000), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-length': '40000' },
+    }));
+    await assert.rejects(
+      state.mcpOAuthStore!.fetchCimd(giantUrl, state.oauthFetch ?? fetch),
+      /cimd_document_too_large: max 32KB/,
+    );
   });
 
   it('4. Silent-consent attack test: a user ALREADY holding a live factory_session cookie hits GET /authorize for a newly registered DCR client -> gets 200 HTML consent screen (NEVER an auto-302 code redirect!), and POST /authorize from a cross-origin Origin header is rejected 403', async () => {
@@ -291,21 +340,58 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     assert.ok(html.includes('Authorize MCP Client'));
     assert.ok(html.includes('New Attack Client'));
 
-    // Extract consent_nonce from HTML
-    const nonceMatch = html.match(/name="consent_nonce"\s+value="([^"]+)"/);
-    assert.ok(nonceMatch, 'Consent form must contain consent_nonce');
-    const consentNonce = nonceMatch[1];
+    // Extract consent_nonce & csrf_token from HTML
+    const { nonce: consentNonce, csrfToken } = extractConsentForm(html);
+    assert.ok(consentNonce, 'Consent form must contain consent_nonce');
+    assert.ok(csrfToken, 'Consent form must contain csrf_token');
 
-    // POST /authorize from a cross-origin Origin (e.g. evil.com) must be refused 403
+    // 1) POST /authorize from a cross-origin Origin (e.g. evil.com) must be refused 403
     const evilPost = await postForm('/authorize', {
       consent_nonce: consentNonce,
       decision: 'approve',
-      csrf_token: 'dummy',
+      csrf_token: csrfToken,
     }, {
       cookie,
       origin: 'https://evil.com',
     });
     assert.equal(evilPost.status, 403, 'Cross-origin POST /authorize must be refused 403');
+
+    // 2) Tampered/dummy CSRF token must be refused 403 invalid_csrf_token
+    const tamperedCsrf = await postForm('/authorize', {
+      consent_nonce: consentNonce,
+      decision: 'approve',
+      csrf_token: 'dummy',
+    }, {
+      cookie,
+      origin: BASE,
+    });
+    assert.equal(tamperedCsrf.status, 403, 'Tampered CSRF token must be refused 403');
+    const csrfBody = (await tamperedCsrf.json()) as any;
+    assert.equal(csrfBody.error, 'invalid_csrf_token');
+
+    // Fresh consent screen for principal mismatch test
+    const authRes2 = await get(
+      `/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&code_challenge=challenge_456&code_challenge_method=S256`,
+      { cookie },
+    );
+    const { nonce: consentNonce2, csrfToken: csrfToken2 } = extractConsentForm(await authRes2.text());
+
+    // 3) Wrong principal session attempting to approve must be refused 403 principal_mismatch
+    await state.principals.create({ id: 'user:bob', displayName: 'Bob', emails: ['bob@example.com'], by: 'user:admin' });
+    await state.grants.grant({ subject: 'user:bob', scope: { kind: 'fleet' }, role: 'admin', by: 'user:admin', granterIsAdmin: true });
+    const bobCookie = createUserSession('bob@example.com');
+
+    const mismatchPost = await postForm('/authorize', {
+      consent_nonce: consentNonce2,
+      decision: 'approve',
+      csrf_token: csrfToken2,
+    }, {
+      cookie: bobCookie,
+      origin: BASE,
+    });
+    assert.equal(mismatchPost.status, 403, 'Wrong principal session must be refused 403');
+    const mismatchBody = (await mismatchPost.json()) as any;
+    assert.equal(mismatchBody.error, 'principal_mismatch');
   });
 
   it('5. Full PKCE S256 flow (/login -> /authorize consent -> 302 with code, state, and RFC 9207 iss -> POST /token -> fk_at_ + fk_rt_)', async () => {
@@ -337,13 +423,13 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     const consentRes = await get(`/authorize?oauth_req=${encodeURIComponent(oauthReqNonce)}`, { cookie });
     assert.equal(consentRes.status, 200);
     const consentHtml = await consentRes.text();
-    const consentNonce = consentHtml.match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
+    const { nonce: consentNonce, csrfToken } = extractConsentForm(consentHtml);
 
     // 4) User submits approval on consent screen
     const approveRes = await postForm('/authorize', {
       consent_nonce: consentNonce,
       decision: 'approve',
-      csrf_token: 'dummy',
+      csrf_token: csrfToken,
     }, {
       cookie,
       origin: BASE,
@@ -387,8 +473,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       `/authorize?client_id=${regA.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:4001/callback')}&response_type=code&code_challenge=${challengeA}&code_challenge_method=S256`,
       { cookie },
     );
-    const nonceA = (await authResA.text()).match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
-    const approveA = await postForm('/authorize', { consent_nonce: nonceA, decision: 'approve', csrf_token: 'dummy' }, { cookie, origin: BASE });
+    const { nonce: nonceA, csrfToken: csrfTokenA } = extractConsentForm(await authResA.text());
+    const approveA = await postForm('/authorize', { consent_nonce: nonceA, decision: 'approve', csrf_token: csrfTokenA }, { cookie, origin: BASE });
     const codeA = new URL(approveA.headers.get('location')!).searchParams.get('code')!;
     const tokResA = await postForm('/token', {
       grant_type: 'authorization_code',
@@ -412,8 +498,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       `/authorize?client_id=${regB.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:4002/callback')}&response_type=code&code_challenge=${challengeB}&code_challenge_method=S256`,
       { cookie },
     );
-    const nonceB = (await authResB.text()).match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
-    const approveB = await postForm('/authorize', { consent_nonce: nonceB, decision: 'approve', csrf_token: 'dummy' }, { cookie, origin: BASE });
+    const { nonce: nonceB, csrfToken: csrfTokenB } = extractConsentForm(await authResB.text());
+    const approveB = await postForm('/authorize', { consent_nonce: nonceB, decision: 'approve', csrf_token: csrfTokenB }, { cookie, origin: BASE });
     const codeB = new URL(approveB.headers.get('location')!).searchParams.get('code')!;
     const tokResB = await postForm('/token', {
       grant_type: 'authorization_code',
@@ -459,8 +545,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       `/authorize?client_id=${reg.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:5001/callback')}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`,
       { cookie },
     );
-    const nonce = (await authRes.text()).match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
-    const approve = await postForm('/authorize', { consent_nonce: nonce, decision: 'approve', csrf_token: 'dummy' }, { cookie, origin: BASE });
+    const { nonce, csrfToken } = extractConsentForm(await authRes.text());
+    const approve = await postForm('/authorize', { consent_nonce: nonce, decision: 'approve', csrf_token: csrfToken }, { cookie, origin: BASE });
     const code = new URL(approve.headers.get('location')!).searchParams.get('code')!;
 
     const tokRes = await postForm('/token', {
@@ -512,8 +598,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       `/authorize?client_id=${reg.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:6001/callback')}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`,
       { cookie },
     );
-    const nonce = (await authRes.text()).match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
-    const approve = await postForm('/authorize', { consent_nonce: nonce, decision: 'approve', csrf_token: 'dummy' }, { cookie, origin: BASE });
+    const { nonce, csrfToken } = extractConsentForm(await authRes.text());
+    const approve = await postForm('/authorize', { consent_nonce: nonce, decision: 'approve', csrf_token: csrfToken }, { cookie, origin: BASE });
     const code = new URL(approve.headers.get('location')!).searchParams.get('code')!;
 
     const tokRes = await postForm('/token', {
@@ -553,7 +639,7 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     assert.equal(replayRes.status, 400);
     const replayBody = (await replayRes.json()) as any;
     assert.equal(replayBody.error, 'invalid_grant');
-    assert.equal(replayBody.error_description, 'Refresh token reuse detected');
+    assert.equal(replayBody.error_description, 'Refresh token reuse detected; family revoked');
 
     // Entire family revoked! fk_at_2 is now invalid!
     const callAfterReplay = await postJson('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, {
@@ -576,8 +662,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       `/authorize?client_id=${regDur.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:7001/callback')}&response_type=code&code_challenge=${challengeDur}&code_challenge_method=S256`,
       { cookie },
     );
-    const nonceDur = (await authDur.text()).match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
-    const approveDur = await postForm('/authorize', { consent_nonce: nonceDur, decision: 'approve', csrf_token: 'dummy' }, { cookie, origin: BASE });
+    const { nonce: nonceDur, csrfToken: csrfTokenDur } = extractConsentForm(await authDur.text());
+    const approveDur = await postForm('/authorize', { consent_nonce: nonceDur, decision: 'approve', csrf_token: csrfTokenDur }, { cookie, origin: BASE });
     const codeDur = new URL(approveDur.headers.get('location')!).searchParams.get('code')!;
 
     const tokDur = (await (await postForm('/token', {
@@ -623,8 +709,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
       `/authorize?client_id=${reg.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:8001/callback')}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256`,
       { cookie },
     );
-    const nonce = (await authRes.text()).match(/name="consent_nonce"\s+value="([^"]+)"/)![1];
-    const approve = await postForm('/authorize', { consent_nonce: nonce, decision: 'approve', csrf_token: 'dummy' }, { cookie, origin: BASE });
+    const { nonce, csrfToken } = extractConsentForm(await authRes.text());
+    const approve = await postForm('/authorize', { consent_nonce: nonce, decision: 'approve', csrf_token: csrfToken }, { cookie, origin: BASE });
     const code = new URL(approve.headers.get('location')!).searchParams.get('code')!;
 
     const tokRes = await postForm('/token', {
@@ -667,5 +753,93 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     // 5) Ledger records MCP_OAUTH_REVOKED
     const revokeLedger = state.ledger.query().filter((e) => e.action === `MCP_OAUTH_REVOKED:${reg.client_id}`);
     assert.ok(revokeLedger.length >= 1, 'Revocation must be ledgered');
+  });
+
+  it('10. Scoped permissions test: a client consented only to agents.read sees ONLY agents.read tools and gets isError: true on other privileges held by the user', async () => {
+    const cookie = createUserSession('stephanie@example.com');
+    const reg = (await (await postJson('/api/v1/auth/register', {
+      client_name: 'ReadOnly App',
+      redirect_uris: ['http://127.0.0.1:7777/callback'],
+    })).json()) as any;
+
+    const verifier = 'verifier_scope_test_12345678901234567';
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+
+    // Stephanie has full admin/fleet grants.
+    // Client requests scope: "agents.read"
+    const authRes = await get(
+      `/authorize?client_id=${reg.client_id}&redirect_uri=${encodeURIComponent('http://127.0.0.1:7777/callback')}&response_type=code&code_challenge=${challenge}&code_challenge_method=S256&scope=agents.read`,
+      { cookie },
+    );
+    assert.equal(authRes.status, 200);
+    const html = await authRes.text();
+    assert.ok(html.includes('agents.read'), 'Consent screen displays requested scope agents.read');
+
+    const { nonce, csrfToken } = extractConsentForm(html);
+    const approve = await postForm('/authorize', {
+      consent_nonce: nonce,
+      decision: 'approve',
+      csrf_token: csrfToken,
+    }, {
+      cookie,
+      origin: BASE,
+    });
+    assert.equal(approve.status, 302);
+    const code = new URL(approve.headers.get('location')!).searchParams.get('code')!;
+
+    // Token exchange
+    const tokRes = await postForm('/token', {
+      grant_type: 'authorization_code',
+      code,
+      client_id: reg.client_id,
+      redirect_uri: 'http://127.0.0.1:7777/callback',
+      code_verifier: verifier,
+    });
+    assert.equal(tokRes.status, 200);
+    const tokData = (await tokRes.json()) as any;
+    assert.equal(tokData.scope, 'agents.read');
+    const fkAt = tokData.access_token;
+
+    // 1) tools/list with this token should only include tools requiring agents.read or mcp.use
+    const listRes = await postJson('/mcp', {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    }, {
+      authorization: `Bearer ${fkAt}`,
+    });
+    assert.equal(listRes.status, 200);
+    const listData = (await listRes.json()) as any;
+    const toolNames = listData.result?.tools?.map((t: any) => t.name) ?? [];
+    assert.ok(toolNames.includes('list_agents'), 'agents.read tool list_agents must be present');
+    assert.ok(!toolNames.includes('create_agent'), 'agents.write tool create_agent must NOT be present');
+    assert.ok(!toolNames.includes('set_default_model'), 'models.manage tool must NOT be present');
+
+    // 2) tools/call on list_agents succeeds
+    const callAllowed = await postJson('/mcp', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'list_agents', arguments: {} },
+    }, {
+      authorization: `Bearer ${fkAt}`,
+    });
+    assert.equal(callAllowed.status, 200);
+    const allowedBody = (await callAllowed.json()) as any;
+    assert.equal(allowedBody.result?.isError, undefined);
+    assert.ok(allowedBody.result?.content?.[0]?.text?.includes('castle'));
+
+    // 3) tools/call on create_agent fails with isError: true (403 forbidden / privilege missing)
+    const callForbidden = await postJson('/mcp', {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'create_agent', arguments: { name: 'unauthorized-agent' } },
+    }, {
+      authorization: `Bearer ${fkAt}`,
+    });
+    assert.equal(callForbidden.status, 200);
+    const forbiddenBody = (await callForbidden.json()) as any;
+    assert.equal(forbiddenBody.result?.isError, true, 'Executing ungranted tool must return isError: true');
   });
 });

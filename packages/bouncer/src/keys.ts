@@ -201,6 +201,7 @@ export class ApiKeyStore {
       audience?: string;
       oauthClientId?: string;
       oauthClientName?: string;
+      scopes?: KeyScopes;
     },
   ): Promise<{ record: ApiKeyRecord; plaintext: string }> {
     return this.serial(async () => {
@@ -240,6 +241,11 @@ export class ApiKeyStore {
           ? { oauthClientName: input.oauthClientName }
           : cur.oauthClientName
             ? { oauthClientName: cur.oauthClientName }
+            : {}),
+        ...(input.scopes !== undefined
+          ? (input.scopes ? { scopes: structuredClone(input.scopes) } : {})
+          : cur.scopes
+            ? { scopes: structuredClone(cur.scopes) }
             : {}),
       };
       delete next.graceHash;
