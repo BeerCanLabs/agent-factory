@@ -198,13 +198,6 @@ export type DeployProvider = {
   buildSkillsImage?(agentId: string, base: { image: string; commit: string }, skills: BuildSkill[]): Promise<string>;
   /** Provision IAM / roles / service accounts for the agent. GAP-263: it reaches only `memoryPrefix`, which it must own. */
   provisionIdentity(agentId: string, secrets: string[], opts?: { memoryPrefix?: string }): Promise<{ identity: string; executionIdentity?: string }>;
-  /** GAP-263 start-up migration (identity-migration.ts). Optional: a provider without these has nothing to migrate. */
-  reconcileIdentity?(
-    agentId: string,
-    opts: { memoryPrefix?: string; narrow?: boolean },
-  ): Promise<{ outcome: 'updated' | 'no-role' | 'mismatch' | 'not-narrowed'; revoked: string[]; detail?: string }>;
-  listIdentities?(): Promise<string[]>;
-  retireIdentity?(agentId: string): Promise<{ revoked: string[] }>;
   /** Register the agent's compute definition (ECS task def, Cloud Run job, etc.). */
   /** `memoryPrefix`: the agent's mind prefix; the runtime must hand it to the shim (MEMORY_STORE_URI + MEMORY_PREFIX). */
   /** `launchEnv`: non-secret environment the Landlord names at launch (SK4: where the skills manifest is). */

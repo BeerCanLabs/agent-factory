@@ -4,8 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { IAMClient } from '@aws-sdk/client-iam';
 import {
-  awsMindProbe, checkMindPrefix, listAgentTaskRoleIds, mindBucketName, mindPolicyDocument, MIND_POLICY, provisionAgentRoles, reconcileAgentTaskRole,
-  retireAgentTaskRole, type MindProbe,
+  awsMindProbe, checkMindPrefix, mindBucketName, mindPolicyDocument, MIND_POLICY, provisionAgentRoles, type MindProbe,
 } from './iam.js';
 import { ECSClient } from '@aws-sdk/client-ecs';
 import { MindPrefixRefusedError } from '../mind-prefix.js';
@@ -205,42 +204,6 @@ describe('agent task roles: own mind prefix only, no direct model access (GAP-26
     assert.equal(mindPuts(calls).length, 2);
   });
 
-  it('reconcile narrows only when the task definition uses the same prefix; it still revokes Bedrock, and skips a missing role', async () => {
-    let calls = recordingIam({ attached: [[bedrock]] });
-    const r = await reconcileAgentTaskRole('higgins', { memoryPrefix: 'higgins-state', probe: probe({ higgins: 'higgins-state' }) });
-    assert.deepEqual(r, { role: 'AgentTaskRole-higgins', outcome: 'updated', revoked: ['BedrockConverseAccess', 'AgentBedrockModelInvocation'] });
-    assert.match(mindPuts(calls)[0].input.PolicyDocument, /\/higgins-state\/\*/);
-    assert.ok(!calls.some((c) => c.name === 'CreateRole'));
-    for (const live of ['skippy-old', null]) {
-      mock.restoreAll();
-      calls = recordingIam({ attached: [[bedrock]] });
-      const m = await reconcileAgentTaskRole('skippy', { memoryPrefix: 'skippy', probe: probe({ skippy: live }) });
-      assert.equal(m.outcome, 'mismatch');
-      assert.match(m.detail!, live ? /agent-skippy uses "skippy-old"/ : /no ACTIVE task definition/);
-      assert.ok(!mindPuts(calls).length && !mindDeleted(calls), 'mind grant untouched');
-      assert.deepEqual(m.revoked, ['BedrockConverseAccess', 'AgentBedrockModelInvocation']);
-    }
-    mock.restoreAll();
-    recordingIam();
-    const p = probe();
-    assert.equal((await reconcileAgentTaskRole('a', { memoryPrefix: 'shared', narrow: false, probe: p })).outcome, 'not-narrowed');
-    assert.deepEqual(p.asked, []);
-    mock.restoreAll();
-    calls = recordingIam({ roleExists: false });
-    assert.equal((await reconcileAgentTaskRole('echo-agent', { probe: probe() })).outcome, 'no-role');
-    assert.deepEqual(calls.map((c) => c.name), ['GetRole']);
-  });
-
-  it('lists agent task roles across pages, and retires one with no record without guessing a prefix', async () => {
-    let calls = recordingIam({ roles: [['AgentTaskRole-archie', 'factory-prod-control-plane'], ['AgentExecutionRole-ghost', 'AgentTaskRole-ghost']] });
-    assert.deepEqual(await listAgentTaskRoleIds(), ['archie', 'ghost']);
-    assert.equal(calls.length, 2);
-    mock.restoreAll();
-    calls = recordingIam({ attached: [[bedrock]] });
-    assert.deepEqual((await retireAgentTaskRole('ghost')).revoked, ['BedrockConverseAccess', 'AgentBedrockModelInvocation']);
-    assert.ok(mindDeleted(calls) && !calls.some((c) => c.name === 'PutRolePolicy'));
-  });
-
   it('the AWS probe reads MEMORY_PREFIX from the live task definition and tells a missing one from a denied read', async () => {
     const ecs = new ECSClient({ region: 'us-east-1' });
     mock.method(ecs, 'send', async (cmd: { input: { taskDefinition: string } }) => {
@@ -272,7 +235,7 @@ describe('agent task roles: own mind prefix only, no direct model access (GAP-26
     assert.match(detach, /ArnEquals = \{\s*"iam:PolicyARN"/);
     const arns = [...detach.matchAll(/"arn:aws:iam::[^"]+:policy\/([^"]+)"/g)].map((m) => m[1]).sort();
     assert.deepEqual(arns, ['AgentBedrockModelInvocation', 'AmazonBedrockFullAccess', 'AmazonBedrockLimitedAccess']);
-    assert.deepEqual(actions(block('ReadAgentIdentities')), ['ecs:DescribeTaskDefinition', 'iam:ListRoles']);
+    assert.deepEqual(actions(block('ReadAgentTaskDefinitions')), ['ecs:DescribeTaskDefinition']);
     const list = block('ListMindKeys');
     assert.deepEqual(actions(list), ['s3:ListBucket']);
     assert.match(list, /Resource = aws_s3_bucket\.mind\.arn\n/);

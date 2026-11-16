@@ -7,7 +7,6 @@ import {
   DetachRolePolicyCommand,
   GetRoleCommand,
   ListAttachedRolePoliciesCommand,
-  ListRolesCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
 import { DescribeTaskDefinitionCommand, ECSClient } from "@aws-sdk/client-ecs";
@@ -18,7 +17,6 @@ export { checkMindPrefix };
 
 /** The task role's mind policy. Scoped to the agent's own prefix in the factory's one mind bucket (§6.6, E6). */
 export const MIND_POLICY = "MindPersistenceAccess";
-const TASK_ROLE_PREFIX = "AgentTaskRole-";
 /** E5, M1 (GAP-263): model calls go through the gatekeeper-egress. Direct Bedrock grants, revoked on deploy and at start. */
 export const DIRECT_MODEL_INLINE_POLICIES = ["BedrockConverseAccess"];
 export const DIRECT_MODEL_MANAGED_POLICIES = ["AgentBedrockModelInvocation", "AmazonBedrockFullAccess", "AmazonBedrockLimitedAccess"];
@@ -141,70 +139,6 @@ async function setMindAccess(client: IAMClient, roleName: string, memory: { buck
   await client.send(
     new PutRolePolicyCommand({ RoleName: roleName, PolicyName: MIND_POLICY, PolicyDocument: mindPolicyDocument(memory.bucket, memory.prefix) }),
   );
-}
-
-async function roleExists(client: IAMClient, role: string): Promise<boolean> {
-  try {
-    await client.send(new GetRoleCommand({ RoleName: role }));
-    return true;
-  } catch (err: any) {
-    if (isNoSuchEntity(err)) return false;
-    throw err;
-  }
-}
-
-export type ReconcileOutcome = "updated" | "no-role" | "mismatch" | "not-narrowed";
-
-/**
- * GAP-263 migration of one registered agent's existing role. Always revokes direct model access. Narrows the mind grant
- * only when the live task definition uses the same prefix; otherwise leaves it (`mismatch`). Never creates a role.
- */
-export async function reconcileAgentTaskRole(
-  agentId: string,
-  opts: { memoryPrefix?: string; narrow?: boolean; probe?: MindProbe } = {},
-): Promise<{ role: string; outcome: ReconcileOutcome; revoked: string[]; detail?: string }> {
-  const client = new IAMClient({});
-  const role = `AgentTaskRole-${agentId}`;
-  if (!(await roleExists(client, role))) return { role, outcome: "no-role", revoked: [] };
-  const prefix = opts.memoryPrefix || agentId;
-  let outcome: ReconcileOutcome = "not-narrowed";
-  let detail: string | undefined;
-  if (opts.narrow !== false) {
-    checkMindPrefix(prefix);
-    const live = await (opts.probe ?? awsMindProbe()).liveMindPrefix(agentId);
-    if (live.found && live.prefix === prefix) {
-      await setMindAccess(client, role, { bucket: mindBucketName(), prefix });
-      outcome = "updated";
-    } else {
-      outcome = "mismatch";
-      detail = live.found
-        ? `record prefix ${JSON.stringify(prefix)} but task definition agent-${agentId} uses ${live.prefix ? JSON.stringify(live.prefix) : "no MEMORY_PREFIX"}; mind grant left unchanged`
-        : `no ACTIVE task definition agent-${agentId}; mind grant left unchanged`;
-    }
-  }
-  const revoked = await revokeDirectModelAccess(client, role);
-  return { role, outcome, revoked, ...(detail ? { detail } : {}) };
-}
-
-export async function listAgentTaskRoleIds(): Promise<string[]> {
-  const client = new IAMClient({});
-  const ids: string[] = [];
-  let marker: string | undefined;
-  do {
-    const page = await client.send(new ListRolesCommand({ Marker: marker }));
-    for (const r of page.Roles ?? []) if (r.RoleName?.startsWith(TASK_ROLE_PREFIX)) ids.push(r.RoleName.slice(TASK_ROLE_PREFIX.length));
-    marker = page.IsTruncated ? page.Marker : undefined;
-  } while (marker);
-  return ids;
-}
-
-/** GAP-263: a role whose agent has no record (the factory does not delete roles) keeps no grants. No prefix is guessed. */
-export async function retireAgentTaskRole(agentId: string): Promise<{ role: string; revoked: string[] }> {
-  const client = new IAMClient({});
-  const role = `AgentTaskRole-${agentId}`;
-  await setMindAccess(client, role, false);
-  const revoked = await revokeDirectModelAccess(client, role);
-  return { role, revoked };
 }
 
 export async function provisionAgentRoles(

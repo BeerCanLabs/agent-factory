@@ -389,11 +389,11 @@ resource "aws_iam_role_policy" "control_plane_paas" {
         }
       },
       {
-        # GAP-263: roles with no record, and each task definition's MEMORY_PREFIX. Read-only; neither action supports
+        # GAP-263: a task definition's MEMORY_PREFIX, before a prefix is granted. Read-only; the action supports no
         # resource-level permissions, so "*" is the narrowest resource.
-        Sid      = "ReadAgentIdentities"
+        Sid      = "ReadAgentTaskDefinitions"
         Effect   = "Allow"
-        Action   = ["iam:ListRoles", "ecs:DescribeTaskDefinition"]
+        Action   = ["ecs:DescribeTaskDefinition"]
         Resource = "*"
       },
       {
