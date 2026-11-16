@@ -346,3 +346,49 @@ describe('Property Manager lifecycle concurrency & trigger attribution (#345)', 
   });
 });
 
+
+describe('GAP-255 policy env and bound secrets', () => {
+  it('never replaces a bound secret: the docker container gets the secret, and the other settings', async () => {
+    const created: Array<{ Env: string[] }> = [];
+    const api: DockerApi = async (_method, path, body: any) => {
+      if (path.startsWith('/containers/create')) {
+        created.push(body);
+        return { status: 201, body: { Id: 'c-env' } };
+      }
+      if (path.endsWith('/start')) return { status: 204, body: {} };
+      return { status: 200, body: {} };
+    };
+    const agent: AgentRecord = {
+      id: 'flow',
+      name: 'Flow',
+      role: 'agent',
+      state: 'SLEEPING',
+      provider: 'local',
+      artifact: '',
+      requires: ['SDLC_SHARED'],
+      triggers: [],
+      memoryPrefix: 'flow',
+      dir: '/tmp',
+    };
+    const state: PropertyManagerState = {
+      agents: new Map([['flow', agent]]),
+      ledger: new MemoryLedger(),
+      providers: [envProvider({ SDLC_SHARED: 'bound-secret-value' })],
+      runtime: dockerRuntime({ api, images: { flow: 'factory-agent-runtime:dev' }, network: 'test-net' }),
+      runs: new MemoryRunStore(),
+      runTokens: new RunTokens('pm-gap255-test-key-0123456789abcdef0123'),
+      callbacks: { allowedProtocols: ['http:', 'https:'], allowedHostnames: ['127.0.0.1'], allowPrivateIps: true },
+      policies: { get: () => ({ routes: [], models: [], env: { SDLC_SHARED: 'policy-value', SDLC_FLEET_CONFIG: '{}' } }), has: () => true },
+      spend: new SpendTracker(),
+      idleMs: 0,
+      idleTimers: new Map(),
+      secretValues: new Set(),
+    };
+    const r = await createRun(state, 'flow', { actor: 'factory:scheduler', trigger: 'schedule' });
+    assert.equal(r.status, 202, JSON.stringify(r.body));
+    const env = created.at(-1)!.Env;
+    assert.ok(env.includes('SDLC_SHARED=bound-secret-value'), env.join(' '));
+    assert.ok(!env.includes('SDLC_SHARED=policy-value'));
+    assert.ok(env.includes('SDLC_FLEET_CONFIG={}'));
+  });
+});

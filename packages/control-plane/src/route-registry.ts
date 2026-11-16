@@ -39,7 +39,7 @@ export const ROUTE_EXCEPTIONS = {
   'webhook-hooks': {
     id: 'webhook-hooks',
     protection: 'webhook-hmac',
-    rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against agent cartridge secret (D18, D22, S15)',
+    rationale: 'Generic agent webhook endpoint verified fail-closed via HMAC signature against the agent cartridge secret, or for a config-only agent its own GitHub App webhook secret (D18, D22, S15, GAP-258)',
   },
   'authz-check': {
     id: 'authz-check',
@@ -281,7 +281,7 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'POST', pattern: '/hooks/github', exception: 'webhook-github', description: 'GitHub release webhook alias (HMAC signature)' },
   { method: 'POST', pattern: '/api/v1/webhooks/github', exception: 'webhook-github', description: 'GitHub release webhook alias (HMAC signature)' },
   { method: 'POST', pattern: '/webhooks/github', exception: 'webhook-github', description: 'GitHub release webhook alias (HMAC signature)' },
-  { method: 'POST', pattern: '/api/v1/hooks/:id', exception: 'webhook-hooks', description: 'Cartridge webhook trigger (HMAC signature)' },
+  { method: 'POST', pattern: '/api/v1/hooks/:id', exception: 'webhook-hooks', description: 'Cartridge webhook trigger, or the agent GitHub App events (HMAC signature)' },
   { method: 'POST', pattern: '/hooks/:id', exception: 'webhook-hooks', description: 'Cartridge webhook trigger alias (HMAC signature)' },
 
   // Agents & Runtime

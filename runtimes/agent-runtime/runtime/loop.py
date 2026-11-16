@@ -16,7 +16,7 @@ from pathlib import Path
 from memory import episodic
 from runtime.factory import Factory, FactoryError
 from runtime.mind import Mind, is_scheduled_payload, open_mind
-from runtime.skills import Tool, load_skills, run_tool
+from runtime.skills import Tool, load_skills, log_tool_error, run_tool
 
 MAX_ROUNDS = 6
 MAX_USER_CHARS = 20000
@@ -89,10 +89,12 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
                 try:
                     out = str(memory_tools[name](json.loads(fn.get("arguments") or "{}"), who))
                 except Exception as err:
+                    log_tool_error(f"memory/{name}", f"{type(err).__name__}: {err}")
                     out = f"error: {err}"
             elif name in tools:
                 out = run_tool(tools[name], fn.get("arguments") or "", {"caller": caller_of(payload), "turnId": payload.get("turnId")})
             else:
+                log_tool_error(name[:64] or "(unnamed)", "the model called a tool that is not loaded")
                 out = f"error: no tool named {name}"
             messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": out})
     else:
