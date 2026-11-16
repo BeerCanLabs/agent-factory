@@ -128,4 +128,14 @@ describe('GitHub App install and installation keys (E5.1b)', { concurrency: fals
     const orphan = state.runs.create({ agentId: 'juror.helper.2', state: 'WORKING', actor: 'test', trigger: 'subagent', parentRunId: ended, parentAgentId: 'archie' } as any).runId;
     assert.equal((await token({ runId: orphan, agentId: 'archie', org: 'sandbox-org' })).body.error, 'run_not_live');
   });
+  it('GAP-256: a call with no org (GraphQL) uses the only chosen org; with two chosen it is refused, never guessed', async () => {
+    assert.equal((await token({ runId, agentId: 'archie' })).body.error, 'org_ambiguous');
+    assert.equal((await post('/api/v1/keymaster/agents/archie/github-app/installations', ADMIN, { orgs: ['sandbox-org'] })).status, 200);
+    const r = await token({ runId, agentId: 'archie' });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.org, 'sandbox-org');
+    assert.match(r.body.accessToken, /^ghs_fake_/);
+    assert.equal((await token({ runId, agentId: 'archie', org: 'bad/org' })).status, 400);
+    assert.equal((await token({ runId, agentId: 'other' })).body.error, 'org_ambiguous', 'an agent with no chosen org gets no key');
+  });
 });

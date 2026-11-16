@@ -109,7 +109,9 @@ const control: ControlClient = {
   async githubAppToken(req) {
     const res = await call('POST', '/api/v1/gatekeeper-egress/github-app/token', req);
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (res.ok && typeof body.accessToken === 'string' && typeof body.expiresAt === 'string') return { ok: true, accessToken: body.accessToken, expiresAt: body.expiresAt };
+    if (res.ok && typeof body.accessToken === 'string' && typeof body.expiresAt === 'string') {
+      return { ok: true, accessToken: body.accessToken, expiresAt: body.expiresAt, ...(typeof body.org === 'string' ? { org: body.org } : {}) };
+    }
     return { ok: false, status: res.status, error: typeof body.error === 'string' ? body.error : `control_plane_${res.status}` };
   },
   // Run progress (§6.5): best effort, batched by the emitter, one request in flight. Never touches the ledger
