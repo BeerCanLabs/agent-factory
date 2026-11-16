@@ -135,11 +135,23 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
     return tools, problems
 
 
-# GAP-254: a tool that fails is logged (the container's stderr), not only told to the model. The run token and anything
-# shaped like a credential are masked; a line is short. Arguments and results are never logged whole.
+# GAP-254: a tool that fails is logged (the container's stderr), not only told to the model. The whole line (the label too) is
+# masked before it is cut short: the run token by value, including a cut-off end of it, and anything shaped like a credential.
+# Arguments and results are never logged whole. (RT2: the runtime reads named variables only, so a bound secret is masked by
+# its shape, not by its value.)
 CREDENTIAL_SHAPES = re.compile(
-    r"(?i:bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}|github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}"
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)"  # a PEM private key, even cut off
+    r"|eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"  # a JWT
+    r"|(?i:bearer|token|basic)\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|github_pat_\w{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9]{8,}|AKIA[0-9A-Z]{12,}",
+    re.DOTALL,
 )
+# `password: x`, `?access_token=x`, `"token": "x"`, `aws_secret_access_key=x`, `Authorization: Basic x`: the name stays.
+CREDENTIAL_SETTING = re.compile(
+    r"""(?i)([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|authorization|private[_-]?key|access[_-]?key|credential)[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?)"""
+    r"""(?:(?:bearer|basic|token)\s+)?[^\s"'&,;}\]]+"""
+)
+URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@")
 MAX_LOG_CHARS = 1000
 
 
@@ -147,11 +159,18 @@ def _mask(text: str) -> str:
     token = os.environ.get("FACTORY_RUN_TOKEN") or ""
     if len(token) >= 8:
         text = text.replace(token, "***")
-    return CREDENTIAL_SHAPES.sub("***", text)
+        # Text cut short before it reached the runtime can end in the start of the token.
+        for n in range(len(token) - 1, 7, -1):
+            if text.endswith(token[:n]):
+                text = text[:-n] + "***"
+                break
+    text = CREDENTIAL_SHAPES.sub("***", text)
+    text = CREDENTIAL_SETTING.sub(lambda m: m.group(1) + "***", text)
+    return URL_USERINFO.sub(lambda m: m.group(1) + "***@", text)
 
 
 def log_tool_error(label: str, what: str) -> None:
-    line = " ".join(f"[runtime] tool {label} failed: {_mask(str(what))}".split())
+    line = " ".join(_mask(f"[runtime] tool {label} failed: {what}").split())
     print(line[:MAX_LOG_CHARS], file=sys.stderr, flush=True)
 
 
@@ -166,15 +185,15 @@ def _where(err: BaseException) -> str:
 def _reported_error(out: str) -> str | None:
     """A result in which the tool itself reports failure: `error: ...` text, or a JSON object with `error` or `action: error`."""
     head = out.lstrip()
-    if head.lower().startswith("error"):
-        return head[:300]
+    if head.lower().startswith("error:"):
+        return head  # masked whole, then cut short, by log_tool_error
     if head.startswith("{"):
         try:
             obj = json.loads(out)
         except ValueError:
             return None
         if isinstance(obj, dict) and (obj.get("action") == "error" or obj.get("error")):
-            return str(obj.get("reason") or obj.get("error") or "error")[:300]
+            return str(obj.get("reason") or obj.get("error") or "error")
     return None
 
 

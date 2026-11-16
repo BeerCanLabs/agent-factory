@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -10,7 +11,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from runtime.skills import Tool, load_skills, run_tool
+from runtime.skills import MAX_LOG_CHARS, Tool, load_skills, log_tool_error, run_tool
 
 
 class TestSkills(unittest.TestCase):
@@ -116,9 +117,6 @@ class TestSkills(unittest.TestCase):
         self.assertIn("vendored module 'shared_util' collides with module from skill 'skill-1'", problems[0])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestToolErrorsAreLogged(unittest.TestCase):
     """GAP-254: a failing tool is logged on stderr, with known secret values masked, as well as told to the model."""
@@ -161,3 +159,57 @@ class TestToolErrorsAreLogged(unittest.TestCase):
         self.assertNotIn(run_token, log)
         self.assertNotIn(pat, log)
         self.assertIn("401 at ***", log)
+
+    def test_a_token_straddling_the_cut_is_masked_as_text_and_as_a_json_reason(self):
+        run_token = "rt" + "-example-" + "ABCDEFGHIJKLMNOPQRSTUV"
+        with mock.patch.dict(os.environ, {"FACTORY_RUN_TOKEN": run_token}):
+            for cut in (300, MAX_LOG_CHARS):
+                pad = "x" * (cut - 60)
+                _, text = self.run_logged(lambda a, c: f"error: {pad}{run_token} tail")
+                _, reason = self.run_logged(lambda a, c: json.dumps({"action": "error", "reason": pad + run_token}))
+                for log in (text, reason):
+                    self.assertNotIn(run_token[:8], log)
+                    self.assertLessEqual(len(log.strip()), MAX_LOG_CHARS)
+            # A text already cut short ends in the start of the token.
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                log_tool_error("s/t", "x" * 50 + run_token[:12])
+            self.assertNotIn(run_token[:8], err.getvalue())
+            self.assertTrue(err.getvalue().strip().endswith("***"))
+
+    def test_common_credential_shapes_are_masked(self):
+        secret = "S3cr3t" + "Value" + "9876"
+        jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxIn0" + "." + "abcDEF123_-"
+        pem = "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEow" + secret + "\n-----END RSA " + "PRIVATE KEY-----"
+        rows = {
+            "query": f"GET /x?access_token={secret}&page=2",
+            "json": json.dumps({"token": secret}),
+            "aws": f"aws_secret_access_key={secret}",
+            "jwt": f"session {jwt} refused",
+            "userinfo": f"https://bot:{secret}@db.example.com/x",
+            "password": f"password: {secret}",
+            "authorization": f"Authorization: Basic {secret}",
+            "pem": f"key {pem} bad",
+        }
+        for name, leak in rows.items():
+            with self.subTest(name):
+                def boom(args, ctx, leak=leak):
+                    raise RuntimeError(leak)
+
+                _, log = self.run_logged(boom)
+                self.assertNotIn(secret, log)
+                self.assertNotIn(jwt, log)
+                self.assertIn("***", log)
+        self.assertIn("page=2", self.run_logged(lambda a, c: (_ for _ in ()).throw(RuntimeError(rows["query"])))[1])
+
+    def test_the_label_is_masked_too(self):
+        pat = "ghp" + "_" + "B2" * 12
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            log_tool_error(f"unknown/{pat}", "no such tool")
+        self.assertNotIn(pat, err.getvalue())
+        self.assertIn("unknown/***", err.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
