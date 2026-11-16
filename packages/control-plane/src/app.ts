@@ -4,6 +4,7 @@ import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
 import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
+import { join } from 'node:path';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
 import type { SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
@@ -83,10 +84,10 @@ import {
 import { handleSubscriptionWindows } from './subscription-windows.js';
 import { getSubscriptionCaps } from './subscription-caps.js';
 import { handleCredentials } from './credentials.js';
-import { handleGitHubAppSetup } from './github-app-setup.js';
+import { githubAppSecretNames, handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
-import { handleAppSetup } from './app-setup-providers.js';
+import { handleAppSetup, readSecret } from './app-setup-providers.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
@@ -114,6 +115,7 @@ import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } fr
 import { handleMcp } from './mcp.js';
 export { handleMcp } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
+import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, conductorEventFor, conductorInput } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
@@ -3056,6 +3058,17 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
   return 'not_delivered';
 }
 
+const deliveryLogs = new WeakMap<FactoryState, DeliveryLog>();
+/** GAP-250: the webhook delivery ids already handled, beside the registry when there is one. */
+function webhookDeliveries(state: FactoryState): DeliveryLog {
+  let log = deliveryLogs.get(state);
+  if (!log) {
+    log = new DeliveryLog(state.registryDir ? join(state.registryDir, 'webhook-deliveries') : undefined);
+    deliveryLogs.set(state, log);
+  }
+  return log;
+}
+
 export function bearerOf(req: http.IncomingMessage): string | undefined {
   const h = req.headers.authorization;
   return h?.startsWith('Bearer ') ? h.slice(7).trim() : undefined;
@@ -3463,14 +3476,23 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
     const agent = state.agents.get(hookId);
     const trigger = agent?.triggers.find((t) => t.type === 'webhook');
-    if (!agent || !trigger || trigger.type !== 'webhook' || !trigger.secretRef) {
+    // GAP-250: an agent with no cartridge webhook trigger is reached only by its own GitHub App, signed (HMAC) with the
+    // app's webhook secret; the legacy shared-secret header never opens that path.
+    const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
+    const viaApp = Boolean(agent && !(trigger?.type === 'webhook' && trigger.secretRef) && hmacSignature && githubEventHeader);
+    if (!agent || (!viaApp && (!trigger || trigger.type !== 'webhook' || !trigger.secretRef))) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
       return;
     }
 
-    const bound = await bindSecrets([trigger.secretRef], state.providers);
-    const secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
+    let secret: string | undefined;
+    if (viaApp) {
+      secret = await readSecret(state, githubAppSecretNames(agent.id).webhookSecret);
+    } else if (trigger?.type === 'webhook' && trigger.secretRef) {
+      const bound = await bindSecrets([trigger.secretRef], state.providers);
+      secret = bound.ok ? bound.env[trigger.secretRef] : undefined;
+    }
     if (!secret || typeof secret !== 'string' || !secret.trim()) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
@@ -3506,8 +3528,49 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         input = raw;
       }
     }
+    // GAP-250: the GitHub event and delivery id travel with the run; a conductor gets the one event it handles.
+    const githubEvent = githubEventHeader && GITHUB_EVENT.test(githubEventHeader) ? githubEventHeader : undefined;
+    const rawDelivery = req.headers['x-github-delivery'];
+    const delivery = typeof rawDelivery === 'string' && DELIVERY_ID.test(rawDelivery) ? rawDelivery : undefined;
+    const isConductor = (agent.skillIds ?? []).includes(CONDUCTOR_SKILL) || (state.configs?.current(agent.id)?.skills ?? []).some((sk) => sk.id === CONDUCTOR_SKILL);
+    if (githubEvent && (isConductor || viaApp)) {
+      if (!isConductor) {
+        json(res, 200, { ok: true, ignored: true, reason: 'this agent takes no GitHub events' });
+        return;
+      }
+      const slug = await readSecret(state, githubAppSecretNames(agent.id).slug);
+      const mapped = conductorEventFor(githubEvent, input, slug ? `${slug}[bot]` : undefined);
+      if ('ignored' in mapped) {
+        json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
+        return;
+      }
+      input = conductorInput(mapped.event, githubEvent, delivery);
+    } else if (githubEvent && input && typeof input === 'object' && !Array.isArray(input)) {
+      input = { ...(input as Record<string, unknown>), githubEvent, ...(delivery ? { githubDelivery: delivery } : {}) };
+    }
+    // One run per delivery id per agent: a redelivery (GitHub's retry, or a person's "Redeliver") starts nothing new.
+    const deliveries = webhookDeliveries(state);
+    if (delivery) {
+      const prior = deliveries.claim(agent.id, delivery);
+      if (prior) {
+        state.ledger.append({ timestamp: new Date().toISOString(), agentId: agent.id, type: 'action', action: 'WEBHOOK_DUPLICATE', actor: `webhook:${agent.id}`, requestId: delivery, ...(prior.runId ? { runId: prior.runId } : {}) });
+        json(res, 200, { ok: true, duplicate: true, ...(prior.runId ? { runId: prior.runId } : {}) });
+        return;
+      }
+    }
     const actor = `webhook:${agent.id}`;
-    const out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
+    let out: Awaited<ReturnType<typeof createRun>>;
+    try {
+      out = await createRun(state, agent.id, { actor, trigger: 'webhook', input });
+    } catch (err) {
+      if (delivery) deliveries.release(agent.id, delivery);
+      throw err;
+    }
+    if (delivery) {
+      const runId = (out.body as { runId?: unknown } | undefined)?.runId;
+      if (out.status < 300) deliveries.done(agent.id, delivery, typeof runId === 'string' ? runId : undefined);
+      else deliveries.release(agent.id, delivery);
+    }
     json(res, out.status, out.body);
     return;
   }
