@@ -7,9 +7,9 @@ import { createGatekeeperEgress, type ControlClient, type RunContext } from './g
 
 const tokens = new RunTokens('github-app-test-run-token-key-0123456789ab');
 
-function send(port: number, method: string, path: string, token: string, body?: string) {
+function send(port: number, method: string, path: string, token: string, body?: string, extra: Record<string, string> = {}) {
   return new Promise<{ status: number; body: any }>((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, path, method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extra } }, (res) => {
       let text = '';
       res.on('data', (c) => (text += c));
       res.on('end', () => {
@@ -24,8 +24,8 @@ function send(port: number, method: string, path: string, token: string, body?: 
 }
 
 describe('github route uses the agent GitHub App key (#334)', { concurrency: false }, () => {
-  const seen: Array<{ method: string; url: string; auth?: string }> = [];
-  const asked: Array<{ runId: string; agentId: string; org: string }> = [];
+  const seen: Array<{ method: string; url: string; auth?: string; org?: string }> = [];
+  const asked: Array<{ runId: string; agentId: string; org?: string }> = [];
   const ledgered: string[] = [];
   let upstream: http.Server;
   let gk: http.Server;
@@ -41,7 +41,9 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     async ledger(e) { ledgered.push(String(e.action)); },
     async githubAppToken(req) {
       asked.push(req);
-      if (req.agentId === 'archie' && req.org.toLowerCase() === 'beercanlabs') return { ok: true, accessToken: `ghs_app_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString() };
+      if (req.agentId === 'archie' && req.org?.toLowerCase() === 'beercanlabs') return { ok: true, accessToken: `ghs_app_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString() };
+      // GAP-256: no org (a GraphQL call with no hint): the control plane answers with the app's only chosen org.
+      if (req.agentId === 'archie' && req.org === undefined) return { ok: true, accessToken: `ghs_sole_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString(), org: 'BeerCanLabs' };
       return { ok: false, status: 428, error: 'not_installed' };
     },
   };
@@ -50,7 +52,7 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     upstream = http.createServer((req, res) => {
       req.resume();
       req.on('end', () => {
-        seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization });
+        seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization, org: req.headers['x-github-org'] as string | undefined });
         res.writeHead(upStatus, { 'content-type': 'application/json' });
         res.end('{}');
       });
@@ -135,5 +137,59 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     const before = asked.length;
     await send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token);
     assert.equal(asked.length, before + 1);
+  });
+  describe('GAP-256: GraphQL (Projects v2) picks the app key for an org', () => {
+    const q = (variables: Record<string, unknown>) => JSON.stringify({ query: 'query{viewer{login}}', variables });
+
+    it('an X-GitHub-Org header names the org; the header never reaches GitHub', async () => {
+      await as('archie');
+      const r = await send(port, 'POST', '/github/graphql', token, q({}), { 'x-github-org': 'BeerCanLabs' });
+      assert.equal(r.status, 200);
+      assert.match(seen[0].auth ?? '', /^token ghs_app_/);
+      assert.equal(seen[0].org, undefined);
+      assert.ok(asked.every((a) => a.org === 'BeerCanLabs'), 'only the named org is asked for (the key may be cached)');
+    });
+
+    it("the query's own org or owner variable names it when there is no header", async () => {
+      await as('archie');
+      await send(port, 'POST', '/github/graphql', token, q({ org: 'BeerCanLabs', n: 1 }));
+      await send(port, 'POST', '/github/graphql', token, q({ owner: 'other-org', name: 'x' }));
+      assert.match(seen[0].auth ?? '', /^token ghs_app_/);
+      assert.equal(seen[1].auth, 'token gh-pat', 'an org the app is not for keeps the route credential');
+    });
+
+    it("no hint at all (a mutation by node id): the control plane may use the app's only chosen org", async () => {
+      await as('archie');
+      const r = await send(port, 'POST', '/github/graphql', token, q({ p: 'PVT_1', i: 'PVTI_1' }));
+      assert.equal(r.status, 200);
+      assert.match(seen[0].auth ?? '', /^token ghs_sole_/);
+      assert.deepEqual(asked[0], { runId: ctx.run.runId, agentId: 'archie' });
+      assert.ok(ledgered.includes('GITHUB_APP_KEY_USED'));
+    });
+
+    it('a header that is not an org name is refused before anything is sent', async () => {
+      await as('archie');
+      const r = await send(port, 'POST', '/github/graphql', token, q({}), { 'x-github-org': '../evil' });
+      assert.equal(r.status, 400);
+      assert.equal(r.body.error, 'bad_github_org');
+      assert.equal(seen.length, 0);
+    });
+
+    it('a REST call is unchanged by the header (the org comes from its path)', async () => {
+      await as('archie');
+      await send(port, 'GET', '/github/repos/other-org/x', token, undefined, { 'x-github-org': 'BeerCanLabs' });
+      assert.equal(seen[0].auth, 'token gh-pat');
+      assert.equal(seen[0].org, undefined);
+    });
+
+    it('a read-only helper may query with its parent key but never mutate', async () => {
+      await as('beercanlabs-juror.helper.gql', 'archie');
+      const read = await send(port, 'POST', '/github/graphql', token, q({ org: 'BeerCanLabs' }));
+      assert.equal(read.status, 200);
+      assert.match(seen[0].auth ?? '', /^token ghs_app_/);
+      const write = await send(port, 'POST', '/github/graphql', token, JSON.stringify({ query: 'mutation($p:ID!){x(p:$p){id}}', variables: { org: 'BeerCanLabs', p: '1' } }));
+      assert.equal(write.status, 403);
+      assert.equal(seen.length, 1, 'the mutation never reached GitHub');
+    });
   });
 });
