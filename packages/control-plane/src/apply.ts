@@ -171,7 +171,7 @@ async function deploy(state: FactoryState, job: DeployJob): Promise<DeployResult
     const smokeRes = await runActivationSmoke(state, agent, skills, commit, actor);
     if (!smokeRes.ok) {
       console.error(`[control-plane] Activation smoke failed for ${agentId}@${commit}: ${smokeRes.error}`);
-      if (prevArtifact) {
+      if (prevDeployedCommit && prevArtifact) {
         try {
           await dp.registerCompute(agentId, prevArtifact, agent.requires, identity, executionIdentity, agent.memoryPrefix ?? agentId, prevLaunchEnv);
         } catch (rbErr) {

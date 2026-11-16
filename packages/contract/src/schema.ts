@@ -114,8 +114,8 @@ export const surfaceSchema = z
 
 export const artifactSchema = z
   .object({
-    kind: z.enum(['oci', 'serverless', 'managed', 'local']),
-    ref: z.string().min(1),
+    kind: z.enum(['oci', 'serverless', 'managed', 'local']).optional(),
+    ref: z.string().min(1).optional(),
     localCommand: z.array(z.string()).min(1).optional(),
     cpu: z.number().positive().optional(),
     memory: z.number().positive().optional(),

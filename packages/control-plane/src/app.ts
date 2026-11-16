@@ -4106,7 +4106,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: 'status must be succeeded or failed' });
       return;
     }
-    let output = body.output === undefined ? undefined : JSON.parse(redactSecrets(JSON.stringify(body.output), state.secretValues));
+    const rawOutput =
+      body.output !== undefined
+        ? body.output
+        : typeof body.message === 'string' || typeof body.reply === 'string' || typeof body.text === 'string'
+          ? {
+              ...(typeof body.message === 'string' ? { message: body.message } : {}),
+              ...(typeof body.reply === 'string' ? { reply: body.reply } : {}),
+              ...(typeof body.text === 'string' ? { text: body.text } : {}),
+            }
+          : undefined;
+    let output = rawOutput === undefined ? undefined : JSON.parse(redactSecrets(JSON.stringify(rawOutput), state.secretValues));
     if (output !== undefined) {
       const runRows = state.ledger.query({ agent: run.agentId });
       const currentRunRows = runRows.filter((r) => r.runId === run.runId);

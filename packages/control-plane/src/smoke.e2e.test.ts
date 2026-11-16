@@ -20,11 +20,13 @@ import {
 } from '@beercanlabs/factory-contract';
 import {
   AdmissionRefusedError,
+  createRun,
   imageTagFor,
   MemoryRunStore,
   noopRuntime,
   type BuildSkill,
   type DeployProvider,
+  type Run,
   type SourceRef,
 } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
@@ -296,6 +298,43 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
         delete state.smokeHandler;
       }
     });
+
+    it('normalizes result envelope when output is undefined and top-level message/reply/text is present (TSK-342)', async () => {
+      state.agents.set('envelope-agent', {
+        id: 'envelope-agent',
+        name: 'Envelope Agent',
+        role: 'Worker',
+        state: 'SLEEPING',
+        provider: 'local',
+        artifact: '',
+        requires: [],
+        ungated: [],
+        gated: [],
+        triggers: [],
+        dir: '/tmp/envelope-agent',
+      });
+      const runOutcome = await createRun(state, 'envelope-agent', {
+        actor: 'test-actor',
+        trigger: 'manual',
+        input: { text: 'hello' },
+      });
+      assert.ok(runOutcome.status === 200 || runOutcome.status === 202);
+      const run = runOutcome.body as Run;
+      const runToken = await state.runTokens.mint({ runId: run.runId, agentId: 'envelope-agent' });
+
+      const res = await call(`/api/v1/runs/${run.runId}/result`, 'POST', runToken, {
+        status: 'succeeded',
+        message: 'envelope test message',
+        reply: 'envelope test reply',
+      });
+      assert.equal(res.status, 200);
+      const updatedRun = state.runs.get(run.runId)!;
+      assert.equal(updatedRun.state, 'DONE');
+      assert.deepEqual(updatedRun.result, {
+        message: 'envelope test message',
+        reply: 'envelope test reply',
+      });
+    });
   });
 
   describe('2. Smoke failure & rollback', () => {
@@ -344,6 +383,56 @@ describe('Activation smoke gate (TSK-281, §6.8 L4, §6.14 SK1)', { concurrency:
         assert.ok(failed, 'AGENT_SMOKE_FAILED was ledgered');
         const smokeRun = state.runs.get(failed.runId!);
         assert.match(String(smokeRun?.error), /simulated model failure on boot/);
+      } finally {
+        delete state.smokeHandler;
+      }
+    });
+
+    it('initial deploy smoke failure with placeholder artifact in cartridge skips registerCompute rollback, clears artifact, and transitions to ERROR (TSK-342)', async () => {
+      state.agents.set('initial-flaky-agent', {
+        id: 'initial-flaky-agent',
+        name: 'Initial Flaky Agent',
+        role: 'Worker',
+        state: 'PENDING_DEPLOY',
+        provider: 'cloud',
+        artifact: 'ghcr.io/beercanlabs/initial-flaky-agent:latest',
+        repo: 'https://github.com/BeerCanLabs/agent-repo',
+        commit: SHA1,
+        requires: [],
+        ungated: [],
+        gated: [],
+        triggers: [],
+        dir: '/tmp/initial-flaky-agent',
+      });
+      await state.configs!.put({ agentId: 'initial-flaky-agent', source: { repo: 'https://github.com/BeerCanLabs/agent-repo', commit: SHA1 }, skills: [], policy: { routes: ['models'] }, owners: ['owner'] }, { updatedBy: 'test', reason: 'init' });
+      state.policies.set('initial-flaky-agent', { routes: ['models'], budgetUsd: { perRun: 1.0, perDay: 10.0, perMonth: 50.0 } });
+
+      const computeRegisteredCountBefore = computeRegistered.length;
+
+      state.smokeHandler = async ({ agent }) => {
+        if (agent.id === 'initial-flaky-agent') {
+          return { ok: false, error: 'smoke boot failure on initial deploy' };
+        }
+        return { ok: true };
+      };
+
+      try {
+        const res = await call('/api/v1/registry/agents/initial-flaky-agent/deploy', 'POST', ADMIN, { commit: SHA1 });
+        assert.equal(res.status, 202);
+
+        for (let i = 0; i < 50; i++) {
+          await sleep(20);
+          if (state.agents.get('initial-flaky-agent')?.state === 'ERROR') break;
+        }
+
+        const agent = state.agents.get('initial-flaky-agent')!;
+        assert.equal(agent.state, 'ERROR');
+        assert.equal(agent.artifact, '', 'artifact cleared on initial deploy smoke failure');
+        assert.equal(agent.deployedCommit, undefined);
+
+        const agentRegistrations = computeRegistered.slice(computeRegisteredCountBefore).filter((c) => c.agentId === 'initial-flaky-agent');
+        assert.equal(agentRegistrations.length, 1, 'compute registered only once during initial deploy, no rollback registration');
+        assert.notEqual(agentRegistrations[0].imageUri, 'ghcr.io/beercanlabs/initial-flaky-agent:latest');
       } finally {
         delete state.smokeHandler;
       }

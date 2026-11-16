@@ -34,6 +34,8 @@ def main() -> int:
     result = {
         "status": "succeeded",
         "message": reply,
+        "reply": reply,
+        "output": {"reply": reply, "message": reply},
         "draft": state.get("draft"),
         "published": state.get("published"),
     }
