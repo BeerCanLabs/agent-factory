@@ -365,6 +365,8 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
   { method: 'DELETE', pattern: '/api/v1/models/:model', privilege: ['models.manage', 'subscriptions.own'], description: 'Remove model from catalog (or retire own personal BYOM entry)' },
 
   // Approvals & MCP
+  { method: 'GET', pattern: '/api/v1/fleet/state', privilege: 'agents.read', description: 'Fleet go/stop state (a live run by run token, or a reader)' },
+  { method: 'PUT', pattern: '/api/v1/fleet/state', privilege: 'fleet.state.set', description: 'Set the fleet go/stop state (admin)' },
   { method: 'GET', pattern: '/api/v1/approvals', privilege: 'approvals.read', description: 'List pending tool approvals' },
   { method: 'POST', pattern: '/api/v1/approvals/:id', privilege: 'approvals.decide', description: 'Decide tool approval' },
   { method: 'POST', pattern: '/api/v1/ingress/approval-prompts', privilege: 'approvals.channel', description: 'Send approval prompt to channel' },

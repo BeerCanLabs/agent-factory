@@ -24,6 +24,7 @@ import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
+import { FleetStateStore } from './fleet-state.js';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from '@beercanlabs/factory-gatekeeper/policy';
@@ -238,6 +239,7 @@ const state: FactoryState = {
   deployProvider,
   policies: new PolicyStore(process.env.FACTORY_POLICIES_DIR || join(DATA_DIR, 'policies'), defaultPolicy()),
   approvals: new ApprovalStore(join(DATA_DIR, 'approvals')),
+  fleetState: new FleetStateStore(join(DATA_DIR, 'fleet-state.json')),
   webhookDeliveries: new DeliveryLog(join(DATA_DIR, 'webhook-deliveries')),
   spendAccounts: new SpendAccountStore(join(DATA_DIR, 'spend-accounts.json')),
   ...(Number(process.env.FACTORY_SPEND_UPDATE_STEP_USD) > 0 ? { spendUpdateStepUsd: Number(process.env.FACTORY_SPEND_UPDATE_STEP_USD) } : {}),
