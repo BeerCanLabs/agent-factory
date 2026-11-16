@@ -13,7 +13,7 @@ import { MemoryRunStore, finishRun, noopRuntime } from '@beercanlabs/factory-pro
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { SpendAccountStore } from './spend-accounts.js';
+import { SpendAccountStore, accountKey, settleOnEnd } from './spend-accounts.js';
 
 const EGRESS = 'egress-spend-accounts';
 const PLAN = 'plan:BeerCanLabs/plan-intake#12';
@@ -70,8 +70,9 @@ describe('GAP-261 per-plan spend and budget-update', { concurrency: false }, () 
   beforeEach(async () => {
     for (const id of ['conductor', 'coder', 'reviewer']) state.agents.set(id, { id, name: id, state: 'SLEEPING', roles: [], requires: [] } as never);
     state.policies.set('conductor', { routes: [], wakeAgents: ['coder', 'reviewer'] } as never);
-    state.policies.set('coder', { routes: [], wakeAgents: ['reviewer'] } as never);
-    state.runs = new MemoryRunStore();
+    state.policies.set('coder', { routes: [], wakeAgents: ['reviewer', 'conductor'] } as never);
+    state.policies.set('reviewer', { routes: [], wakeAgents: ['coder'] } as never);
+    state.runs = Object.assign(new MemoryRunStore(), { onChange: settleOnEnd(state) });
     state.mailboxes = new Map();
     state.spendAccounts = new SpendAccountStore(join(dir, `accounts-${Math.random()}.json`));
     state.ledger = new MemoryLedger();
@@ -129,7 +130,52 @@ describe('GAP-261 per-plan spend and budget-update', { concurrency: false }, () 
     const woke = await wake(conductor, 'coder', { spendAccount: PLAN });
     await spend('coder', woke.body.runId, 2);
     const again = new SpendAccountStore(file);
-    assert.equal(again.get(PLAN)?.spentUsd, 2);
+    assert.equal(again.get(accountKey('conductor', PLAN))?.spentUsd, 2);
     assert.equal(again.accountOf(woke.body.runId)?.owner, 'conductor');
+  });
+  it('J1: an agent that names the plan first gets its own account; the conductor\'s plan still reports to the conductor', async () => {
+    const other = state.runs.create({ agentId: 'coder', state: 'WORKING', actor: 'test', trigger: 'webhook' } as never);
+    const first = await wake(await tokenOf(other.runId, 'coder'), 'reviewer', { spendAccount: PLAN });
+    assert.ok(first.status < 300, JSON.stringify(first.body));
+    const woke = await wake(conductor, 'coder', { spendAccount: PLAN });
+    await spend('coder', woke.body.runId, 6);
+    assert.equal(updates().length, 1);
+    assert.equal(updates()[0].agentId, 'conductor');
+    assert.equal(state.mailboxes!.get('conductor')!.messages.length, 1);
+    assert.equal(state.spendAccounts!.get(accountKey('conductor', PLAN))?.spentUsd, 6);
+    // Cross-agent: the coder's own account for the plan is separate, and charging it never reaches the conductor's.
+    await spend('reviewer', first.body.runId, 4);
+    assert.equal(state.spendAccounts!.get(accountKey('coder', PLAN))?.spentUsd, 4);
+    assert.equal(state.spendAccounts!.get(accountKey('conductor', PLAN))?.spentUsd, 6);
+  });
+
+  it('J2: a run charged to a plan cannot move its wakes to another plan; the same plan is inherited; the owner may', async () => {
+    const coder = await wake(conductor, 'coder', { spendAccount: PLAN });
+    const coderTok = await tokenOf(coder.body.runId, 'coder');
+    state.runs.update(coder.body.runId, { state: 'WORKING' });
+    await spend('coder', coder.body.runId, 1);
+    const moved = await wake(coderTok, 'reviewer', { spendAccount: 'plan:BeerCanLabs/plan-intake#999' });
+    assert.equal(moved.status, 403);
+    const same = await wake(coderTok, 'reviewer', { spendAccount: PLAN });
+    assert.ok(same.status < 300, JSON.stringify(same.body));
+    await spend('reviewer', same.body.runId, 4);
+    assert.equal(state.spendAccounts!.get(accountKey('conductor', PLAN))?.spentUsd, 5);
+    assert.equal(state.spendAccounts!.get(accountKey('coder', 'plan:BeerCanLabs/plan-intake#999')), undefined);
+    const other = await wake(conductor, 'reviewer', { spendAccount: 'plan:BeerCanLabs/plan-intake#13' });
+    assert.ok(other.status < 300, 'the owner may start work on another plan');
+  });
+
+  it('a charged run that times out still reports what the plan cost', async () => {
+    const coder = await wake(conductor, 'coder', { spendAccount: PLAN });
+    state.runs.update(coder.body.runId, { state: 'WORKING' });
+    await finishRun(state, conductor.runId, 'DONE', { actor: 'test' });
+    await spend('coder', coder.body.runId, 3);
+    assert.equal(updates().length, 0);
+    await finishRun(state, coder.body.runId, 'TIMED_OUT', { actor: 'test' });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const started = state.runs.list({ agentId: 'conductor' }).find((r) => r.trigger === 'spend');
+    assert.ok(started, 'the conductor is woken with the update');
+    assert.deepEqual((started!.input as { event: unknown }).event, { type: 'budget-update', repo: 'BeerCanLabs/plan-intake', pr: 12, spent_usd: 3 });
   });
 });

@@ -3579,7 +3579,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     if (badModel) return json(res, 400, { error: badModel });
     // GAP-261: the plan this work is charged to, named by the waking run or inherited from it.
     const account = accountForWake(state, run, body.spendAccount);
-    if (account && 'error' in account) return json(res, 400, { error: account.error });
+    if (account && 'error' in account) return json(res, account.status, { error: account.error });
     const out = await createRun(state, target, { actor, trigger: 'agent', input: body.input, model: body.model as string | undefined });
     if (account && out.status < 300) bindRun(state, (out.body as Run).runId, account);
     json(res, out.status, out.body);
@@ -4338,7 +4338,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         const beforeStanding = checkStanding({ limits: effectiveLimits, spend: state.spend.get(payer.agentId, payer.runId) });
         const before = beforeStanding.inGoodStanding ? undefined : beforeStanding.window;
         state.spend.add(payer.agentId, payer.runId, stored.costUsd, stored.timestamp, spendDetail(stored));
-        await chargeAccount(state, run, stored.costUsd);
+        // GAP-261: a step's report is fired, not awaited: a model call never waits on waking the plan's owner.
+        chargeAccount(state, run, stored.costUsd).catch((err) => console.error(`[spend-accounts] charge failed: ${err instanceof Error ? err.message : String(err)}`));
         if (stored.credentialMode === 'subscription' && typeof stored.connection === 'string' && stored.connection) {
           let connView = getCachedSubscriptionView(state, stored.connection);
           if (!connView) {

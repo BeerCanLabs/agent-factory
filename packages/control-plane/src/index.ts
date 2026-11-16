@@ -21,7 +21,7 @@ import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
 import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
-import { SpendAccountStore } from './spend-accounts.js';
+import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
@@ -257,7 +257,13 @@ const state: FactoryState = {
   access: accessAuthFromEnv(),
   version: VERSION,
   providers: providersFromEnv(),
-  runs: Object.assign(new FileRunStore(RUNS_DIR), { onChange: (run: Parameters<typeof inspector.publishRun>[0]) => inspector.publishRun(run) }),
+  // GAP-261: a charged run that ends, however it ends, reports its plan's spend.
+  runs: Object.assign(new FileRunStore(RUNS_DIR), {
+    onChange: (run: Parameters<typeof inspector.publishRun>[0]) => {
+      inspector.publishRun(run);
+      settleOnEnd(state)(run);
+    },
+  }),
   runTokens: new RunTokens(process.env.FACTORY_RUN_TOKEN_KEY),
   // CF6: new agents are created from a configuration, not registered from a repository. Agents already registered are untouched.
   newAgentsFromConfigurationOnly: true,
