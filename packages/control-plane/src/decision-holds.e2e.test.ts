@@ -19,6 +19,8 @@ import { parseCapUsd } from './decision-holds.js';
 
 const VIEWER = 'viewer-decision-e2e';
 const ADMIN = 'admin-decision-e2e';
+const OPS = 'ops-decision-e2e';
+const UNLINKED = 'unlinked-decision-e2e';
 const SECRET = 'example-fake-masked-value-778899';
 const KEY = 'plan-budget:BeerCanLabs/plan-intake#12@0123456789ab';
 
@@ -54,6 +56,7 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     budget: 1800,
     target: { repo: 'BeerCanLabs/plan-intake', number: 12 },
     plan_id: 'plan-12',
+    approvers: ['DSackr', 'second-approver'],
   };
   const liveRun = async (agentId = 'conductor', extra: Record<string, unknown> = {}) => {
     const run = state.runs.create({ agentId, state: 'WORKING', actor: 'test', trigger: 'webhook', ...extra } as never);
@@ -67,6 +70,8 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
       auth: bearerAuth([
         { name: 'viewer', token: VIEWER, roles: ['viewer'] },
         { name: 'dale', token: ADMIN, roles: ['viewer', 'admin'] },
+        { name: 'ops', token: OPS, roles: ['viewer', 'admin'] },
+        { name: 'unlinked', token: UNLINKED, roles: ['viewer', 'admin'] },
       ]),
       version: '0.1.0-test',
       providers: [],
@@ -94,6 +99,10 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     state.approvals = new ApprovalStore();
     state.mailboxes = new Map();
     started.length = 0;
+    // Dale's one GitHub login is on the holds' approvers; ops is linked to a login that is not; `unlinked` has none.
+    state.identityLinks = new IdentityLinkStore(join(mkdtempSync(join(tmpdir(), 'decision-holds-')), 'links'));
+    state.identityLinks.link('github', 'dsackr', 'token:dale', 'admin');
+    state.identityLinks.link('github', 'ops-person', 'token:ops', 'admin');
   });
 
   after(async () => {
@@ -178,9 +187,10 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     assert.equal(read.body.state, 'approved');
     assert.equal(read.body.cap_usd, 2500);
     assert.equal(read.body.comment, 'go');
-    assert.equal(read.body.by, decided.body.decidedBy, 'without a linked GitHub login, by is the principal');
-    // With one: `by` is the login a fleet checks its approvers against.
-    state.identityLinks!.link('github', 'dsackr', decided.body.decidedBy, 'admin');
+    assert.equal(read.body.by, 'dsackr', 'by is the GitHub login recorded with the decision');
+    // Never recomputed from later links: relinking the login afterwards changes nothing.
+    state.identityLinks!.unlink('github', 'dsackr');
+    state.identityLinks!.link('github', 'someone-else', 'token:dale', 'admin');
     assert.equal((await call(holdPath(), 'GET', token)).body.by, 'dsackr');
     // A decision is read, never spent.
     assert.equal(state.approvals.consume(h.approvalId), undefined);
@@ -193,7 +203,7 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     const out = (await handleMcp(
       state,
       { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId: h.approvalId, decision: 'approve', capUsd: '1200' } } },
-      { actor: 'dale', roles: ['viewer', 'admin'] },
+      { actor: 'token:dale', roles: ['viewer', 'admin'] },
     )) as { result: { content: Array<{ text: string }> } };
     assert.equal(JSON.parse(out.result.content[0].text).delivered, 'run');
     const fresh = state.runs.list().find((r) => r.trigger === 'approval');
@@ -224,5 +234,46 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     assert.equal(parseCapUsd('$2,500.50'), 2500.5);
     assert.equal(parseCapUsd('$ 40'), 40);
     for (const bad of [-1, Number.NaN, '2,50', '1e3', '$', 'ten', '2500.123', true]) assert.equal(parseCapUsd(bad), null, String(bad));
+  });
+  it('only a listed approver decides, by their single linked, non-bot GitHub login', async () => {
+    const { token } = await liveRun();
+    const { body: h } = await call(holdPath(), 'PUT', token, ask);
+    assert.deepEqual(h.approvers, ['DSackr', 'second-approver']);
+    const notListed = await call(`/api/v1/approvals/${h.approvalId}`, 'POST', OPS, { decision: 'approve', capUsd: 10 });
+    assert.equal(notListed.status, 403);
+    assert.equal(notListed.body.error, 'not_an_approver');
+    assert.equal((await call(`/api/v1/approvals/${h.approvalId}`, 'POST', UNLINKED, { decision: 'reject' })).status, 403, 'an admin with no linked login');
+    const viaMcp = (await handleMcp(
+      state,
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId: h.approvalId, decision: 'approve', capUsd: 5 } } },
+      { actor: 'token:ops', roles: ['viewer', 'admin'] },
+    )) as { error?: { message: string }; result?: { isError?: boolean } };
+    assert.ok(viaMcp.error || viaMcp.result?.isError, 'a refused decision is an MCP error');
+    state.identityLinks!.link('github', 'dsackr-two', 'token:dale', 'admin');
+    assert.equal((await call(`/api/v1/approvals/${h.approvalId}`, 'POST', ADMIN, { decision: 'approve' })).status, 403, 'two linked logins: none is the one');
+    state.identityLinks!.unlink('github', 'dsackr-two');
+    assert.equal(state.approvals.get(h.approvalId)?.state, 'pending', 'a refused decider leaves the hold open for the real approver');
+    const ok = await call(`/api/v1/approvals/${h.approvalId}`, 'POST', ADMIN, { decision: 'approve' });
+    assert.equal(ok.status, 200, 'listed (case-insensitive) and linked');
+    assert.equal((await call(holdPath(), 'GET', token)).body.by, 'dsackr');
+    // A hold must name its approvers, and a bot login is never one.
+    const { token: again } = await liveRun();
+    for (const approvers of [undefined, [], ['flow-app[bot]'], ['ok', 42]]) {
+      assert.equal((await call(holdPath('conductor', 'other-key'), 'PUT', again, { ...ask, id: 'other-key', approvers })).status, 400, JSON.stringify(approvers));
+    }
+  });
+
+  it('a hold that requires a cap is never approved without one', async () => {
+    const { token } = await liveRun();
+    const { body: h } = await call(holdPath(), 'PUT', token, { ...ask, requiresCap: true });
+    assert.equal(h.requiresCap, true);
+    const none = await call(`/api/v1/approvals/${h.approvalId}`, 'POST', ADMIN, { decision: 'approve' });
+    assert.equal(none.status, 400);
+    assert.equal(none.body.error, 'cap_required');
+    assert.equal((await call(`/api/v1/approvals/${h.approvalId}`, 'POST', ADMIN, { decision: 'approve', capUsd: 'lots' })).status, 400);
+    const capped = await call(`/api/v1/approvals/${h.approvalId}`, 'POST', ADMIN, { decision: 'approve', capUsd: 1800 });
+    assert.equal(capped.status, 200);
+    assert.equal((await call(holdPath(), 'GET', token)).body.cap_usd, 1800);
+    assert.equal((await call(holdPath('conductor', 'k2'), 'PUT', token, { ...ask, id: 'k2', requiresCap: 'yes' })).status, 400);
   });
 });

@@ -4,7 +4,10 @@
  * An agent with a live run puts a hold under its own key (`PUT /api/v1/agents/:agentId/holds/:requestKey`); asking again
  * returns the same approval. Nothing waits: the run goes on, and the decision reaches the agent through the existing
  * decision path when a person makes it (REST `POST /api/v1/approvals/:id` or MCP `decide_approval`, optionally with a cap).
- * The agent can read it back at any time with `GET` on the same path, shaped `{state, cap_usd, by, comment}`.
+ * The hold names its `approvers` (GitHub logins) and whether approving needs a cap (`requiresCap`); both are fixed when
+ * it is asked. Only a person whose single linked, non-bot GitHub login is on the list may decide it (403 otherwise), and a
+ * hold that needs a cap is never approved without one (400). The agent can read it back at any time with `GET` on the same
+ * path, shaped `{state, cap_usd, by, comment}`: `by` is the GitHub login recorded when the decision was made, else null.
  * The console, channels and anything else that lists approvals show it because it is one; nothing is specific to a UI.
  */
 import type http from 'node:http';
@@ -22,7 +25,10 @@ const MAX_SUMMARY = 4000;
 const MAX_LINK = 2000;
 const MAX_PAYLOAD = 32 * 1024;
 /** Keys of the body that are the hold itself; anything else an agent sends is its payload. */
-const OWN = new Set(['id', 'kind', 'title', 'summary', 'link', 'payload']);
+const OWN = new Set(['id', 'kind', 'title', 'summary', 'link', 'payload', 'approvers', 'requiresCap']);
+/** A person's GitHub login (never an app's `[bot]` login, which cannot decide). */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const MAX_APPROVERS = 20;
 /** `2500`, `2500.5`, `$2,500.00`: the amounts a person types; anything else is not a cap. */
 const CAP_TEXT = /^\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?$/;
 
@@ -37,13 +43,26 @@ export function parseCapUsd(v: unknown): number | null {
 }
 
 /** The GitHub login a person linked (`github:<login>`), when exactly one is; a fleet checks approvers by login. */
-function githubLoginOf(state: FactoryState, actor: string | undefined): string | undefined {
+export function githubLoginOf(state: FactoryState, actor: string | undefined): string | undefined {
   if (!actor) return undefined;
   const mine = (state.identityLinks?.list() ?? []).filter((l) => l.provider === 'github' && l.actor.toLowerCase() === actor.toLowerCase());
   return mine.length === 1 ? mine[0].id : undefined;
 }
 
-/** What the agent reads back. `by` is the decider's linked GitHub login, else the factory principal that decided. */
+/**
+ * GAP-259: may this person decide this hold? Only with exactly one linked GitHub login, not a `[bot]` login, that is on
+ * the hold's approvers (case-insensitive). The login is the one recorded with the decision.
+ */
+export function holdDecider(state: FactoryState, a: Approval, actor: string): { ok: true; login: string } | { ok: false; error: string } {
+  const login = githubLoginOf(state, actor);
+  if (!login) return { ok: false, error: 'a decision hold is decided by a person with exactly one linked GitHub login' };
+  if (/\[bot\]$/i.test(login)) return { ok: false, error: 'a bot login never decides a hold' };
+  const approvers = (a.hold?.approvers ?? []).map((x) => x.toLowerCase());
+  if (!approvers.includes(login.toLowerCase())) return { ok: false, error: 'your GitHub login is not one of this hold\'s approvers' };
+  return { ok: true, login };
+}
+
+/** What the agent reads back. `by` is the GitHub login recorded when the decision was made, else null. */
 export function holdView(state: FactoryState, a: Approval): Record<string, unknown> {
   const h = a.hold!;
   const decided = a.state !== 'pending';
@@ -59,7 +78,9 @@ export function holdView(state: FactoryState, a: Approval): Record<string, unkno
     // A decision is never spent; `consumed` is not a state a decision reaches, but read it as approved if it ever did.
     state: a.state === 'consumed' ? 'approved' : a.state,
     cap_usd: a.capUsd ?? null,
-    by: decided ? (githubLoginOf(state, a.decidedBy) ?? a.decidedBy ?? null) : null,
+    by: decided ? (a.decidedGithubLogin ?? null) : null,
+    approvers: h.approvers ?? [],
+    requiresCap: Boolean(h.requiresCap),
     comment: a.notes ?? null,
     requestedAt: a.requestedAt,
     ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
@@ -100,6 +121,11 @@ function parseHold(requestKey: string, body: Record<string, unknown>, clean: (s:
     if (!u || u.protocol !== 'https:' || u.username || u.password) return { ok: false, error: 'link must be an https URL' };
     link = u.toString();
   }
+  const approvers = body.approvers;
+  if (!Array.isArray(approvers) || !approvers.length || approvers.length > MAX_APPROVERS || !approvers.every((x) => typeof x === 'string' && GITHUB_LOGIN.test(x))) {
+    return { ok: false, error: `approvers must list 1 to ${MAX_APPROVERS} people's GitHub logins (no [bot] logins)` };
+  }
+  if (body.requiresCap !== undefined && typeof body.requiresCap !== 'boolean') return { ok: false, error: 'requiresCap must be true or false' };
   let payload: Record<string, unknown> | undefined;
   if (body.payload !== undefined) {
     if (!body.payload || typeof body.payload !== 'object' || Array.isArray(body.payload)) return { ok: false, error: 'payload must be a JSON object' };
@@ -113,7 +139,10 @@ function parseHold(requestKey: string, body: Record<string, unknown>, clean: (s:
     if (Buffer.byteLength(raw) > MAX_PAYLOAD) return { ok: false, error: `payload is at most ${MAX_PAYLOAD} bytes` };
     payload = JSON.parse(clean(raw)) as Record<string, unknown>;
   }
-  return { ok: true, hold: { requestKey, kind, title, summary, ...(link ? { link } : {}), ...(payload ? { payload } : {}) } };
+  return {
+    ok: true,
+    hold: { requestKey, kind, title, summary, ...(link ? { link } : {}), ...(payload ? { payload } : {}), approvers: [...new Set(approvers as string[])], ...(body.requiresCap ? { requiresCap: true } : {}) },
+  };
 }
 
 /** The agent and its key from a hold path; undefined when either is not one. */

@@ -44,6 +44,10 @@ export type DecisionHold = {
   link?: string;
   /** Anything else the agent attached (a budget estimate, a target), shown as data and never interpreted. */
   payload?: Record<string, unknown>;
+  /** The GitHub logins that may decide it (the fleet's approvers), set when it is asked and never changed. */
+  approvers?: string[];
+  /** Approving it needs a cap in USD (e.g. a plan's budget), set when it is asked and never changed. */
+  requiresCap?: boolean;
 };
 
 /** CF4: asking in a channel. The code ties a reply to this approval; the ingress, not the agent, reads the reply. */
@@ -85,6 +89,8 @@ export type Approval = {
   /** CF4: the in-channel question for this approval, once the factory has issued its code. */
   ask?: ChannelAsk;
   decidedBy?: string;
+  /** `decision`: the decider's linked GitHub login when the decision was made (never recomputed from later links). */
+  decidedGithubLogin?: string;
   decidedAt?: string;
   /** The approver's notes, delivered to the agent with the decision (e.g. what to change). */
   notes?: string;
@@ -248,8 +254,11 @@ export class ApprovalStore {
     );
   }
 
-  /** Decided once: anything but a pending approval is left as it is. `capUsd` is kept only on an approved decision. */
-  decide(id: string, decision: 'approved' | 'rejected', actor: string, notes?: string, capUsd?: number): Approval | undefined {
+  /**
+   * Decided once: anything but a pending approval is left as it is. `capUsd` (a finite, non-negative amount) is kept only
+   * on an approved decision; `githubLogin`, the decider's linked GitHub login at this moment, only on a decision.
+   */
+  decide(id: string, decision: 'approved' | 'rejected', actor: string, notes?: string, capUsd?: number, githubLogin?: string): Approval | undefined {
     const a = this.items.get(id);
     if (!a || a.state !== 'pending') return undefined;
     // CF4: a pending change that has run out of time can no longer be decided; it is recorded as expired.
@@ -257,8 +266,9 @@ export class ApprovalStore {
       this.save({ ...a, state: 'expired' });
       return undefined;
     }
-    const cap = a.kind === 'decision' && decision === 'approved' && capUsd !== undefined ? { capUsd } : {};
-    const next = { ...a, state: decision, decidedBy: actor, decidedAt: new Date().toISOString(), ...(notes ? { notes } : {}), ...cap };
+    const cap = a.kind === 'decision' && decision === 'approved' && typeof capUsd === 'number' && Number.isFinite(capUsd) && capUsd >= 0 ? { capUsd } : {};
+    const login = a.kind === 'decision' && githubLogin ? { decidedGithubLogin: githubLogin } : {};
+    const next = { ...a, state: decision, decidedBy: actor, decidedAt: new Date().toISOString(), ...(notes ? { notes } : {}), ...cap, ...login };
     this.save(next);
     return { ...next };
   }

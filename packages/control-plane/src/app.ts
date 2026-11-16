@@ -118,7 +118,7 @@ import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
-import { decisionDelivery, handleDecisionHolds, parseCapUsd } from './decision-holds.js';
+import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
@@ -2948,7 +2948,16 @@ export async function decideApproval(
     const reqRole = agentKindOf(state, pending.agentId) === 'team' ? 'accountable-lead' : 'content-owner';
     return { status: 403, body: { error: 'forbidden', required: 'agent-owner', requiredRole: reqRole } };
   }
-  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note, cap);
+  // GAP-259: a decision hold is decided only by one of its approvers, by their single linked, non-bot GitHub login, which
+  // is recorded with the decision; one that needs a cap is never approved without one.
+  let githubLogin: string | undefined;
+  if (pending?.kind === 'decision' && pending.state === 'pending') {
+    const who = holdDecider(state, pending, actor);
+    if (!who.ok) return { status: 403, body: { error: 'not_an_approver', message: who.error } };
+    githubLogin = who.login;
+    if (decision === 'approve' && pending.hold?.requiresCap && cap === undefined) return { status: 400, body: { error: 'cap_required', message: 'this hold is approved with a cap: send capUsd' } };
+  }
+  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note, cap, githubLogin);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
   state.ledger.append({
     timestamp: new Date().toISOString(),

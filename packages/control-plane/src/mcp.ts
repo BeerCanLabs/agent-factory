@@ -331,6 +331,11 @@ async function dispatchSharedRouteTool(
   args: Record<string, unknown>,
   principal: Principal,
 ): Promise<RouteOutcome | null> {
+  // GAP-259: a refused decision (not an approver, no cap where one is required, not pending) is an MCP error.
+  if (name === 'decide_approval') {
+    const notes = typeof args.notes === 'string' ? args.notes : undefined;
+    return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, notes, undefined, args.capUsd)) as RouteOutcome;
+  }
   if (name === 'whoami') {
     return getWhoami(state, principal);
   }
@@ -412,10 +417,6 @@ async function dispatchLegacyTool(
   if (name === 'get_approval') {
     const a = typeof args.approvalId === 'string' ? state.approvals.get(args.approvalId) : undefined;
     return a ? visibleApprovals(state, principal, [a])[0] : { error: 'not_found' };
-  }
-  if (name === 'decide_approval') {
-    const notes = typeof args.notes === 'string' ? args.notes : undefined;
-    return (await decideApproval(state, String(args.approvalId), String(args.decision), principal, notes, undefined, args.capUsd)).body;
   }
   if (name === 'list_model_catalog') {
     return {
