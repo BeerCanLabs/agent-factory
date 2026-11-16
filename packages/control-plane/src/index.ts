@@ -25,7 +25,7 @@ import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
-import { FleetStateStore } from './fleet-state.js';
+import { FleetStateStore, auditFleetStateLoad } from './fleet-state.js';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
 import { PolicyStore, validatePolicy } from '@beercanlabs/factory-gatekeeper/policy';
@@ -331,6 +331,7 @@ const state: FactoryState = {
           },
         }),
 };
+auditFleetStateLoad(state);
 
 process.env.FACTORY_STARTED_AT = String(Date.now());
 

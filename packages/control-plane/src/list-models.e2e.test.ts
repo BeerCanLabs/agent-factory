@@ -74,7 +74,7 @@ describe('list_models (E1.2)', { concurrency: false }, () => {
 
   const expected = { models: ['claude-haiku', 'grok-4'], default: 'claude-haiku' };
   const runMcp = async (t = token) => {
-    const r = await call(port, '/mcp', 'POST', t, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } });
+    const r = await call(port, '/mcp/run', 'POST', t, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } });
     return r.status === 200 && r.body.result ? JSON.parse(r.body.result.content[0].text) : r;
   };
 
@@ -86,7 +86,7 @@ describe('list_models (E1.2)', { concurrency: false }, () => {
   });
 
   it('run MCP lists and answers list_models identically', async () => {
-    const list = await call(port, '/mcp', 'POST', token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const list = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     assert.ok(list.body.result.tools.some((t: any) => t.name === 'list_models'));
     assert.deepEqual(await runMcp(), expected);
   });
@@ -110,6 +110,7 @@ describe('list_models (E1.2)', { concurrency: false }, () => {
     const other = state.runs.create({ agentId: 'alpha', state: 'WORKING', actor: 'test', trigger: 'api' } as any);
     const otherToken = await tokens.mint({ runId: other.runId, agentId: 'alpha' });
     assert.equal((await call(port, `/api/v1/runs/${runId}/approved-models`, 'GET', otherToken)).status, 401);
+    assert.equal((await call(port, '/mcp/run', 'POST', undefined, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } })).status, 401);
     assert.equal((await call(port, '/mcp', 'POST', undefined, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_models', arguments: {} } })).status, 401);
   });
 });

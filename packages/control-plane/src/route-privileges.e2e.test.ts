@@ -761,6 +761,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       { method: 'POST', path: '/api/v1/runs/nope/wake/pr-reviewer', body: {} },
       { method: 'PUT', path: '/api/v1/agents/castle/holds/plan-budget', body: {} },
       { method: 'POST', path: '/api/v1/keymaster/checkout', body: {} },
+      { method: 'POST', path: '/mcp/run', body: {} },
     ];
     for (const row of rows) {
       const none = await call(port, row.method, row.path, 'none', row.body);
@@ -782,7 +783,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
 
   it('MCP lists the tools a role may call and names the role a forbidden call needs', async () => {
     const rpc = async (cred: Role, method: string, params?: unknown) => (await call(port, 'POST', '/mcp', cred, { jsonrpc: '2.0', id: 1, method, params })).body as {
-      result?: { tools?: Array<{ name: string }> };
+      result?: { tools?: Array<{ name: string }>; content?: Array<{ type: string; text: string }>; isError?: boolean };
       error?: { code: number; message: string };
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
@@ -812,9 +813,15 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     assert.deepEqual(await names('approver'), [...viewerTools].sort());
     assert.deepEqual(await names('admin'), [...viewerTools, ...operatorTools, ...adminTools, 'decide_approval'].sort());
     assert.deepEqual(await names('ingest'), undefined);
-    assert.equal((await rpc('viewer', 'tools/call', { name: 'wake_agent', arguments: { id: 'castle' } })).error?.message, 'forbidden: requires operator');
-    assert.equal((await rpc('operator', 'tools/call', { name: 'decide_approval', arguments: {} })).error?.message, 'forbidden: requires admin');
-    assert.equal((await rpc('viewer', 'tools/call', { name: 'list_agents' })).error, undefined);
+    const wakeCall = await rpc('viewer', 'tools/call', { name: 'wake_agent', arguments: { id: 'castle' } });
+    assert.equal(wakeCall.result?.isError, true);
+    assert.equal(wakeCall.result?.content?.[0]?.text, 'forbidden: requires operator');
+    const decideCall = await rpc('operator', 'tools/call', { name: 'decide_approval', arguments: {} });
+    assert.equal(decideCall.result?.isError, true);
+    assert.equal(decideCall.result?.content?.[0]?.text, 'forbidden: requires admin');
+    const listCall = await rpc('viewer', 'tools/call', { name: 'list_agents' });
+    assert.equal(listCall.error, undefined);
+    assert.equal(listCall.result?.isError, undefined);
   });
 
   it(`only the ${ATTESTATION.role} role may attest the run as the actor on a ledger write; an admin may not`, async () => {
