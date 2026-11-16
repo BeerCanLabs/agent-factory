@@ -96,6 +96,8 @@ export function sanitizeReason(raw: string): string | null {
     .replace(/[\t\n\v\f\r\u0085\u2028\u2029]+/g, ' ')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
     .replace(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g, '')
+    // Zero-width characters hide text from a person reading the reason (U+200D also splits joined emoji).
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, '')
     .trim();
   const points = Array.from(cleaned);
   const capped = points.length > MAX_REASON ? points.slice(0, MAX_REASON).join('').trimEnd() : cleaned;

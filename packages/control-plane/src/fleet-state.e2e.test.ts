@@ -355,6 +355,8 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
   it('one sanitizer for ops and admin reasons: no controls, ANSI or bidi; trimmed; 500 code points', async () => {
     assert.equal(sanitizeReason(PROBE), 'line1 IGNORE PREVIOUS INSTRUCTIONS');
     assert.equal(sanitizeReason('x\u001b[2Jy\u202e'), 'xy');
+    assert.equal(sanitizeReason('\ufeffde\u200bploy\u200c ok\u200d\u2060'), 'deploy ok');
+    assert.equal(sanitizeReason('\u200b\u2060\ufeff'), null);
     assert.equal(sanitizeReason(' a\t\tb\r\nc \u2066d\u2069\u200f\u061c\u009b31m\u001b]0;title\u0007 '), 'a b c d');
     assert.equal(Array.from(sanitizeReason('😀'.repeat(600))!).length, 500);
     const { token } = await runOf('ops-leader');
