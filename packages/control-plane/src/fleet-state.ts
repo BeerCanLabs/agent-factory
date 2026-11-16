@@ -89,15 +89,18 @@ const now = () => new Date().toISOString();
 
 /** GAP-268: the one cleaner for every reason. Every run reads it, and it may carry output a PR author shaped. */
 export function sanitizeReason(raw: string): string | null {
-  const cleaned = raw
+  // A lone surrogate becomes U+FFFD (String.prototype.toWellFormed, Node 20+).
+  const whole = typeof (raw as { toWellFormed?: () => string }).toWellFormed === 'function' ? (raw as unknown as { toWellFormed: () => string }).toWellFormed() : raw;
+  const cleaned = whole
     .replace(/(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g, '')
     .replace(/(?:\u001b\]|\u009d)[^\u0007\u001b\u009c]{0,512}(?:\u0007|\u001b\\|\u009c)?/g, '')
     .replace(/\u001b[ -/]*[0-~]?/g, '')
     .replace(/[\t\n\v\f\r\u0085\u2028\u2029]+/g, ' ')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-    .replace(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g, '')
-    // Zero-width characters hide text from a person reading the reason (U+200D also splits joined emoji).
-    .replace(/[\u200b-\u200d\u2060\ufeff]/g, '')
+    // Format characters (\p{Cf}: bidi, zero-width, tag characters, soft hyphen, ...) and variation selectors can carry
+    // text a person cannot see but a model reads. U+200D also splits joined emoji, and U+FE0F plain-text emoji.
+    .replace(/[\p{Cf}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/gu, '')
+    .replace(/ {2,}/g, ' ')
     .trim();
   const points = Array.from(cleaned);
   const capped = points.length > MAX_REASON ? points.slice(0, MAX_REASON).join('').trimEnd() : cleaned;
