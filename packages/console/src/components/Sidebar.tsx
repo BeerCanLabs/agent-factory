@@ -117,6 +117,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
           label: 'Skill Catalog',
           icon: <Puzzle className="w-4 h-4" />,
         },
+        ...(isAdmin
+          ? [
+              {
+                id: 'studio' as const,
+                label: 'Cartridge Studio',
+                icon: <Cpu className="w-4 h-4" />,
+              },
+            ]
+          : []),
       ],
     },
     {

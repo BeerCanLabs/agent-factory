@@ -35,7 +35,9 @@ function initialLocation(): { screen: ScreenId; agentId?: string } {
       view === 'skills' ||
       view === 'systems' ||
       view === 'models' ||
-      view === 'subscriptions'
+      view === 'subscriptions' ||
+      view === 'studio' ||
+      view === 'keys'
         ? view
         : 'fleet',
     agentId: q.get('agent') ?? undefined,
@@ -258,7 +260,18 @@ const MainLayout: React.FC = () => {
 
           {currentScreen === 'triage' && <TriageView />}
 
-          {currentScreen === 'studio' && <StudioView onRefresh={loadData} />}
+          {currentScreen === 'studio' && (
+            hasRole('admin') ? (
+              <StudioView onRefresh={loadData} />
+            ) : (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-12 text-center text-xs text-slate-500">
+                <p className="font-semibold text-slate-700 dark:text-slate-300">Admin Privileges Required</p>
+                <p className="text-slate-500 text-[11px] mt-1">
+                  Registering new cartridge agents requires administrator authority.
+                </p>
+              </div>
+            )
+          )}
         </main>
       </div>
 

@@ -27,6 +27,18 @@ describe('A2 console forwards the caller, adds no credential', () => {
         res.writeHead(who ? 200 : 401, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(who ?? { error: 'unauthorized' }));
       }
+      if (req.url?.startsWith('/authorize')) {
+        res.writeHead(302, { Location: 'http://localhost:8000/callback?code=test-code' });
+        return res.end();
+      }
+      if (req.url === '/mcp' && !req.headers.authorization) {
+        res.writeHead(401, { 'WWW-Authenticate': 'Bearer error="invalid_token"' });
+        return res.end(JSON.stringify({ error: 'unauthorized' }));
+      }
+      if (req.url === '/mcp/notify' && req.method === 'POST') {
+        res.writeHead(202);
+        return res.end();
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ path: req.url }));
     });
@@ -120,5 +132,60 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(providerLabel('meta'), 'Meta');
     assert.equal(providerLabel('api-key'), 'API key');
     assert.equal(providerLabel(undefined, true), 'Cloudflare Access');
+  });
+
+  it('TSK-340: transparently proxies OAuth 2.1 AS discovery and endpoints to control plane', async () => {
+    // 1. Discovery
+    const disc1 = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`);
+    assert.equal(disc1.status, 200);
+    assert.equal(((await disc1.json()) as { path: string }).path, '/.well-known/oauth-protected-resource/mcp');
+
+    const disc2 = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`);
+    assert.equal(disc2.status, 200);
+    assert.equal(((await disc2.json()) as { path: string }).path, '/.well-known/oauth-authorization-server');
+
+    // 2. Authorize redirect preservation (302 + Location)
+    const auth = await fetch(`http://127.0.0.1:${port}/authorize?client_id=test&response_type=code`, { redirect: 'manual' });
+    assert.equal(auth.status, 302);
+    assert.equal(auth.headers.get('location'), 'http://localhost:8000/callback?code=test-code');
+
+    // 3. Token, Revoke, Register endpoints
+    const token = await fetch(`http://127.0.0.1:${port}/token`, { method: 'POST', body: 'grant_type=authorization_code' });
+    assert.equal(token.status, 200);
+    assert.equal(((await token.json()) as { path: string }).path, '/token');
+
+    const revoke = await fetch(`http://127.0.0.1:${port}/revoke`, { method: 'POST', body: 'token=xyz' });
+    assert.equal(revoke.status, 200);
+    assert.equal(((await revoke.json()) as { path: string }).path, '/revoke');
+
+    const register = await fetch(`http://127.0.0.1:${port}/register`, { method: 'POST', body: '{}' });
+    assert.equal(register.status, 200);
+    assert.equal(((await register.json()) as { path: string }).path, '/register');
+  });
+
+  it('TSK-340: transparently proxies MCP endpoints preserving WWW-Authenticate and empty 202 bodies', async () => {
+    // 1. MCP 401 Bearer challenge
+    const challenge = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', body: '{}' });
+    assert.equal(challenge.status, 401);
+    assert.equal(challenge.headers.get('www-authenticate'), 'Bearer error="invalid_token"');
+
+    // 2. MCP 202 notification with empty body
+    const notify = await fetch(`http://127.0.0.1:${port}/mcp/notify`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer fk_test_token' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    });
+    assert.equal(notify.status, 202);
+    const body = await notify.text();
+    assert.equal(body, '');
+
+    // 3. MCP toolsets path proxying (/mcp/x/all)
+    const all = await fetch(`http://127.0.0.1:${port}/mcp/x/all`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer fk_test_token' },
+      body: '{}',
+    });
+    assert.equal(all.status, 200);
+    assert.equal(((await all.json()) as { path: string }).path, '/mcp/x/all');
   });
 });

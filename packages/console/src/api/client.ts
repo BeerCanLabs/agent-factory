@@ -113,6 +113,14 @@ export interface HelperDefinition {
 export type PrincipalView = { id: string; displayName?: string; emails?: string[] };
 export type GrantView = { id: string; subject: string; role: string; scope: { kind: string; id?: string }; state?: string; expiresAt?: string | null };
 export type KeyView = { id: string; deviceFamily?: string; createdAt?: string; lastUsedAt?: string; revokedAt?: string | null };
+export interface OAuthConsentView {
+  clientId: string;
+  clientName: string;
+  scope: string;
+  createdAt: string;
+  updatedAt?: string;
+  lastUsedAt?: string;
+}
 
 export const factoryApi = {
   // S9: people, grants and keys.
@@ -130,6 +138,8 @@ export const factoryApi = {
   issueKey: (deviceFamily: string) => request<{ key: KeyView; secret: string }>('/keys', { method: 'POST', body: JSON.stringify({ deviceFamily }) }),
   rotateKey: (id: string) => request<{ key: KeyView; secret: string }>(`/keys/${encodeURIComponent(id)}/rotate`, { method: 'POST' }),
   revokeKey: (id: string) => request<unknown>(`/keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listOAuthConsents: () => request<{ consents: OAuthConsentView[] }>('/oauth/consents'),
+  revokeOAuthConsent: (clientId: string) => request<{ ok: boolean; revoked: boolean }>(`/oauth/consents/${encodeURIComponent(clientId)}`, { method: 'DELETE' }),
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {
     const res = await request<AgentRecord[] | { agents: AgentRecord[] }>('/registry/agents');
@@ -391,9 +401,22 @@ export const factoryApi = {
 
   async verifyLedgerWorm(): Promise<{ ok: boolean; checkpointsChecked: number; worm: boolean; reason?: string }> {
     try {
-      return await request<{ ok: boolean; checkpointsChecked: number; worm: boolean }>('/ledger/verify');
-    } catch {
-      return { ok: true, checkpointsChecked: 0, worm: true };
+      return await request<{ ok: boolean; checkpointsChecked: number; worm: boolean; reason?: string }>('/ledger/verify');
+    } catch (err) {
+      if (err instanceof ApiError) {
+        return {
+          ok: false,
+          checkpointsChecked: typeof err.body?.checkpointsChecked === 'number' ? err.body.checkpointsChecked : 0,
+          worm: Boolean(err.body?.worm),
+          reason: typeof err.body?.reason === 'string' ? err.body.reason : err.message,
+        };
+      }
+      return {
+        ok: false,
+        checkpointsChecked: 0,
+        worm: false,
+        reason: err instanceof Error ? err.message : String(err),
+      };
     }
   },
 

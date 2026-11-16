@@ -823,3 +823,495 @@ export function validateOperationContract(op: OperationContract): { valid: boole
     errors,
   };
 }
+
+/**
+ * Shared canonical CLI operation definition interface (§6.17 CL11, GAP-249, TSK-340).
+ * CLI tool metadata and control plane bindings are derived from this catalog.
+ */
+export interface CliOperationDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly privilege: string;
+  readonly mutating: boolean;
+  readonly agentScoped?: boolean;
+  readonly method: HttpMethod;
+  readonly pathTemplate: string;
+  readonly parameters: JsonSchemaObject;
+}
+
+const agentIdParam: JsonSchemaObject = { type: 'string', description: 'The agent id.' };
+
+/**
+ * Canonical CLI operations catalog (§6.17 CL11, GAP-249).
+ * All 42 control-plane operations exposed to the CLI tools and slash commands.
+ */
+export const CLI_OPERATIONS: readonly CliOperationDefinition[] = [
+  // People, grants, access
+  {
+    name: 'list_principals',
+    description: 'The people and services the factory knows, with their emails.',
+    privilege: 'grants.manage',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/principals',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_grants',
+    description: 'Role grants, optionally for one subject.',
+    privilege: 'grants.manage',
+    mutating: false,
+    agentScoped: true,
+    method: 'GET',
+    pathTemplate: '/api/v1/grants',
+    parameters: { type: 'object', properties: { subject: { type: 'string' } } },
+  },
+  {
+    name: 'grant_role',
+    description: 'Grant a role to a subject at fleet, agent:<id> or skill:<id> scope.',
+    privilege: 'grants.manage',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/grants',
+    parameters: {
+      type: 'object',
+      properties: { subject: { type: 'string' }, role: { type: 'string' }, scope: { type: 'string' } },
+      required: ['subject', 'role'],
+    },
+  },
+  {
+    name: 'revoke_grant',
+    description: 'Revoke one grant by id.',
+    privilege: 'grants.manage',
+    mutating: true,
+    agentScoped: true,
+    method: 'DELETE',
+    pathTemplate: '/api/v1/grants/:id',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+
+  // Agents & policy
+  {
+    name: 'list_agents',
+    description: 'List every agent with its state, budget standing and owners.',
+    privilege: 'agents.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/agents',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_agent',
+    description: 'Details and lifecycle state of one agent.',
+    privilege: 'agents.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/registry/agents/:id',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'get_agent_policy',
+    description: "An agent's policy: granted routes, models and budget.",
+    privilege: 'policy.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/agents/:id/policy',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+
+  // Metrics & Spend
+  {
+    name: 'factory_metrics',
+    description: 'Operational snapshot: active runs, agent counts by state, spend today and this month against budgets.',
+    privilege: 'metrics.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/metrics',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_spend',
+    description: 'Spend so far, by agent.',
+    privilege: 'spend.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/spend',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_spend_report',
+    description: 'The factory spend report (AI and infrastructure) for a calendar month.',
+    privilege: 'spend.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/spend/report',
+    parameters: {
+      type: 'object',
+      properties: { period: { type: 'string', enum: ['current', 'last'], description: 'Which month. Default current.' } },
+    },
+  },
+  {
+    name: 'get_compute_spend',
+    description: 'Infrastructure (compute) spend.',
+    privilege: 'spend.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/spend/compute',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_factory_budgets',
+    description: 'The factory-wide monthly budgets (AI, infrastructure, total) and their history.',
+    privilege: 'spend.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/spend/budgets',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'set_factory_budgets',
+    description: 'Set the factory-wide monthly budgets in dollars. Send only the ones to change. alertAt is a list of fractions such as [0.8, 1].',
+    privilege: 'spend.budget.set',
+    mutating: true,
+    method: 'PUT',
+    pathTemplate: '/api/v1/spend/budgets',
+    parameters: {
+      type: 'object',
+      properties: {
+        aiMonthUsd: { type: 'number' },
+        infraMonthUsd: { type: 'number' },
+        totalMonthUsd: { type: 'number' },
+        alertAt: { type: 'array', items: { type: 'number' } },
+      },
+    },
+  },
+  {
+    name: 'set_agent_budget',
+    description: "Set one agent's spend limit in dollars for a day or a month.",
+    privilege: 'registry.budget.set',
+    mutating: true,
+    method: 'PUT',
+    pathTemplate: '/api/v1/registry/agents/:id/budget',
+    parameters: {
+      type: 'object',
+      properties: { id: agentIdParam, spendLimitUsd: { type: 'number' }, period: { type: 'string', enum: ['daily', 'monthly'] } },
+      required: ['id', 'spendLimitUsd', 'period'],
+    },
+  },
+
+  // Runs
+  {
+    name: 'list_runs',
+    description: 'Recent runs, optionally for one agent or only the active ones.',
+    privilege: 'runs.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/runs',
+    parameters: {
+      type: 'object',
+      properties: { agent: agentIdParam, active: { type: 'boolean' }, limit: { type: 'integer' } },
+    },
+  },
+  {
+    name: 'get_run',
+    description: 'One run: state, trigger, timing and cost.',
+    privilege: 'runs.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/runs/:id',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+  {
+    name: 'cancel_run',
+    description: 'Cancel an active run.',
+    privilege: 'runs.cancel',
+    mutating: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/runs/:id/cancel',
+    parameters: { type: 'object', properties: { id: { type: 'string', description: 'The run id.' } }, required: ['id'] },
+  },
+
+  // Ledger & Approvals
+  {
+    name: 'query_ledger',
+    description: 'Recent rows of the audit ledger, optionally for one agent.',
+    privilege: 'ledger.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/ledger',
+    parameters: { type: 'object', properties: { agent: agentIdParam, limit: { type: 'integer' } } },
+  },
+  {
+    name: 'list_approvals',
+    description: 'Tool calls held for a person to approve.',
+    privilege: 'approvals.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/approvals',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'decide_approval',
+    description: 'Approve or reject a held tool call or a decision an agent asked for; capUsd sets a spending cap when approving a decision.',
+    privilege: 'approvals.decide',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/approvals/:id',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        decision: { type: 'string', enum: ['approve', 'reject'] },
+        notes: { type: 'string' },
+        capUsd: { type: 'string', description: 'A cap in USD, e.g. 2500 or $2,500.00.' },
+      },
+      required: ['id', 'decision'],
+    },
+  },
+
+  // Lifecycle & control
+  {
+    name: 'pause_agent',
+    description: 'Pause an agent: the kill-switch. It stops egress and wake-ups until resumed.',
+    privilege: 'agents.pause',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/agents/:id/pause',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'resume_agent',
+    description: 'Resume a paused or isolated agent.',
+    privilege: 'agents.resume',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/agents/:id/resume',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'isolate_agent',
+    description: "Isolate an agent's egress.",
+    privilege: 'agents.isolate',
+    mutating: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/agents/:id/isolate',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'wake_agent',
+    description: 'Wake an agent (start a run).',
+    privilege: 'agents.wake',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/agents/:id/wake',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'reset_agent',
+    description: "End the agent's runs and return it to sleeping.",
+    privilege: 'agents.reset',
+    mutating: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/agents/:id/reset',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'retire_agent',
+    description: 'Retire an agent (stage 1: compute and triggers off; reversible until purged).',
+    privilege: 'registry.retire',
+    mutating: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/registry/agents/:id/retire',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+  {
+    name: 'reinstate_agent',
+    description: 'Bring a retired agent back during its holding period.',
+    privilege: 'registry.reinstate',
+    mutating: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/registry/agents/:id/reinstate',
+    parameters: { type: 'object', properties: { id: agentIdParam }, required: ['id'] },
+  },
+
+  // Models, Skills, Triage, Schedules
+  {
+    name: 'list_models',
+    description: 'Models the factory offers and the default.',
+    privilege: 'models.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/models',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_skills',
+    description: 'The skills catalog.',
+    privilege: 'skills.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/skills',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_triage',
+    description: 'Open incidents and faults (the Doctor).',
+    privilege: 'triage.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/triage',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_schedules',
+    description: 'Scheduled wake-ups.',
+    privilege: 'schedules.read',
+    mutating: false,
+    method: 'GET',
+    pathTemplate: '/api/v1/schedules',
+    parameters: { type: 'object', properties: {} },
+  },
+
+  // Subscriptions & BYOM (§6.9 M5)
+  {
+    name: 'list_subscriptions',
+    description: 'Subscription connections, permitted vendor templates with terms, and vendors not offered.',
+    privilege: 'subscriptions.own',
+    mutating: false,
+    agentScoped: true,
+    method: 'GET',
+    pathTemplate: '/api/v1/subscriptions',
+    parameters: { type: 'object', properties: { scope: { type: 'string', enum: ['factory', 'personal'] } } },
+  },
+  {
+    name: 'get_subscription_spend',
+    description: 'Subscription token usage today and this UTC month per connection and per agent.',
+    privilege: 'subscriptions.own',
+    mutating: false,
+    agentScoped: true,
+    method: 'GET',
+    pathTemplate: '/api/v1/subscriptions/spend',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'connect_subscription',
+    description: 'Start device-code sign-in to connect a permitted vendor subscription (personal BYOM or factory-shared). Requires subscriberAttested: true.',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/subscriptions/connect',
+    parameters: {
+      type: 'object',
+      properties: {
+        templateId: { type: 'string' },
+        subscriberAttested: { type: 'boolean' },
+        scope: { type: 'string', enum: ['factory', 'personal'] },
+        name: { type: 'string' },
+      },
+      required: ['templateId', 'subscriberAttested'],
+    },
+  },
+  {
+    name: 'poll_subscription_signin',
+    description: 'Poll a pending subscription device-code sign-in by signInId until connected.',
+    privilege: 'subscriptions.own',
+    mutating: false,
+    agentScoped: true,
+    method: 'GET',
+    pathTemplate: '/api/v1/subscriptions/sign-ins/:id',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+  {
+    name: 'reconnect_subscription',
+    description: 'Start device-code sign-in to re-authorize an existing subscription connection. Requires subscriberAttested: true.',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/subscriptions/:id/reconnect',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, subscriberAttested: { type: 'boolean' } }, required: ['id', 'subscriberAttested'] },
+  },
+  {
+    name: 'rename_subscription',
+    description: 'Rename a subscription connection (catalog display labels update immediately).',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'PATCH',
+    pathTemplate: '/api/v1/subscriptions/:id',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } }, required: ['id', 'name'] },
+  },
+  {
+    name: 'set_subscription_cap',
+    description: 'Set or clear (null) the optional per-agent daily usage cap on a subscription connection.',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'PATCH',
+    pathTemplate: '/api/v1/subscriptions/:id',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, cap: { type: ['integer', 'null'] } }, required: ['id', 'cap'] },
+  },
+  {
+    name: 'discover_subscription_models',
+    description: 'Discover models offered by the vendor plan on a subscription connection.',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/subscriptions/:id/discover',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+  {
+    name: 'add_subscription_model',
+    description: 'Admit a subscription-backed model into the catalog ($0 immutable for personal BYOM; explicit price for factory).',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'POST',
+    pathTemplate: '/api/v1/subscriptions/:id/models',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        modelId: { type: 'string' },
+        inputPerMTok: { type: 'number' },
+        outputPerMTok: { type: 'number' },
+      },
+      required: ['id', 'name', 'modelId'],
+    },
+  },
+  {
+    name: 'retire_subscription_model',
+    description: 'Retire a subscription-backed model from the catalog.',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'DELETE',
+    pathTemplate: '/api/v1/subscriptions/:id/models/:model',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, model: { type: 'string' } }, required: ['id', 'model'] },
+  },
+  {
+    name: 'disconnect_subscription',
+    description: 'Disconnect a subscription connection, purge its vault grant, and retire its catalog models.',
+    privilege: 'subscriptions.own',
+    mutating: true,
+    agentScoped: true,
+    method: 'DELETE',
+    pathTemplate: '/api/v1/subscriptions/:id',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+  },
+];
+
+/**
+ * Fast lookup map of canonical CLI operations keyed by tool name.
+ */
+export const CLI_OPERATION_MAP: Readonly<Record<string, CliOperationDefinition>> = Object.fromEntries(
+  CLI_OPERATIONS.map((op) => [op.name, op]),
+);

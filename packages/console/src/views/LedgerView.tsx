@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, CheckCircle2, ShieldCheck, Download, Search, Hash, Clock, User } from 'lucide-react';
+import { FileText, CheckCircle2, ShieldCheck, Download, Search, Hash, Clock, User, AlertTriangle } from 'lucide-react';
 import type { LedgerEvent } from '../api/types.js';
 import { factoryApi } from '../api/client.js';
 
@@ -8,7 +8,7 @@ export const LedgerView: React.FC = () => {
   const [selectedEvent, setSelectedEvent] = useState<LedgerEvent | null>(null);
   const [filterQuery, setFilterQuery] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; checkpoints: number } | null>(null);
+  const [verifyResult, setVerifyResult] = useState<{ ok: boolean; checkpoints: number; reason?: string } | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -23,9 +23,9 @@ export const LedgerView: React.FC = () => {
     setIsVerifying(true);
     try {
       const res = await factoryApi.verifyLedgerWorm();
-      setVerifyResult({ ok: res.ok, checkpoints: res.checkpointsChecked });
-    } catch {
-      setVerifyResult({ ok: false, checkpoints: 0 });
+      setVerifyResult({ ok: res.ok, checkpoints: res.checkpointsChecked, reason: res.reason });
+    } catch (err: any) {
+      setVerifyResult({ ok: false, checkpoints: 0, reason: err?.message || 'Verification request failed' });
     } finally {
       setIsVerifying(false);
     }
@@ -86,22 +86,39 @@ export const LedgerView: React.FC = () => {
         </div>
       </div>
 
-      {/* Verify Result Toast */}
+      {/* Verify Result Toast / Alert */}
       {verifyResult && (
-        <div className="bg-emerald-100 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 p-4 rounded-xl flex items-center justify-between text-xs animate-fade-in">
-          <div className="flex items-center space-x-2.5">
-            <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-            <div>
-              <span className="font-bold">Cryptographic WORM Verification PASSED!</span>
-              <p className="text-emerald-700 dark:text-emerald-400/80 mt-0.5">
-                All {verifyResult.checkpoints} audit checkpoints verified against cloud object-lock immutable sinks. Hash chain unbroken.
-              </p>
+        verifyResult.ok ? (
+          <div className="bg-emerald-100 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 p-4 rounded-xl flex items-center justify-between text-xs animate-fade-in" role="status">
+            <div className="flex items-center space-x-2.5">
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <div>
+                <span className="font-bold">Cryptographic WORM Verification PASSED!</span>
+                <p className="text-emerald-700 dark:text-emerald-400/80 mt-0.5">
+                  All {verifyResult.checkpoints} audit checkpoints verified against cloud object-lock immutable sinks. Hash chain unbroken.
+                </p>
+              </div>
             </div>
+            <button onClick={() => setVerifyResult(null)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200 text-xs">
+              Dismiss
+            </button>
           </div>
-          <button onClick={() => setVerifyResult(null)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200 text-xs">
-            Dismiss
-          </button>
-        </div>
+        ) : (
+          <div className="bg-rose-100 dark:bg-rose-950/80 border border-rose-300 dark:border-rose-800 text-rose-800 dark:text-rose-300 p-4 rounded-xl flex items-center justify-between text-xs animate-fade-in" role="alert">
+            <div className="flex items-center space-x-2.5">
+              <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400 shrink-0" />
+              <div>
+                <span className="font-bold">Cryptographic WORM Verification FAILED!</span>
+                <p className="text-rose-700 dark:text-rose-400/80 mt-0.5">
+                  Ledger verification detected tampered or unverified records: {verifyResult.reason || 'Hash chain mismatch or unreachable sink'}.
+                </p>
+              </div>
+            </div>
+            <button onClick={() => setVerifyResult(null)} className="text-rose-600 dark:text-rose-400 hover:text-rose-800 dark:hover:text-rose-200 text-xs">
+              Dismiss
+            </button>
+          </div>
+        )
       )}
 
       {/* Search Input */}

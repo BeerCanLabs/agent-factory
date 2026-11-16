@@ -122,3 +122,41 @@ describe('a factory role beside an agent role', () => {
     for (const roles of [['viewer'], ['approver'], [], undefined] as const) assert.deepEqual(factoryRoleWarnings(roles as never, { donna: ['Family'] }), []);
   });
 });
+
+describe('ACTOR_RE principal actor validation (GAP-253, TSK-340)', () => {
+  it('accepts canonical user:<id>, user:<email>, group:<id>, domain:<domain> and legacy actors', async () => {
+    const { ACTOR_RE } = await import('../../components/OwnersEditor.js');
+    const valid = [
+      'user:alice',
+      'user:alice@example.com',
+      'user:dsackrider',
+      'group:engineering',
+      'group:ops-team',
+      'domain:example.com',
+      'cloudflare:alice@example.com',
+      'oidc:google|123456789',
+      'token:ci-token',
+      'service:github-sync',
+      'cloudflare-service:edge-router',
+    ];
+    for (const actor of valid) {
+      assert.equal(ACTOR_RE.test(actor), true, `expected valid: ${actor}`);
+    }
+  });
+
+  it('rejects invalid or bare actors', async () => {
+    const { ACTOR_RE } = await import('../../components/OwnersEditor.js');
+    const invalid = [
+      '',
+      'alice',
+      'alice@example.com',
+      'unknown:alice',
+      'invalid_prefix:test',
+      'user:',
+      'group:',
+    ];
+    for (const actor of invalid) {
+      assert.equal(ACTOR_RE.test(actor), false, `expected invalid: ${actor}`);
+    }
+  });
+});
