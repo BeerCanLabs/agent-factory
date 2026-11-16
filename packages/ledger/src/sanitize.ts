@@ -94,9 +94,12 @@ export type LedgerEvent = {
   tokensUsed?: number;
   utcDay?: string;
   templateId?: string;
+  /** S1 / TSK-338: MCP client channel attribution (e.g. `mcp:direct`, `mcp:<client_id>`). */
+  via?: string;
 };
 
 const ALLOWED = new Set<keyof LedgerEvent>([
+  'via',
   'dailyTokenCap',
   'tokensUsed',
   'utcDay',
@@ -436,6 +439,9 @@ export function toLedgerEvent(raw: Record<string, unknown>, secrets: Iterable<st
   }
   if (typeof raw.templateId === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(raw.templateId)) {
     event.templateId = raw.templateId;
+  }
+  if (typeof raw.via === 'string' && /^mcp:[a-zA-Z0-9._-]{1,64}$/.test(raw.via)) {
+    event.via = raw.via;
   }
   if (raw.payloadSha256 !== undefined) event.payloadSha256 = String(raw.payloadSha256);
   else {

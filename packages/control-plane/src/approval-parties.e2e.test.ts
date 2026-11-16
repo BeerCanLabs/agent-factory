@@ -178,12 +178,23 @@ describe('who decides what an agent did (TSK-108)', { concurrency: false }, () =
     assert.equal((await decide(id, undefined)).status, 401);
   });
 
-  it('the MCP tool decides as the REST route does for a global admin, and still asks the role for the others', async () => {
+  it('the MCP tool asks a global admin to confirm as a human (E9), and still asks the role for the others', async () => {
     const mcp = (token: string, approvalId: string) =>
       call('/mcp', 'POST', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId, decision: 'approve' } } });
-    const ok = await mcp(ADMIN, pending('held'));
+    const pendingId = pending('held');
+    const ok = await mcp(ADMIN, pendingId);
     assert.equal(ok.body.error, undefined);
-    assert.equal(JSON.parse(ok.body.result.content[0].text).state, 'approved');
+    const parsedInit = JSON.parse(ok.body.result.content[0].text);
+    assert.equal(parsedInit.status, 'human_confirmation_required');
+    assert.ok(parsedInit.challengeId);
+    assert.match(parsedInit.confirmationUrl, /^\/api\/v1\/mcp\/confirm\//);
+    assert.equal(state.approvals.get(pendingId)?.state, 'pending', 'the model cannot decide by itself');
+
+    // E9: the confirmation needs a live browser session of the same principal; a bearer token is not one.
+    const confirmRes = await call(parsedInit.confirmationUrl, 'POST', ADMIN, {});
+    assert.equal(confirmRes.status, 401);
+    assert.equal(state.approvals.get(pendingId)?.state, 'pending');
+
     const refused = await mcp(ALICE, pending('held', { provider: 'discord', id: '42' }));
     assert.equal(refused.body.result?.isError, true);
     assert.match(refused.body.result?.content?.[0]?.text ?? '', /forbidden/);

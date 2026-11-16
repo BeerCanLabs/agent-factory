@@ -113,6 +113,12 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/keymaster/providers/p/client', privilege: 'credentials.provider.read', role: 'viewer' },
   { method: 'GET', path: '/api/v1/schedules', privilege: 'schedules.read', role: 'viewer' },
   { method: 'POST', path: '/mcp', privilege: 'mcp.use', role: 'viewer', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
+  { method: 'POST', path: '/mcp/readonly', privilege: 'mcp.use', role: 'viewer', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
+  { method: 'POST', path: '/mcp/x/all', privilege: 'mcp.use', role: 'viewer', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
+  { method: 'GET', path: '/api/v1/mcp/confirm/c1', privilege: 'mcp.use', role: 'viewer' },
+  { method: 'POST', path: '/api/v1/mcp/confirm/c1', privilege: 'mcp.use', role: 'viewer', body: {} },
+  { method: 'GET', path: '/api/v1/mcp/handoff/h1', privilege: 'mcp.use', role: 'viewer' },
+  { method: 'POST', path: '/api/v1/mcp/handoff/h1', privilege: 'mcp.use', role: 'viewer', body: {} },
   // operator
   { method: 'POST', path: '/api/v1/agents/nope/runs', privilege: 'agents.wake', role: 'operator', body: {} },
   { method: 'POST', path: '/api/v1/ingress/approval-prompts', privilege: 'approvals.channel', role: 'gatekeeper-ingress', exclusive: true, body: {} },
@@ -129,6 +135,7 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/nope/conversation', privilege: 'agents.converse', role: 'operator', body: {} },
   { method: 'GET', path: '/api/v1/agents/nope/replies', privilege: 'agents.converse', role: 'operator' },
   { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'agents.converse', role: 'operator', body: {} },
+  { method: 'POST', path: '/mcp/agents/castle', privilege: 'agents.converse', role: 'operator', body: { jsonrpc: '2.0', id: 1, method: 'ping' } },
   { method: 'POST', path: '/api/v1/agents/nope/conversation-requests', privilege: 'conversations.read-others', role: 'admin', firstRole: 'operator', body: { op: 'list', subject: 'cloudflare:someone@example.com' } },
   { method: 'POST', path: '/api/v1/agents/nope/wake', privilege: 'runs.attest-requester', role: 'operator', thenExclusive: 'gatekeeper-ingress', body: { requestedBy: { provider: 'discord', id: '1' } } },
   { method: 'POST', path: '/api/v1/schedules', privilege: 'schedules.write', role: 'operator', firstRole: 'viewer', body: {} },
@@ -787,31 +794,57 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       error?: { code: number; message: string };
     };
     const names = async (cred: Role) => (await rpc(cred, 'tools/list')).result?.tools?.map((t) => t.name).sort();
-    const viewerTools = ['authz_check', 'get_agent_models', 'get_approval', 'get_fleet_state', 'get_run', 'list_agents', 'list_approvals', 'list_model_catalog', 'query_ledger', 'whoami'];
-    const operatorTools = ['check_agent_update', 'isolate_agent', 'pause_agent', 'resume_agent', 'wake_agent'];
+    const viewerTools = [
+      'authz_check',
+      'get_agent_config',
+      'get_agent_models',
+      'get_agent_policy',
+      'get_approval',
+      'get_fleet_spend',
+      'get_fleet_state',
+      'get_metrics',
+      'get_run',
+      'get_setup_status',
+      'get_spend_budgets',
+      'get_spend_report',
+      'list_agent_skills',
+      'list_agents',
+      'list_approvals',
+      'list_model_catalog',
+      'list_runs',
+      'list_schedules',
+      'query_ledger',
+      'verify_ledger',
+      'whoami',
+    ];
+    const operatorTools = [
+      'agents_converse',
+      'cancel_run',
+      'create_agent',
+      'pause_agent',
+      'resume_agent',
+      'wake_agent',
+    ];
     const adminTools = [
-      'add_principal_email',
-      'admit_model',
-      'create_principal',
+      'adopt_agent_skill',
+      'allocate_agent_budget',
+      'create_grant',
+      'decide_approval',
       'grant_role',
-      'install_agent_update',
       'list_grants',
-      'list_principals',
-      'remove_principal_email',
-      'retire_vendor_or_model',
+      'remove_agent_skill',
       'revoke_all_access',
       'revoke_grant',
-      'scan_vendor_models',
       'set_agent_models',
+      'set_agent_policy',
       'set_default_model',
-      'set_fleet_state',
-      'update_model_pricing',
+      'set_spend_budgets',
     ];
     assert.deepEqual(await names('viewer'), viewerTools);
     assert.deepEqual(await names('operator'), [...viewerTools, ...operatorTools].sort());
     // S4, D27, D29: the approver role no longer clears run-time holds.
     assert.deepEqual(await names('approver'), [...viewerTools].sort());
-    assert.deepEqual(await names('admin'), [...viewerTools, ...operatorTools, ...adminTools, 'decide_approval'].sort());
+    assert.deepEqual(await names('admin'), [...viewerTools, ...operatorTools, ...adminTools].sort());
     assert.deepEqual(await names('ingest'), undefined);
     const wakeCall = await rpc('viewer', 'tools/call', { name: 'wake_agent', arguments: { id: 'castle' } });
     assert.equal(wakeCall.result?.isError, true);

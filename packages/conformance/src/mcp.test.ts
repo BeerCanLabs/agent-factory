@@ -1,6 +1,8 @@
 // DESIGN_AUTHORITY.md §5 (TSK-337), GAP-248, CL3, CL6, CL11, S1, D23: MCP Protocol Compliance, Refusal Clarity & Error Refactoring
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CONTROL_PLANE_ROUTES,
   getMcpSchemaCatalog,
@@ -9,6 +11,8 @@ import {
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   TOOLS,
   handleMcp,
+  handleAgentMcp,
+  parseToolsetTokens,
   redactMcpResponse,
 } from '@beercanlabs/factory-control-plane/mcp';
 
@@ -207,5 +211,134 @@ describe('MCP Protocol Compliance & Conformance (TSK-337, GAP-248, CL3, CL6, CL1
     assert.ok(!JSON.stringify(redacted).includes('fk_test_98765432101234567890'), 'fk_ in structuredContent must be redacted'); // secret-scan:allow (test fixture)
     assert.equal(redacted.structuredContent.raw, '[REDACTED]');
     assert.equal(redacted.structuredContent.token, '[REDACTED]');
+  });
+
+  it('TSK-338 & CL11: dispatchLegacyTool is eliminated and 100% of MCP tools dispatch in-process', () => {
+    // Assert dispatchLegacyTool is not present anywhere in mcp.ts source
+    const mcpTsPath = join(import.meta.dirname, '../../control-plane/src/mcp.ts');
+    const mcpTsContent = readFileSync(mcpTsPath, 'utf8');
+    assert.ok(!mcpTsContent.includes('dispatchLegacyTool'), 'dispatchLegacyTool must not exist in mcp.ts');
+    assert.ok(mcpTsContent.includes('executeInProcessRoute'), 'mcp.ts must use executeInProcessRoute');
+    assert.ok(mcpTsContent.includes('dispatchControlPlaneHttp'), 'mcp.ts must dispatch directly to dispatchControlPlaneHttp');
+
+    // 100% of MCP tools in TOOLS catalog map to a registered operation in CONTROL_PLANE_ROUTES
+    const opsMap = new Map(CONTROL_PLANE_ROUTES.map((r) => [r.operationId, r]));
+    for (const tool of TOOLS) {
+      const meta = (tool as any)._meta;
+      assert.ok(meta, `Tool ${tool.name} must declare _meta`);
+      assert.ok(meta.operationId, `Tool ${tool.name} must map to an operationId`);
+      assert.ok(opsMap.has(meta.operationId), `Tool ${tool.name} operation ${meta.operationId} must exist in CONTROL_PLANE_ROUTES`);
+    }
+  });
+
+  it('TSK-338 & GAP-250: Task-domain toolset selection (core <= 40 default, toolsets, readonly)', async () => {
+    const mockState: any = { version: '0.1.0', secretValues: new Set(), agents: new Map() };
+    const admin = { actor: 'alice', roles: ['admin'] };
+
+    // 1. Default POST /mcp is core toolset bounded to <= 40
+    const defaultRes = (await handleMcp(mockState, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, admin)) as any;
+    const defaultTools = defaultRes.result.tools;
+    assert.ok(defaultTools.length <= 40, `Default core tools must be <= 40, got ${defaultTools.length}`);
+
+    // 2. /mcp/x/all returns full domain coverage (> 40 tools)
+    const allRes = (await handleMcp(mockState, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, admin, { isAll: true })) as any;
+    assert.ok(allRes.result.tools.length > 40, `Full domain coverage must be > 40 tools, got ${allRes.result.tools.length}`);
+
+    // 3. parseToolsetTokens recognizes toolsets, staff aliases, and 'all'
+    const parsed = parseToolsetTokens('schedules,spend');
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(Array.from(parsed.toolsets).sort(), ['schedules', 'spend']);
+
+    const unknownParsed = parseToolsetTokens('invalid_toolset_xyz');
+    assert.equal(unknownParsed.ok, false);
+
+    // 4. Readonly MCP view lists only readOnlyHint: true tools and rejects mutations
+    const readonlyRes = (await handleMcp(mockState, { jsonrpc: '2.0', id: 3, method: 'tools/list' }, admin, { readOnly: true })) as any;
+    for (const t of readonlyRes.result.tools) {
+      assert.equal(t.annotations?.readOnlyHint, true, `Tool ${t.name} in readonly view must have readOnlyHint: true`);
+    }
+
+    const mutateRefused = (await handleMcp(mockState, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'pause_agent', arguments: { id: 'castle' } },
+    }, admin, { readOnly: true })) as any;
+    assert.equal(mutateRefused.result?.isError, true);
+    assert.equal(mutateRefused.result?.structuredContent?.error, 'readonly_mcp_view');
+  });
+
+  it('TSK-338 & E9: human-decision tools require human confirmation challenge over MCP', async () => {
+    const mockState: any = {
+      version: '0.1.0',
+      secretValues: new Set(),
+      agents: new Map(),
+      approvals: { get: () => undefined },
+      mcpChallenges: new Map(),
+    };
+    const admin = { actor: 'alice', roles: ['admin'] };
+
+    // Tools classified as human-decision
+    const humanDecisionOps = CONTROL_PLANE_ROUTES.filter((r) => r.mcpExposure === 'human-decision');
+    assert.ok(humanDecisionOps.length > 0, 'Must have operations classified as human-decision');
+
+    const res = (await handleMcp(mockState, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: { name: 'decide_approval', arguments: { approvalId: 'app-1', decision: 'approve' } },
+    }, admin, { clientId: 'test-client' })) as any;
+
+    assert.equal(res.result?.structuredContent?.status, 'human_confirmation_required');
+    assert.ok(res.result?.structuredContent?.challengeId);
+    assert.match(res.result?.structuredContent?.confirmationUrl, /^\/api\/v1\/mcp\/confirm\//);
+  });
+
+  it('TSK-338 & CL6/K5: handoff tools never accept secret values directly and require handoff URL', async () => {
+    const mockState: any = {
+      version: '0.1.0',
+      secretValues: new Set(),
+      agents: new Map(),
+      mcpHandoffs: new Map(),
+    };
+    const admin = { actor: 'alice', roles: ['admin'] };
+
+    const handoffOps = CONTROL_PLANE_ROUTES.filter((r) => r.mcpExposure === 'handoff');
+    assert.ok(handoffOps.length > 0, 'Must have operations classified as handoff');
+
+    const res = (await handleMcp(mockState, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: { name: 'set_platform_credential', arguments: { name: 'ANTHROPIC_API_KEY', value: 'secret-val' } },
+    }, admin, { clientId: 'test-client' })) as any;
+
+    assert.equal(res.result?.structuredContent?.status, 'handoff_required');
+    assert.ok(res.result?.structuredContent?.handoffId);
+    assert.match(res.result?.structuredContent?.handoffUrl, /^\/api\/v1\/mcp\/handoff\//);
+  });
+
+  it('TSK-338: conversational agent surface handles POST /mcp/agents/:id and agents_converse', async () => {
+    const mockState: any = {
+      version: '0.1.0',
+      secretValues: new Set(),
+      agents: new Map([['castle', { id: 'castle', name: 'castle', state: 'ACTIVE' }]]),
+    };
+    const admin = { actor: 'alice', roles: ['admin'] };
+
+    // tools/list on /mcp/agents/:id
+    const agentToolsRes = (await handleAgentMcp(mockState, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'tools/list',
+    }, admin, 'castle')) as any;
+
+    assert.equal(agentToolsRes.jsonrpc, '2.0');
+    const toolNames = agentToolsRes.result.tools.map((t: any) => t.name).sort();
+    assert.deepEqual(toolNames, ['ask', 'get_agent_info', 'get_replies']);
+
+    // Root TOOLS includes agents_converse
+    const converseTool = TOOLS.find((t) => t.name === 'agents_converse');
+    assert.ok(converseTool, 'TOOLS must include agents_converse');
   });
 });
