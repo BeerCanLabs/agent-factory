@@ -118,6 +118,7 @@ import { handleSystems, type SystemsStore } from './systems.js';
 import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
+import { decisionDelivery, handleDecisionHolds, parseCapUsd } from './decision-holds.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
@@ -2874,6 +2875,10 @@ export function stageDiscovered(state: FactoryState, vendorId: string, discovere
  * not decide is refused whether or not the approval exists.
  */
 /** A configuration change names a person's external identity: only those who may decide it read what it says (CF4). Used by every list. */
+/** GAP-259: what a list may filter on; `tool` is an MCP tool call (an approval with no kind). */
+export const APPROVAL_KINDS = ['tool', 'held', 'change', 'decision'] as const;
+export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
+
 export function visibleApprovals(state: FactoryState, reader: Principal, all: Approval[]): Approval[] {
   return all.map((raw) => {
     // CF4: the code ties a channel reply to an approval; it is the ingress's, never listed.
@@ -2914,7 +2919,15 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
   return scoped.allowed ? { ok: true } : { ok: false, required: scoped.required };
 }
 
-export async function decideApproval(state: FactoryState, id: string, decision: unknown, principal: Principal, notes?: unknown, via?: { provider: string; channelId: string }): Promise<Outcome<unknown>> {
+export async function decideApproval(
+  state: FactoryState,
+  id: string,
+  decision: unknown,
+  principal: Principal,
+  notes?: unknown,
+  via?: { provider: string; channelId: string },
+  capUsd?: unknown,
+): Promise<Outcome<unknown>> {
   const actor = principal.actor;
   const grantCheck = effectiveGrantsForActor(state, actor);
   if (!grantCheck.ok) return { status: 503, body: { error: grantCheck.error } };
@@ -2923,13 +2936,19 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
   if (decision !== 'approve' && decision !== 'reject') return { status: 400, body: { error: 'decision must be approve or reject' } };
   if (notes !== undefined && notes !== null && (typeof notes !== 'string' || notes.length > 4000)) return { status: 400, body: { error: 'notes must be text, at most 4000 characters' } };
   const note = typeof notes === 'string' && notes.trim() ? notes.trim() : undefined;
+  // GAP-259: a cap is set only by approving a decision an agent asked for; anything else that carries one is refused.
+  const cap = capUsd === undefined || capUsd === null ? undefined : parseCapUsd(capUsd);
+  if (cap === null) return { status: 400, body: { error: 'capUsd must be a non-negative amount in USD' } };
+  if (cap !== undefined && (decision !== 'approve' || state.approvals.get(id)?.kind !== 'decision')) {
+    return { status: 400, body: { error: 'capUsd is set only when approving a decision hold' } };
+  }
   // CF4: a configuration change is decided only by an admin or an owner of that agent, and applied by the factory.
   const pending = state.approvals.get(id);
   if (pending?.kind === 'change' && !mayApproveChange(state, principal, pending.agentId)) {
     const reqRole = agentKindOf(state, pending.agentId) === 'team' ? 'accountable-lead' : 'content-owner';
     return { status: 403, body: { error: 'forbidden', required: 'agent-owner', requiredRole: reqRole } };
   }
-  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note);
+  const decided = state.approvals.decide(id, decision === 'approve' ? 'approved' : 'rejected', actor, note, cap);
   if (!decided) return { status: 409, body: { error: 'approval not pending' } };
   state.ledger.append({
     timestamp: new Date().toISOString(),
@@ -2941,6 +2960,8 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
     approvalId: decided.approvalId,
     mcpName: decided.tool,
     route: decided.route,
+    ...(decided.capUsd !== undefined ? { capUsd: decided.capUsd } : {}),
+    ...(decided.hold ? { requestId: decided.hold.requestKey } : {}),
     // CF4: decided in a channel: where, as the ingress attested it, written before anything is allowed.
     ...(via ? { requestId: `${via.provider}:${via.channelId}` } : {}),
   });
@@ -2972,13 +2993,13 @@ export async function decideApproval(state: FactoryState, id: string, decision: 
     }
     return { status: 200, body: { ...decided, applied: applied.status === 200, ...(applied.status === 200 ? {} : { reason: applied.body.error }) } };
   }
-  if (decided.kind === 'held') {
-    // E9: the decision goes to the agent; no run waited for it.
+  if (decided.kind === 'held' || decided.kind === 'decision') {
+    // E9, GAP-259: the decision goes to the agent; no run waited for it.
     const delivered = await deliverDecision(state, decided, actor);
     return { status: 200, body: { ...decided, delivered } };
   }
-  // A pending configuration change (an agent's role request) never holds a run: only tool and route approvals do.
-  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).filter((a) => a.kind !== 'change').length) {
+  // A pending configuration change (an agent's role request) or decision never holds a run: only tool and route approvals do.
+  if (!state.approvals.list({ state: 'pending', runId: decided.runId }).filter((a) => a.kind !== 'change' && a.kind !== 'decision').length) {
     unblockRun(state, decided.runId, 'BLOCKED_FOR_HUMAN', actor);
   }
   return { status: 200, body: decided };
@@ -3017,6 +3038,8 @@ async function deliverDecision(state: FactoryState, a: Approval, actor: string):
     decision: a.state === 'approved' ? 'approved' : 'rejected',
     decidedBy: a.decidedBy,
     decidedAt: a.decidedAt,
+    // GAP-259: a decision hold names itself by the agent's own key, never by text a person wrote.
+    ...(a.hold ? decisionDelivery(a) : {}),
   };
   const full = {
     ...plain,
@@ -3219,6 +3242,8 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if (await handleRuntimeRoutes(state, req, res, path)) return;
   if (await handleAgentBundle(state, req, res, path)) return;
   if (path.startsWith('/api/v1/ingress/') && (await handleChannelApprovals(state, req, res, path))) return;
+  // GAP-259: decision holds an agent publishes, and one approval read by id.
+  if ((path.includes('/holds/') || path.startsWith('/api/v1/approvals/')) && (await handleDecisionHolds(state, req, res, path))) return;
   if (await handleRoleAssignments(state, req, res, path)) return;
   if (await handleConfig(state, req, res, path)) return;
   if (path.startsWith('/api/v1/skills/') && (await handleSkillTraining(state, req, res, path))) return;
@@ -5083,7 +5108,13 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     if (!reader) return;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const st = url.searchParams.get('state') as 'pending' | null;
-    const all = state.approvals.list({ ...(st ? { state: st } : {}), ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}) });
+    const kind = url.searchParams.get('kind');
+    if (kind && !APPROVAL_KINDS.includes(kind as ApprovalKind)) return json(res, 400, { error: `kind must be one of ${APPROVAL_KINDS.join(', ')}` });
+    const all = state.approvals.list({
+      ...(st ? { state: st } : {}),
+      ...(url.searchParams.get('runId') ? { runId: url.searchParams.get('runId')! } : {}),
+      ...(kind ? { kind: kind as ApprovalKind } : {}),
+    });
     // A configuration change names a person's external identity: only those who may decide it read what it says.
     json(res, 200, visibleApprovals(state, reader, all));
     return;
@@ -5095,7 +5126,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const who = await identify(req, state);
     if (!who.ok) return json(res, 401, { error: 'unauthorized' });
     const b = await readJson(req);
-    const out = await decideApproval(state, decideMatch[1], b.decision, who.principal, b.notes);
+    const out = await decideApproval(state, decideMatch[1], b.decision, who.principal, b.notes, undefined, b.capUsd);
     json(res, out.status, out.body);
     return;
   }

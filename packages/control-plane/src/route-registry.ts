@@ -366,7 +366,10 @@ export const CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
 
   // Approvals & MCP
   { method: 'GET', pattern: '/api/v1/approvals', privilege: 'approvals.read', description: 'List pending tool approvals' },
-  { method: 'POST', pattern: '/api/v1/approvals/:id', privilege: 'approvals.decide', description: 'Decide tool approval' },
+  { method: 'GET', pattern: '/api/v1/approvals/:id', privilege: 'approvals.read', description: 'Read one approval' },
+  { method: 'POST', pattern: '/api/v1/approvals/:id', privilege: 'approvals.decide', description: 'Decide an approval (capUsd when approving a decision hold)' },
+  { method: 'PUT', pattern: '/api/v1/agents/:id/holds/:requestKey', exception: 'run-token', description: 'Agent publishes a decision hold (run token, idempotent)' },
+  { method: 'GET', pattern: '/api/v1/agents/:id/holds/:requestKey', privilege: 'approvals.read', description: 'Read a decision hold (its agent by run token, or a reader)' },
   { method: 'POST', pattern: '/api/v1/ingress/approval-prompts', privilege: 'approvals.channel', description: 'Send approval prompt to channel' },
   { method: 'POST', pattern: '/api/v1/ingress/approvals/:id/asked', privilege: 'approvals.channel', description: 'Record approval prompt sent' },
   { method: 'POST', pattern: '/api/v1/ingress/approvals/decision', privilege: 'approvals.channel', description: 'Record channel approval decision' },
