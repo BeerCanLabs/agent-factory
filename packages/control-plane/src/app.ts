@@ -120,7 +120,7 @@ import type { ScheduleStore } from '@beercanlabs/factory-timekeeper';
 import { handleSpend, type Treasury } from './spend.js';
 import { sanitizeOutputWithProvenance } from './provenance.js';
 import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from './decision-holds.js';
-import { handleFleetState, isOpsAgent, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
+import { dropOpsAgent, handleFleetState, isOpsAgent, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
 import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
 import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
@@ -2517,7 +2517,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
       };
     }
     if (params.name === 'set_fleet_ops_state') {
-      // GAP-268: a refusal (403 not an ops agent or an admin state, 409 leaving rolled-back) is a JSON-RPC error; a malformed body isError.
+      // GAP-268: a 403 or 409 refusal is a JSON-RPC error; a malformed body isError.
       const out = setFleetOpsState(state, (params.arguments ?? {}) as Record<string, unknown>, run);
       const body = out.body as Record<string, unknown>;
       if (out.status === 403 || out.status === 409) return { jsonrpc: '2.0', id, error: { code: -32001, message: `${out.status === 403 ? 'forbidden' : 'conflict'}: ${String(body.error)}`, data: body } };
@@ -5846,6 +5846,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       action: 'AGENT_RETIRED_PENDING_PURGE',
       actor: principal.actor,
     });
+    dropOpsAgent(state, agentId, principal.actor, 'retired');
     registryOf(state).save(agent);
     json(res, 200, agent);
     return;
@@ -5902,6 +5903,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       action: 'AGENT_PURGED',
       actor: principal.actor,
     });
+    dropOpsAgent(state, agentId, principal.actor, 'purged');
     // GAP-060: a purged agent leaves no policy or configuration record behind. Both are recoverable: the policy file is
     // moved to policies-orphaned/, the configuration removal is versioned (R1).
     for (const id of state.policies.archive([agentId]).archived) {
