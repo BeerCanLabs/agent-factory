@@ -603,10 +603,58 @@ describe('GAP-268 fleet ops state', { concurrency: false }, () => {
       assert.equal(rows('FLEET_OPS_LOCK_TAKEOVER').length, taken + 1);
     });
 
+    it('jury #484 B1: while the fleet is paused or frozen, a takeover only closes or rolls back (409 fleet_not_running)', async () => {
+      for (const status of ['paused', 'deploy-freeze']) {
+        for (const from of ['deploying', 'prod-testing']) {
+          await admin({ status: 'running', ops: null, force: true });
+          const r1 = await opened('p@abc');
+          if (from === 'prod-testing') await ops(r1.token, { state: 'prod-testing' });
+          end(r1.run.runId);
+          await admin({ status });
+          const r2 = await runOf('ops-leader');
+          for (const t of ['deploying', 'prod-testing']) await expect409(r2.token, { state: t, takeover: true, deployId: 'p@abc' }, 'fleet_not_running');
+          assert.equal((await read()).ops.runId, r1.run.runId, `${status}/${from}: the lock is not moved`);
+          const t = from === 'deploying' ? 'idle' : 'rolled-back';
+          const out = await ops(r2.token, { state: t, takeover: true, deployId: 'p@abc' });
+          assert.deepEqual({ status: out.status, s: out.body.ops.state }, { status: 200, s: t }, `${status}/${from} -> ${t}`);
+        }
+      }
+      await admin({ status: 'running', ops: null, force: true });
+    });
+
+    it('jury #484 B2: a holder naming another deployId is refused; one with none may name it once', async () => {
+      const r1 = await opened('d1');
+      await expect409(r1.token, { state: 'prod-testing', deployId: 'dOTHER' }, 'deploy_id_mismatch');
+      await expect409(r1.token, { state: 'deploying', deployId: 'dOTHER' }, 'deploy_id_mismatch');
+      assert.equal((await read()).ops.deployId, 'd1');
+      assert.equal((await ops(r1.token, { state: 'prod-testing', deployId: 'd1' })).body.ops.deployId, 'd1');
+      await ops(r1.token, { state: 'idle' });
+      const r2 = await opened();
+      const named = await ops(r2.token, { state: 'deploying', deployId: 'dNEW' });
+      assert.deepEqual({ status: named.status, id: named.body.ops.deployId }, { status: 200, id: 'dNEW' });
+      await expect409(r2.token, { state: 'prod-testing', deployId: 'dLATER' }, 'deploy_id_mismatch');
+      end(r2.run.runId);
+      const r3 = await runOf('ops-leader');
+      const out = await ops(r3.token, { state: 'prod-testing', reason: 'smoke', takeover: true, deployId: 'dNEW' });
+      assert.deepEqual({ status: out.status, runId: out.body.ops.runId }, { status: 200, runId: r3.run.runId }, 'the named deploy can be taken over');
+      assert.equal((await ops(r3.token, { state: 'prod-testing', deployId: 'a:b' })).status, 400, "jury #484 B3: no ':' in a deploy id");
+      await ops(r3.token, { state: 'idle' });
+    });
+
+    it('a takeover into the same state records the new holder and its reason, not the ended run\'s', async () => {
+      const r1 = await opened('p@abc');
+      await ops(r1.token, { state: 'deploying', reason: 'v2 by r1' });
+      end(r1.run.runId);
+      const r2 = await runOf('ops-leader');
+      const out = await ops(r2.token, { state: 'deploying', takeover: true, deployId: 'p@abc' });
+      assert.deepEqual({ runId: out.body.ops.runId, reason: out.body.ops.reason }, { runId: r2.run.runId, reason: null });
+      await ops(r2.token, { state: 'idle' });
+    });
+
     it('unit: takeover into the current state rebinds the lock; without takeover nothing changes', () => {
       const prior = { status: 'running', coder_app_ready: false, reason: null, ops: { state: 'deploying', by: 'x', at: 't', reason: 'v2', runId: 'r1', deployId: 'p@abc' } } as never;
       const same = opsStep(prior, 'deploying', 'r2', 'x', undefined, { takeover: true, deployId: 'p@abc', holderLive: false });
-      assert.ok(same.ok && same.ops?.runId === 'r2' && same.ops.deployId === 'p@abc' && same.ops.reason === 'v2' && same.takenFrom === 'r1');
+      assert.ok(same.ok && same.ops?.runId === 'r2' && same.ops.deployId === 'p@abc' && same.ops.reason === null && same.takenFrom === 'r1');
       assert.deepEqual(opsStep(prior, 'prod-testing', 'r2', 'x', undefined, { deployId: 'p@abc' }), { ok: false, error: 'not_the_deploying_run' });
       assert.deepEqual(opsStep(prior, 'deploying', 'r2', 'x', undefined, { takeover: true, deployId: 'p@abc', holderLive: true }), { ok: false, error: 'deploy_in_progress' });
     });

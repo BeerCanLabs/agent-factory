@@ -2481,7 +2481,7 @@ export async function handleRunMcp(state: FactoryState, payload: Record<string, 
           properties: {
             state: { type: 'string', enum: ['idle', 'deploying', 'prod-testing', 'rolled-back'] },
             reason: { type: 'string' },
-            deployId: { type: 'string', pattern: '^[A-Za-z0-9._:@#/-]{1,128}$' },
+            deployId: { type: 'string', pattern: '^[A-Za-z0-9._@#/-]{1,128}$' },
             takeover: { type: 'boolean', enum: [true] },
           },
           required: ['state'],

@@ -672,7 +672,7 @@ const FleetStateOpsBodySchema: JsonSchemaObject = jsonSchema.object({
   }),
   deployId: jsonSchema.string({
     description: "The deploy's opaque id (#482), given with deploying; a takeover must name the same one",
-    pattern: '^[A-Za-z0-9._:@#/-]{1,128}$',
+    pattern: '^[A-Za-z0-9._@#/-]{1,128}$',
   }),
   takeover: jsonSchema.boolean({
     description: "true: take over this agent's own open deploy (same deployId) once its holding run has ended (#482)",

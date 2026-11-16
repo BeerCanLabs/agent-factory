@@ -34,7 +34,7 @@ export type OpsState = (typeof OPS_STATES)[number];
  */
 export type OpsRecord = { state: OpsState; by: string | null; at: string | null; reason: string | null; runId?: string | null; deployId?: string | null };
 const NO_OPS: OpsRecord = { state: 'idle', by: null, at: null, reason: null, runId: null, deployId: null };
-const DEPLOY_ID = /^[A-Za-z0-9._:@#/-]{1,128}$/;
+const DEPLOY_ID = /^[A-Za-z0-9._@#/-]{1,128}$/;
 export type EffectiveState = 'running' | 'paused' | 'deploy-freeze' | 'deploying' | 'prod-testing';
 export type FleetState = {
   status: FleetStatus;
@@ -282,7 +282,7 @@ function opsBodyError(o: Record<string, unknown>, run = false): string | undefin
   const fields = run ? ['state', 'reason', 'deployId', 'takeover'] : ['state', 'reason'];
   const extra = Object.keys(o).find((k) => !fields.includes(k));
   if (extra) return `unknown field ${JSON.stringify(extra.slice(0, 40))}`;
-  if (o.deployId !== undefined && (typeof o.deployId !== 'string' || !DEPLOY_ID.test(o.deployId))) return 'deployId must be 1 to 128 characters of A-Z a-z 0-9 . _ : @ # / -';
+  if (o.deployId !== undefined && (typeof o.deployId !== 'string' || !DEPLOY_ID.test(o.deployId))) return 'deployId must be 1 to 128 characters of A-Z a-z 0-9 . _ @ # / -';
   if (o.takeover !== undefined && o.takeover !== true) return 'takeover must be true when given';
   return undefined;
 }
@@ -321,15 +321,24 @@ export function opsStep(prior: FleetState, t: OpsState, runId: string, agentId: 
     if (o.by !== agentId) return fail('not_the_deploying_run');
     if (!o.deployId || o.deployId !== w.deployId) return fail('deploy_id_mismatch');
     if (w.holderLive) return fail('deploy_in_progress');
+    // R6 (jury #484 B1): a paused or frozen fleet is not deployed further by a new run; it may only close or roll back.
+    if (prior.status !== 'running' && t !== 'idle' && t !== 'rolled-back') return fail('fleet_not_running');
     const step = opsStep({ ...prior, ops: { ...o, runId } }, t, runId, agentId, reason);
     if (!step.ok) return step;
-    return { ok: true, takenFrom: o.runId ?? '', ops: step.ops ?? { ...o, runId, at: now() } };
+    // Into the same state: the record is the new holder's (its reason, or none), not the ended run's.
+    return { ok: true, takenFrom: o.runId ?? '', ops: step.ops ?? { ...o, runId, by: agentId, reason: reason ?? null, at: now() } };
   }
-  const keep = { deployId: t === 'deploying' ? (w.deployId ?? null) : (o.deployId ?? null) };
+  // Jury #484 B2: the holder may name the deploy once while it has none; naming another one is refused, never dropped.
+  if (mine && w.deployId !== undefined && o.deployId && o.deployId !== w.deployId) return fail('deploy_id_mismatch');
+  const named = mine && w.deployId !== undefined && !o.deployId && o.state !== 'rolled-back' ? w.deployId : undefined;
+  const keep = { deployId: t === 'deploying' && o.state === 'idle' ? (w.deployId ?? null) : (o.deployId ?? named ?? null) };
   const rec = (st: OpsState, holder: string | null): OpsRecord => ({ state: st, by: agentId, at: now(), reason: reason ?? null, runId: holder, deployId: holder ? keep.deployId : null });
   if (o.state === 'rolled-back') return t === 'rolled-back' && mine ? { ok: true, kept: true } : fail('rolled_back_requires_admin');
   if (t === 'idle' && o.state === 'idle') return { ok: true };
-  if (t === o.state && mine) return reason === undefined || reason === o.reason ? { ok: true } : { ok: true, ops: { ...o, reason, at: now() } };
+  if (t === o.state && mine) {
+    if (named) return { ok: true, ops: { ...o, deployId: named, ...(reason !== undefined ? { reason } : {}), at: now() } };
+    return reason === undefined || reason === o.reason ? { ok: true } : { ok: true, ops: { ...o, reason, at: now() } };
+  }
   if (t === 'deploying') {
     if (prior.status !== 'running') return fail('fleet_not_running');
     if (o.state === 'idle') return { ok: true, ops: rec('deploying', runId) };
