@@ -3,7 +3,7 @@
  *
  *   POST /api/v1/keymaster/agents/:agentId/github-app/installations   credentials.agent.set: { orgs } → install links
  *   POST /api/v1/gatekeeper-egress/github-app/token                      gatekeeper-egress only: { runId, agentId, org? }
- *                                                                        (no org: the app's only chosen org, GAP-248)
+ *                                                                        (no org: the app's only chosen org, GAP-256)
  *
  * The chosen orgs are recorded (not secret) beside the registry. A key is minted only for a chosen org and a live run
  * of that agent, from the app key the manifest flow stored (E5.1a); it is returned to the gatekeeper-egress only,
@@ -109,7 +109,7 @@ export async function handleGitHubAppInstall(state: FactoryState, req: http.Inco
     const b = await readJson(req);
     const runId = typeof b.runId === 'string' ? b.runId : undefined;
     const agentId = typeof b.agentId === 'string' ? b.agentId : undefined;
-    // GAP-248: a GraphQL call has no owner in its path. Without an org, the app's only chosen org is used; with two or
+    // GAP-256: a GraphQL call has no owner in its path. Without an org, the app's only chosen org is used; with two or
     // more chosen there is no safe guess, so the call keeps the route's own credential.
     const chosen = typeof agentId === 'string' ? chosenOrgs(state, agentId) : [];
     const org = b.org === undefined ? (chosen.length === 1 ? chosen[0] : undefined) : typeof b.org === 'string' && ORG.test(b.org) ? b.org : undefined;

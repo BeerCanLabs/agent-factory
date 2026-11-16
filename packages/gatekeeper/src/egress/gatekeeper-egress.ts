@@ -277,7 +277,7 @@ const STRIP = new Set([
   'x-api-key',
   'x-factory-run-token',
   'x-upstream-authorization',
-  // GAP-248: the org hint for a GraphQL call is the gatekeeper's, never GitHub's.
+  // GAP-256: the org hint for a GraphQL call is the gatekeeper's, never GitHub's.
   'x-github-org',
   'accept-encoding',
   'cookie',
@@ -888,7 +888,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   /**
-   * GAP-248: the org a GitHub GraphQL call (`POST /graphql`, the only API for Projects v2) is for. GraphQL has no owner
+   * GAP-256: the org a GitHub GraphQL call (`POST /graphql`, the only API for Projects v2) is for. GraphQL has no owner
    * in its path, so the agent names it in an `X-GitHub-Org` header, or the query's own `org`, `owner` or `login`
    * variable says it. `'*'`: no hint, so the control plane may pick the app's only chosen org. `null`: a hint that is
    * not a GitHub org name, refused. Keys are still minted only for an org an admin chose for the app.
@@ -906,7 +906,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     return '*';
   }
 
-  /** GAP-248: whether this is a GraphQL call on a GitHub API route (the only place an org hint means anything). */
+  /** GAP-256: whether this is a GraphQL call on a GitHub API route (the only place an org hint means anything). */
   function isGithubGraphql(route: Route, rest: string, req: http.IncomingMessage): boolean {
     if (!route.upstream || route.connection || req.method !== 'POST') return false;
     let host = '';
@@ -2435,7 +2435,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       ) return;
       if (route.connection) return await handleConnection(req, res, ctx, route, rest, raw);
       // #334: the agent's own GitHub App key when it has one installed on the target org; else the route's credential.
-      // GAP-248: a GraphQL call names its org in X-GitHub-Org (or its variables); a hint that is not an org name is refused.
+      // GAP-256: a GraphQL call names its org in X-GitHub-Org (or its variables); a hint that is not an org name is refused.
       const graphql = { req, raw };
       if (isGithubGraphql(route, rest, req) && githubGraphqlOrg(req, raw) === null) {
         return deny(res, ctx, route, 400, 'bad_github_org');

@@ -42,7 +42,7 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     async githubAppToken(req) {
       asked.push(req);
       if (req.agentId === 'archie' && req.org?.toLowerCase() === 'beercanlabs') return { ok: true, accessToken: `ghs_app_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString() };
-      // GAP-248: no org (a GraphQL call with no hint): the control plane answers with the app's only chosen org.
+      // GAP-256: no org (a GraphQL call with no hint): the control plane answers with the app's only chosen org.
       if (req.agentId === 'archie' && req.org === undefined) return { ok: true, accessToken: `ghs_sole_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString(), org: 'BeerCanLabs' };
       return { ok: false, status: 428, error: 'not_installed' };
     },
@@ -138,7 +138,7 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     await send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token);
     assert.equal(asked.length, before + 1);
   });
-  describe('GAP-248: GraphQL (Projects v2) picks the app key for an org', () => {
+  describe('GAP-256: GraphQL (Projects v2) picks the app key for an org', () => {
     const q = (variables: Record<string, unknown>) => JSON.stringify({ query: 'query{viewer{login}}', variables });
 
     it('an X-GitHub-Org header names the org; the header never reaches GitHub', async () => {
