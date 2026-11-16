@@ -270,6 +270,38 @@ describe('control plane', { concurrency: false }, () => {
       assert.equal(ctx.run.model, undefined, 'gatekeeper-egress context must not have pinnedModel set');
     });
 
+    it('GAP-255 hands an admin-set policy env to the run, never over the factory\'s own variables, and refuses secrets', async () => {
+      const put = (body: unknown) => request(port, '/api/v1/agents/echo-agent/policy', { method: 'PUT', token: TOKENS.admin, body });
+      const fleet = JSON.stringify({ repos: {}, logins: { conductor: 'flow-bot' } });
+      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200);
+      const run = (await wake('echo-agent')).json as RunBody;
+      const env = state.runtime.started.at(-1)!.runEnv;
+      assert.equal(env.SDLC_FLEET_CONFIG, fleet);
+      assert.equal(env.SDLC_APPROVALS_URL, 'https://factory.example/api/v1/agents/flow/holds');
+      assert.equal(env.FACTORY_RUN_ID, run.runId);
+      for (const bad of [{ FACTORY_RUN_TOKEN: 'x' }, { GITHUB_TOKEN: 'x' }, { GITHUB_BASE_URL: 'https://evil.example' }, { MEMORY_PREFIX: 'other' }, { lower: 'x' }, { AWS_REGION: 'x' }, { SDLC_BIG: 'x'.repeat(6001) }, { SDLC_N: 1 }]) {
+        assert.equal((await put({ routes: [], env: bad })).status, 400, JSON.stringify(bad).slice(0, 40));
+      }
+      state.secretValues.add('known-secret-value-for-env-test');
+      assert.equal((await put({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 400);
+      // The budget route (registry.budget.set) keeps the env policy.set wrote and cannot change it.
+      const budget = (body: unknown) => request(port, '/api/v1/registry/agents/echo-agent/budget', { method: 'PUT', token: TOKENS.admin, body });
+      const kept = { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' };
+      assert.equal((await budget({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 403);
+      assert.equal((await budget({ routes: [], env: { SDLC_FLEET_CONFIG: 'other' } })).status, 403);
+      assert.deepEqual(state.policies.get('echo-agent').env, kept);
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 7 } })).status, 200);
+      assert.deepEqual(state.policies.get('echo-agent').env, kept, 'a whole-policy save without env keeps it');
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: kept })).status, 200, 'the same env, as the console sends it back');
+      const reordered = Object.fromEntries(Object.entries(kept).reverse());
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: reordered })).status, 200, 'the same env in another key order');
+      assert.equal((await budget({ spendLimitUsd: 9, period: 'daily' })).status, 200);
+      assert.deepEqual(state.policies.get('echo-agent').env, kept);
+      state.secretValues.delete('known-secret-value-for-env-test');
+      assert.equal((await request(port, '/api/v1/policies/budget', { method: 'PUT', token: TOKENS.admin, body: { routes: [], env: { SDLC_X: 'y' } } })).status, 400);
+      state.policies.set('echo-agent', { routes: [] });
+    });
+
     it('injects the configured factory default as FACTORY_MODEL when policy names no models (M2, GAP-181)', async () => {
       // The default is configuration, never code: this factory has one configured.
       const prevDefault = state.defaultModel;
