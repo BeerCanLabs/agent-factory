@@ -17,6 +17,7 @@ import { assessCredentials, assessPlatformCredentials, submittableSecrets, summa
 import { requirePrivilege, json, type FactoryState } from './app.js';
 import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { consentUnavailable, getConnections } from './connections.js';
+import { invalidateSecret } from './app-setup-providers.js';
 
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_VALUE = 64 * 1024;
@@ -211,7 +212,7 @@ async function writeCredential(state: FactoryState, req: http.IncomingMessage, r
     console.error(`[keymaster] writing ${name} for ${agentId} failed`);
     return noStore(res, 502, { error: 'write_failed', name });
   }
-  state.secretCache?.delete(name);
+  invalidateSecret(state, name);
   invalidateCredentials(state);
   const action = existed ? 'CREDENTIAL_ROTATED' : 'CREDENTIAL_SET';
   const at = new Date().toISOString();
@@ -259,7 +260,7 @@ async function submitProviderClient(state: FactoryState, req: http.IncomingMessa
     console.error(`[keymaster] writing the OAuth client for ${systemId} failed`);
     return noStore(res, 502, { error: 'write_failed', name });
   }
-  state.secretCache?.delete(name);
+  invalidateSecret(state, name);
   invalidateCredentials(state);
   const action = existed ? 'OAUTH_CLIENT_ROTATED' : 'OAUTH_CLIENT_SET';
   const at = new Date().toISOString();

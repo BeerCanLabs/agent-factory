@@ -15,7 +15,7 @@ import { writableProvider } from '@beercanlabs/factory-secrets-bind';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { signConsentState, verifyConsentState } from './connections.js';
 import { invalidateCredentials } from './credentials.js';
-import { readSecret } from './app-setup-providers.js';
+import { invalidateSecret, readSecret } from './app-setup-providers.js';
 
 const STATE_TTL_MS = 10 * 60_000;
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -192,7 +192,7 @@ async function callback(state: FactoryState, res: http.ServerResponse, url: URL)
     console.error(`[keymaster] storing the GitHub App for ${parsed.agentId} failed`);
     return page(res, 502, 'Setup failed', 'The factory could not store the app key. Start again.');
   }
-  for (const n of Object.values(names)) state.secretCache?.delete(n);
+  for (const n of Object.values(names)) invalidateSecret(state, n);
   invalidateCredentials(state);
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'GITHUB_APP_CREATED', actor: parsed.actor, appSlug: app.slug });
   page(res, 200, `GitHub App ready for ${state.agents.get(parsed.agentId)?.name ?? parsed.agentId}`, 'The app key is stored with the Keymaster. You can close this window.');

@@ -121,6 +121,9 @@ export function httpProvider(baseUrl: string, token?: string): SecretProvider {
 /** `input` is written to the CLI's stdin (so secret values never appear in argv or the process list). */
 export type AwsCli = (args: string[], input?: string) => Promise<string>;
 
+/** #501: a CLI call that has not finished by then is killed and fails, so a stuck call cannot hang its caller. */
+export const AWS_CLI_TIMEOUT_MS = 30_000;
+
 function spawnAwsCli(args: string[], input?: string): Promise<string> {
   const region = process.env.AWS_REGION ? ['--region', process.env.AWS_REGION] : [];
   // Node connects a child's stdin with a socket, and Linux refuses to reopen a socket via /dev/stdin (ENXIO),
@@ -129,13 +132,13 @@ function spawnAwsCli(args: string[], input?: string): Promise<string> {
     ? ['aws', [...args, ...region]]
     : ['sh', ['-c', 'cat | aws "$@"', 'sh', ...args, ...region]];
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, argv, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, argv, { stdio: ['pipe', 'pipe', 'pipe'], timeout: AWS_CLI_TIMEOUT_MS, killSignal: 'SIGKILL' });
     let out = '';
     let err = '';
     child.stdout.on('data', (c) => (out += c));
     child.stderr.on('data', (c) => (err += c));
     child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(err.split('\n').find((l) => l.trim()) || `exit ${code}`))));
+    child.on('close', (code, signal) => (code === 0 ? resolve(out) : reject(new Error(signal ? `aws cli ${signal === 'SIGKILL' ? `timed out after ${AWS_CLI_TIMEOUT_MS} ms` : signal}` : err.split('\n').find((l) => l.trim()) || `exit ${code}`))));
     child.stdin.end(input ?? '');
   });
 }

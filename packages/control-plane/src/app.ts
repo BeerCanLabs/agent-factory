@@ -86,7 +86,7 @@ import { handleCredentials } from './credentials.js';
 import { githubAppSecretNames, handleGitHubAppSetup } from './github-app-setup.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
-import { handleAppSetup, readSecret } from './app-setup-providers.js';
+import { handleAppSetup, readSecretCached } from './app-setup-providers.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
@@ -264,6 +264,8 @@ export type FactoryState = {
   /** GitHub API and web origins for app setup (E5.1). Default to github.com; tests point them at fakes. */
   githubApiBase?: string;
   githubWebBase?: string;
+  /** #501: how long the gatekeeper-egress's GitHub App token route waits for a mint. Default 8 s; tests shorten it. */
+  githubAppTokenDeadlineMs?: number;
   /** Discord API origin for bot setup (E5.2). Defaults to discord.com; tests point it at a fake. */
   discordApiBase?: string;
   schedules?: ScheduleStore;
@@ -3744,7 +3746,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     // checks the cartridge trigger's secret.
     const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
     const hasTrigger = Boolean(trigger?.type === 'webhook' && trigger.secretRef);
-    const appSecret = agent && hmacSignature && githubEventHeader ? await readSecret(state, githubAppSecretNames(agent.id).webhookSecret) : undefined;
+    const appSecret = agent && hmacSignature && githubEventHeader ? await readSecretCached(state, githubAppSecretNames(agent.id).webhookSecret) : undefined;
     const usableApp = typeof appSecret === 'string' && appSecret.trim() ? appSecret : undefined;
     if (!agent || (!usableApp && !hasTrigger)) {
       capDrain(req);
@@ -3820,7 +3822,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         return;
       }
       // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
-      const slug = await readSecret(state, githubAppSecretNames(agent.id).slug);
+      const slug = await readSecretCached(state, githubAppSecretNames(agent.id).slug);
       if (!slug) {
         console.error(`[webhooks] ${agent.id}: no ${githubAppSecretNames(agent.id).slug}; GitHub events are not mapped`);
         json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });

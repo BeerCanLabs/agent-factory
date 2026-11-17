@@ -50,6 +50,54 @@ export async function readSecret(state: FactoryState, name: string): Promise<str
   return undefined;
 }
 
+const SECRET_TTL_MS = 5 * 60_000;
+const reading = new WeakMap<FactoryState, Map<string, Promise<string | undefined>>>();
+const generations = new WeakMap<FactoryState, Map<string, number>>();
+
+/**
+ * Forgets a secret's cached value after a setup flow stores a new one. A read in flight at this point will not be
+ * cached: its caller still gets the value it read, but the next read of the name does a fresh provider read.
+ */
+export function invalidateSecret(state: FactoryState, name: string): void {
+  const gens = generations.get(state) ?? new Map<string, number>();
+  generations.set(state, gens);
+  gens.set(name, (gens.get(name) ?? 0) + 1);
+  state.secretCache?.delete(name);
+  reading.get(state)?.delete(name);
+}
+
+/**
+ * #501: readSecret through the control plane's short-lived secret cache (`state.secretCache`, the one pre-flight
+ * uses and the setup flows clear through `invalidateSecret` when they store a new value). For hot paths: each uncached
+ * read spawns the AWS CLI, which takes seconds on a busy task. Concurrent reads of one name share a single lookup;
+ * absent values are not cached, so a value stored later is seen on the next read.
+ */
+export async function readSecretCached(state: FactoryState, name: string, ttlMs = SECRET_TTL_MS): Promise<string | undefined> {
+  const cache = (state.secretCache ??= new Map());
+  const hit = cache.get(name);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+  const inFlight = reading.get(state) ?? new Map<string, Promise<string | undefined>>();
+  reading.set(state, inFlight);
+  const pending = inFlight.get(name);
+  if (pending) return pending;
+  const gen = generations.get(state)?.get(name) ?? 0;
+  const p = readSecret(state, name)
+    .then((v) => {
+      // A value read before an invalidation is returned to this caller but not cached.
+      if (v && (generations.get(state)?.get(name) ?? 0) === gen) {
+        cache.set(name, { value: v, at: Date.now() });
+        if (v.length >= 4) state.secretValues.add(v);
+      }
+      return v;
+    })
+    .finally(() => {
+      // Remove only this read's entry: a newer read may have replaced it after an invalidation.
+      if (inFlight.get(name) === p) inFlight.delete(name);
+    });
+  inFlight.set(name, p);
+  return p;
+}
+
 /** Console paths are relative to /api/v1, like the console client's request(). */
 export const agentPath = (agentId: string, rest: string) => `/keymaster/agents/${encodeURIComponent(agentId)}/${rest}`;
 

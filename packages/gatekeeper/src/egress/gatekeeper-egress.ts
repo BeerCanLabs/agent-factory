@@ -971,30 +971,45 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
 
   const githubAppHosts: Record<string, 'api' | 'git'> = opts.githubAppHosts ?? { 'api.github.com': 'api', 'github.com': 'git' };
   const appCache = new Map<string, { token: string; expiresAtMs: number; org: string }>();
+  /** #501: one control-plane token request per agent and org at a time; concurrent calls of a run share it. */
+  const appPending = new Map<string, Promise<{ token: string; expiresAtMs: number; org: string } | undefined>>();
   /**
    * #334: the agent's GitHub App key for this call, formatted like the route's credential, or undefined to fall back.
    * A helper gets its parent's app key; read-only was already enforced before this, so it can still only read.
    */
   async function githubAppCredential(route: Route, ctx: RunContext, rest: string, graphql?: { req: http.IncomingMessage; raw: Buffer }): Promise<{ header: string; org: string } | undefined> {
     if (!opts.control.githubAppToken) return undefined;
+    const control = opts.control as Required<Pick<typeof opts.control, 'githubAppToken'>>;
     const org = githubOrgOf(route, rest, graphql);
     if (!org) return undefined;
     const agentId = ctx.helperOf ?? ctx.run.agentId;
     const key = `${agentId}\u0000${org.toLowerCase()}`;
     let hit = appCache.get(key);
     if (!hit || hit.expiresAtMs - 60_000 <= Date.now()) {
-      hit = undefined;
-      try {
+      let pending = appPending.get(key);
+      if (!pending) {
+        const t0 = Date.now();
         // '*' (a GraphQL call with no org hint) asks without an org: the control plane uses the app's only chosen org.
-        const r = await opts.control.githubAppToken({ runId: ctx.run.runId, agentId, ...(org === '*' ? {} : { org }) });
-        if (r.ok) {
-          if (r.accessToken.length >= 4) secretValues.add(r.accessToken);
-          hit = { token: r.accessToken, expiresAtMs: Date.parse(r.expiresAt) || Date.now() + 5 * 60_000, org: org === '*' ? r.org ?? org : org };
-          appCache.set(key, hit);
-        }
-      } catch (err) {
-        console.error(`[gatekeeper-egress] github app token ${route.id}: ${err instanceof Error ? err.message : String(err)}`);
+        pending = control.githubAppToken({ runId: ctx.run.runId, agentId, ...(org === '*' ? {} : { org }) })
+          .then((r) => {
+            if (!r.ok) {
+              // #501: a refusal used to be silent. 4xx refusals (no app, org not chosen) are routine; log the rest.
+              if (r.status >= 500) console.error(`[gatekeeper-egress] github app token ${route.id} for ${agentId}/${org}: ${r.status} ${r.error} after ${Date.now() - t0} ms; using the route credential`);
+              return undefined;
+            }
+            if (r.accessToken.length >= 4) secretValues.add(r.accessToken);
+            const v = { token: r.accessToken, expiresAtMs: Date.parse(r.expiresAt) || Date.now() + 5 * 60_000, org: org === '*' ? r.org ?? org : org };
+            appCache.set(key, v);
+            return v;
+          })
+          .catch((err: unknown) => {
+            console.error(`[gatekeeper-egress] github app token ${route.id} for ${agentId}/${org}: ${err instanceof Error ? err.message : String(err)} after ${Date.now() - t0} ms; using the route credential`);
+            return undefined;
+          })
+          .finally(() => appPending.delete(key));
+        appPending.set(key, pending);
       }
+      hit = await pending;
     }
     if (!hit) return undefined;
     const host = new URL(route.upstream!).hostname.toLowerCase();
