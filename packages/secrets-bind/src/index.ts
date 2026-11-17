@@ -1,6 +1,14 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
+import {
+  CreateSecretCommand,
+  DescribeSecretCommand,
+  GetSecretValueCommand,
+  ListSecretsCommand,
+  PutSecretValueCommand,
+  SecretsManagerClient,
+} from '@aws-sdk/client-secrets-manager';
 
 const execFileAsync = promisify(execFile);
 
@@ -118,99 +126,97 @@ export function httpProvider(baseUrl: string, token?: string): SecretProvider {
   };
 }
 
-/** `input` is written to the CLI's stdin (so secret values never appear in argv or the process list). */
-export type AwsCli = (args: string[], input?: string) => Promise<string>;
+/** The part of `SecretsManagerClient` the provider uses. A `SecretsManagerClient` satisfies it. */
+export type SecretsManagerSend = {
+  send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
+};
 
-/** #501: a CLI call that has not finished by then is killed and fails, so a stuck call cannot hang its caller. */
-export const AWS_CLI_TIMEOUT_MS = 30_000;
+/** #501, K6: a Secrets Manager call that has not settled by then fails, so a stuck call cannot hang its caller. */
+export const SECRET_CALL_TIMEOUT_MS = 10_000;
 
-function spawnAwsCli(args: string[], input?: string): Promise<string> {
-  const region = process.env.AWS_REGION ? ['--region', process.env.AWS_REGION] : [];
-  // Node connects a child's stdin with a socket, and Linux refuses to reopen a socket via /dev/stdin (ENXIO),
-  // so the CLI's `file:///dev/stdin` fails. When there is input, `cat` hands the CLI a real pipe instead.
-  const [cmd, argv] = input === undefined
-    ? ['aws', [...args, ...region]]
-    : ['sh', ['-c', 'cat | aws "$@"', 'sh', ...args, ...region]];
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, argv, { stdio: ['pipe', 'pipe', 'pipe'], timeout: AWS_CLI_TIMEOUT_MS, killSignal: 'SIGKILL' });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (c) => (out += c));
-    child.stderr.on('data', (c) => (err += c));
-    child.on('error', reject);
-    child.on('close', (code, signal) => (code === 0 ? resolve(out) : reject(new Error(signal ? `aws cli ${signal === 'SIGKILL' ? `timed out after ${AWS_CLI_TIMEOUT_MS} ms` : signal}` : err.split('\n').find((l) => l.trim()) || `exit ${code}`))));
-    child.stdin.end(input ?? '');
-  });
-}
+const errorName = (err: unknown): string | undefined => (err instanceof Error ? err.name : undefined);
+const isCurrent = (stages: Record<string, string[]> | undefined): boolean =>
+  Object.values(stages ?? {}).some((s) => s.includes('AWSCURRENT'));
 
 /**
- * AWS Secrets Manager under a name prefix (e.g. `factory/prod/`). The same prefix the ECS task
+ * Secrets Manager under a name prefix (e.g. `factory/prod/`). The same prefix the ECS task
  * definition's `secrets` block reads from, so pre-flight checks exactly what the task will receive.
+ * K6: calls go through the SDK client in-process; no process is started per call.
  */
-export function awsSecretsManagerProvider(prefix: string, cli?: AwsCli): SecretProvider {
-  const run: AwsCli = cli ?? spawnAwsCli;
+export function awsSecretsManagerProvider(
+  prefix: string,
+  client?: SecretsManagerSend,
+  options?: { timeoutMs?: number },
+): SecretProvider {
+  const timeoutMs = options?.timeoutMs ?? SECRET_CALL_TIMEOUT_MS;
+  let ownClient: SecretsManagerSend | undefined;
+  const sm = (): SecretsManagerSend => client ?? (ownClient ??= new SecretsManagerClient({}) as SecretsManagerSend);
+
+  // Each call is bounded by this provider's own timer. The abort signal cancels a request already on the wire, but
+  // the SDK honours it only in its network step, so the timer alone decides when the call fails.
+  const call = async (command: unknown): Promise<unknown> => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`Secrets Manager call timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([sm().send(command, { abortSignal: controller.signal }), timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   return {
     name: 'aws-sm',
     async put(secretName, value) {
       const id = `${prefix}${secretName}`;
-      // The value goes over stdin (`file:///dev/stdin`), never argv.
       try {
-        await run(['secretsmanager', 'put-secret-value', '--secret-id', id, '--secret-string', 'file:///dev/stdin'], value);
+        await call(new PutSecretValueCommand({ SecretId: id, SecretString: value }));
       } catch (err) {
-        if (!/ResourceNotFoundException/.test(err instanceof Error ? err.message : String(err))) throw err;
-        await run(['secretsmanager', 'create-secret', '--name', id, '--secret-string', 'file:///dev/stdin'], value);
+        if (errorName(err) !== 'ResourceNotFoundException') throw err;
+        await call(new CreateSecretCommand({ Name: id, SecretString: value }));
       }
     },
     async present() {
-      // One ListSecrets call (metadata only, never values) for every secret under the prefix that has a current
-      // version; secrets scheduled for deletion are not listed. Cheaper than a DescribeSecret per name.
-      const out = await run([
-        'secretsmanager',
-        'list-secrets',
-        '--filters',
-        `Key=name,Values=${prefix}`,
-        '--query',
-        "SecretList[?contains(values(SecretVersionsToStages || `{}`)[], 'AWSCURRENT')].Name",
-        '--output',
-        'json',
-      ]);
-      const names = JSON.parse(out || '[]') as string[];
+      // ListSecrets (metadata only, never values) for every secret under the prefix that has a current version;
+      // secrets scheduled for deletion are not listed. Cheaper than a DescribeSecret per name.
+      const names: string[] = [];
+      let next: string | undefined;
+      do {
+        const page = (await call(
+          new ListSecretsCommand({ Filters: [{ Key: 'name', Values: [prefix] }], NextToken: next }),
+        )) as { SecretList?: Array<{ Name?: string; SecretVersionsToStages?: Record<string, string[]> }>; NextToken?: string };
+        for (const s of page.SecretList ?? []) {
+          if (s.Name && isCurrent(s.SecretVersionsToStages)) names.push(s.Name);
+        }
+        next = page.NextToken;
+      } while (next);
       return new Set(names.filter((n) => n.startsWith(prefix)).map((n) => n.slice(prefix.length)));
     },
     async has(secretName) {
       // Metadata only (DescribeSecret): the value is never fetched, so this works for secrets the caller may write
       // but never read (gatekeeper-held keys, §6.11 K5). Present means a current version exists and it is not deleted.
       try {
-        const out = await run([
-          'secretsmanager',
-          'describe-secret',
-          '--secret-id',
-          `${prefix}${secretName}`,
-          '--query',
-          "[DeletedDate == null, contains(values(VersionIdsToStages || `{}`)[], 'AWSCURRENT')]",
-          '--output',
-          'json',
-        ]);
-        const [live, current] = JSON.parse(out) as [boolean, boolean];
-        return live === true && current === true;
+        const out = (await call(new DescribeSecretCommand({ SecretId: `${prefix}${secretName}` }))) as {
+          DeletedDate?: Date | null;
+          VersionIdsToStages?: Record<string, string[]>;
+        };
+        return (out.DeletedDate === undefined || out.DeletedDate === null) && isCurrent(out.VersionIdsToStages);
       } catch {
         return false;
       }
     },
     async get(secretName) {
       try {
-        const out = await run([
-          'secretsmanager',
-          'get-secret-value',
-          '--secret-id',
-          `${prefix}${secretName}`,
-          '--query',
-          'SecretString',
-          '--output',
-          'text',
-        ]);
-        const value = out.replace(/\n$/, '');
-        return value && value !== 'None' ? value : undefined;
+        const out = (await call(new GetSecretValueCommand({ SecretId: `${prefix}${secretName}` }))) as {
+          SecretString?: string;
+        };
+        const value = out.SecretString;
+        return typeof value === 'string' && value !== '' && value !== 'None' ? value : undefined;
       } catch {
         return undefined;
       }
