@@ -50,6 +50,36 @@ export async function readSecret(state: FactoryState, name: string): Promise<str
   return undefined;
 }
 
+const SECRET_TTL_MS = 5 * 60_000;
+const reading = new WeakMap<FactoryState, Map<string, Promise<string | undefined>>>();
+
+/**
+ * #501: readSecret through the control plane's short-lived secret cache (`state.secretCache`, the one pre-flight
+ * uses and the setup flows clear when they store a new value). For hot paths: each uncached read spawns the AWS CLI,
+ * which takes seconds on a busy task. Concurrent reads of one name share a single lookup; absent values are not
+ * cached, so a value stored later is seen on the next read.
+ */
+export async function readSecretCached(state: FactoryState, name: string, ttlMs = SECRET_TTL_MS): Promise<string | undefined> {
+  const cache = (state.secretCache ??= new Map());
+  const hit = cache.get(name);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+  const inFlight = reading.get(state) ?? new Map<string, Promise<string | undefined>>();
+  reading.set(state, inFlight);
+  const pending = inFlight.get(name);
+  if (pending) return pending;
+  const p = readSecret(state, name)
+    .then((v) => {
+      if (v) {
+        cache.set(name, { value: v, at: Date.now() });
+        if (v.length >= 4) state.secretValues.add(v);
+      }
+      return v;
+    })
+    .finally(() => inFlight.delete(name));
+  inFlight.set(name, p);
+  return p;
+}
+
 /** Console paths are relative to /api/v1, like the console client's request(). */
 export const agentPath = (agentId: string, rest: string) => `/keymaster/agents/${encodeURIComponent(agentId)}/${rest}`;
 

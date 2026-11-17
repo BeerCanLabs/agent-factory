@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
-import { agentPath, readSecret, registerAppSetupProvider } from './app-setup-providers.js';
+import { agentPath, readSecret, readSecretCached, registerAppSetupProvider } from './app-setup-providers.js';
 
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const MAX_ORGS = 50;
@@ -47,36 +47,101 @@ export function appJwt(appId: string, pem: string, now = Date.now()): string {
 }
 
 type Minted = { token: string; expiresAt: string };
+type MintResult = ({ ok: true } & Minted) | { ok: false; status: number; error: string };
 const cache = new WeakMap<FactoryState, Map<string, Minted>>();
+/** #501: one mint per agent and org at a time; later callers share it. */
+const minting = new WeakMap<FactoryState, Map<string, Promise<MintResult>>>();
+/** #501: installation ids per agent, org and app id. Stable while the app stays installed; dropped on any refusal. */
+const installations = new WeakMap<FactoryState, Map<string, number>>();
+/** #501: each GitHub call gets its own limit, so a stalled call ends instead of hanging the mint. */
+export const GITHUB_CALL_TIMEOUT_MS = 8_000;
+/** #501: how long the token route waits for a mint; under the gatekeeper-egress's 10 s call limit. */
+export const TOKEN_ROUTE_DEADLINE_MS = 8_000;
+
+const mapOf = <V>(m: WeakMap<FactoryState, Map<string, V>>, s: FactoryState): Map<string, V> => {
+  const v = m.get(s) ?? new Map<string, V>();
+  m.set(s, v);
+  return v;
+};
 
 /** Mint (or reuse) an installation key for a chosen org. Errors carry codes only, never key material. */
-export async function mintInstallationToken(state: FactoryState, agentId: string, org: string): Promise<{ ok: true } & Minted | { ok: false; status: number; error: string }> {
+export async function mintInstallationToken(state: FactoryState, agentId: string, org: string): Promise<MintResult> {
   const lower = org.toLowerCase();
   if (!chosenOrgs(state, agentId).some((o) => o.toLowerCase() === lower)) return { ok: false, status: 403, error: 'org_not_chosen' };
-  const c = cache.get(state) ?? new Map<string, Minted>();
-  cache.set(state, c);
-  const hit = c.get(`${agentId}/${lower}`);
+  const key = `${agentId}/${lower}`;
+  const hit = mapOf(cache, state).get(key);
   if (hit && Date.parse(hit.expiresAt) - EARLY_MS > Date.now()) return { ok: true, ...hit };
+  const inFlight = mapOf(minting, state);
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  const p = mint(state, agentId, org, key).finally(() => inFlight.delete(key));
+  inFlight.set(key, p);
+  return p;
+}
+
+async function mint(state: FactoryState, agentId: string, org: string, key: string): Promise<MintResult> {
+  const t0 = Date.now();
+  const phases: string[] = [];
+  const lap = (name: string, since: number) => (phases.push(`${name} ${Date.now() - since} ms`), Date.now());
+  const done = (out: MintResult): MintResult => {
+    // #501: one line per mint: agent, org, outcome and where the time went. Never a key or key material.
+    console.log(`[github-app] token ${agentId}/${org}: ${out.ok ? 'minted' : out.error} in ${Date.now() - t0} ms (${phases.join(', ')})`);
+    return out;
+  };
   const names = githubAppSecretNames(agentId);
-  const [appId, pem] = [await readSecret(state, names.id), await readSecret(state, names.privateKey)];
-  if (!appId || !pem) return { ok: false, status: 428, error: 'github_app_missing' };
+  // #501: both app secrets at once, through the short-lived secret cache (each uncached read spawns the AWS CLI).
+  const [appId, pem] = await Promise.all([readSecretCached(state, names.id), readSecretCached(state, names.privateKey)]);
+  let t = lap('secrets', t0);
+  if (!appId || !pem) return done({ ok: false, status: 428, error: 'github_app_missing' });
+  const instKey = `${key}/${appId}`;
+  const known = mapOf(installations, state);
   try {
     const headers = { accept: 'application/vnd.github+json', authorization: `Bearer ${appJwt(appId, pem)}` };
-    const inst = await fetch(`${apiBase(state)}/orgs/${encodeURIComponent(org)}/installation`, { headers });
-    if (inst.status === 404) return { ok: false, status: 428, error: 'not_installed' };
-    if (!inst.ok) return { ok: false, status: 502, error: 'github_unavailable' };
-    const { id } = (await inst.json()) as { id?: unknown };
-    if (typeof id !== 'number') return { ok: false, status: 502, error: 'github_unavailable' };
-    const tok = await fetch(`${apiBase(state)}/app/installations/${id}/access_tokens`, { method: 'POST', headers });
-    if (tok.status !== 201) return { ok: false, status: 502, error: 'github_unavailable' };
+    let id = known.get(instKey);
+    if (id === undefined) {
+      const inst = await fetch(`${apiBase(state)}/orgs/${encodeURIComponent(org)}/installation`, { headers, signal: AbortSignal.timeout(GITHUB_CALL_TIMEOUT_MS) });
+      t = lap('installation', t);
+      if (inst.status === 404) return done({ ok: false, status: 428, error: 'not_installed' });
+      if (!inst.ok) return done({ ok: false, status: 502, error: 'github_unavailable' });
+      const body = (await inst.json()) as { id?: unknown };
+      if (typeof body.id !== 'number') return done({ ok: false, status: 502, error: 'github_unavailable' });
+      id = body.id;
+    } else t = lap('installation cached', t);
+    const tok = await fetch(`${apiBase(state)}/app/installations/${id}/access_tokens`, { method: 'POST', headers, signal: AbortSignal.timeout(GITHUB_CALL_TIMEOUT_MS) });
+    lap('token', t);
+    if (tok.status !== 201) {
+      known.delete(instKey);
+      return done({ ok: false, status: 502, error: 'github_unavailable' });
+    }
     const { token, expires_at } = (await tok.json()) as { token?: unknown; expires_at?: unknown };
-    if (typeof token !== 'string' || typeof expires_at !== 'string') return { ok: false, status: 502, error: 'github_unavailable' };
+    if (typeof token !== 'string' || typeof expires_at !== 'string') return done({ ok: false, status: 502, error: 'github_unavailable' });
+    known.set(instKey, id);
     state.secretValues.add(token);
     const minted = { token, expiresAt: expires_at };
-    c.set(`${agentId}/${lower}`, minted);
-    return { ok: true, ...minted };
-  } catch {
-    return { ok: false, status: 502, error: 'github_unavailable' };
+    mapOf(cache, state).set(key, minted);
+    return done({ ok: true, ...minted });
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    return done({ ok: false, status: timedOut ? 504 : 502, error: timedOut ? 'github_timeout' : 'github_unavailable' });
+  }
+}
+
+/**
+ * #501: a mint bounded by the route deadline. A mint that outlasts it keeps running and caches its key, so the
+ * caller's next request is served from the cache; this request gets a 504 the gatekeeper-egress logs.
+ */
+async function mintWithin(state: FactoryState, agentId: string, org: string, ms: number): Promise<MintResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<MintResult>((resolve) => {
+    timer = setTimeout(() => {
+      console.error(`[github-app] token ${agentId}/${org}: not ready after ${ms} ms; the mint continues and caches its key`);
+      resolve({ ok: false, status: 504, error: 'github_app_token_slow' });
+    }, ms);
+  });
+  try {
+    return await Promise.race([mintInstallationToken(state, agentId, org), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -121,7 +186,7 @@ export async function handleGitHubAppInstall(state: FactoryState, req: http.Inco
     const own = run?.agentId === agentId;
     const borrowed = Boolean(parentRun && !isTerminal(parentRun.state));
     if (!run || (!own && !borrowed) || isTerminal(run.state)) return json(res, 403, { error: 'run_not_live' }), true;
-    const out = await mintInstallationToken(state, agentId, org);
+    const out = await mintWithin(state, agentId, org, state.githubAppTokenDeadlineMs ?? TOKEN_ROUTE_DEADLINE_MS);
     if (!out.ok) return json(res, out.status, { error: out.error }), true;
     res.setHeader('Cache-Control', 'no-store');
     json(res, 200, { accessToken: out.token, expiresAt: out.expiresAt, org });

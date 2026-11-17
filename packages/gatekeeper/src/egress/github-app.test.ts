@@ -41,6 +41,10 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     async ledger(e) { ledgered.push(String(e.action)); },
     async githubAppToken(req) {
       asked.push(req);
+      // #501: a slow control plane (cold mint), and one that times out.
+      if (req.agentId === 'slowpoke') { await new Promise((r) => setTimeout(r, 150)); return { ok: true, accessToken: `ghs_slow_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString() }; }
+      if (req.agentId === 'stalled') throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      if (req.agentId === 'refused') return { ok: false, status: 504, error: 'github_app_token_slow' };
       if (req.agentId === 'archie' && req.org?.toLowerCase() === 'beercanlabs') return { ok: true, accessToken: `ghs_app_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString() };
       // GAP-256: no org (a GraphQL call with no hint): the control plane answers with the app's only chosen org.
       if (req.agentId === 'archie' && req.org === undefined) return { ok: true, accessToken: `ghs_sole_${asked.length}`, expiresAt: new Date(Date.now() + 3600_000).toISOString(), org: 'BeerCanLabs' };
@@ -138,6 +142,34 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     await send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token);
     assert.equal(asked.length, before + 1);
   });
+  it('#501: concurrent calls of a run share one token request while the control plane mints', async () => {
+    await as('slowpoke');
+    const rs = await Promise.all([1, 2, 3].map(() => send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token)));
+    assert.deepEqual(rs.map((r) => r.status), [200, 200, 200]);
+    assert.equal(asked.filter((a) => a.agentId === 'slowpoke').length, 1);
+    assert.ok(seen.every((s) => s.auth === 'token ghs_slow_1'), 'every call used the one minted key');
+  });
+
+  it('#501: a timed-out or failed token request is logged with the agent, org and elapsed time', async () => {
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+    try {
+      await as('stalled');
+      assert.equal((await send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token)).status, 200);
+      await as('refused');
+      await send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token);
+      await as('nobody');
+      await send(port, 'GET', '/github/repos/BeerCanLabs/agentic-sdlc', token);
+    } finally {
+      console.error = orig;
+    }
+    assert.equal(seen[0].auth, 'token gh-pat', 'falls back to the route credential');
+    assert.ok(lines.some((l) => /github app token github for stalled\/BeerCanLabs: The operation was aborted due to timeout after \d+ ms/.test(l)), lines.join('\n'));
+    assert.ok(lines.some((l) => /github app token github for refused\/BeerCanLabs: 504 github_app_token_slow after \d+ ms/.test(l)));
+    assert.ok(!lines.some((l) => l.includes('nobody/')), 'a routine 4xx refusal (no app) is not logged');
+  });
+
   describe('GAP-256: GraphQL (Projects v2) picks the app key for an org', () => {
     const q = (variables: Record<string, unknown>) => JSON.stringify({ query: 'query{viewer{login}}', variables });
 
