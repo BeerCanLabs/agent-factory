@@ -13,7 +13,7 @@ import http from 'node:http';
 import { writableProvider } from '@beercanlabs/factory-secrets-bind';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { invalidateCredentials } from './credentials.js';
-import { agentPath, readSecret, registerAppSetupProvider } from './app-setup-providers.js';
+import { agentPath, invalidateSecret, readSecret, registerAppSetupProvider } from './app-setup-providers.js';
 
 /** View channels (1024) + send messages (2048) + read message history (65536). */
 export const DEFAULT_DISCORD_PERMISSIONS = '68608';
@@ -100,8 +100,8 @@ export async function handleDiscordAppSetup(state: FactoryState, req: http.Incom
       console.error(`[keymaster] storing the Discord bot for ${agentId} failed`);
       return json(res, 502, { error: 'write_failed' }), true;
     }
-    state.secretCache?.delete(names.token);
-    state.secretCache?.delete(names.appId);
+    invalidateSecret(state, names.token);
+    invalidateSecret(state, names.appId);
     invalidateCredentials(state);
     state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'DISCORD_BOT_SET', actor: principal.actor, credential: names.token });
     const permissions = declaredPermissions(state, agentId);

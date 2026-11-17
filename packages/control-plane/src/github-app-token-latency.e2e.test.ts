@@ -10,6 +10,7 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { MemoryRunStore } from '@beercanlabs/factory-property-manager';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
+import { invalidateSecret, readSecretCached } from './app-setup-providers.js';
 
 // #501: a cold installation-key mint must fit inside the gatekeeper-egress's 10 s call. Secret reads (each an AWS
 // CLI spawn in prod) are cached and run together, concurrent mints are shared, installation ids are kept, the route
@@ -135,5 +136,90 @@ describe('GitHub App token latency (#501)', { concurrency: false }, () => {
     assert.equal(calls.token, before, 'served from the cache the slow mint filled');
     delete state.githubAppTokenDeadlineMs;
     readDelayMs = 0;
+  });
+
+  // #501 / PR #502: a secret read in flight when its secret is replaced must not put the old value back in the cache.
+  // Each case uses its own secret names and removes them, the cache entries it made, and the values it added.
+  // A provider that returns the value as it was when the read started, so a change made while the read is in flight
+  // is what the invalidation exists for. The state's own provider reads `stored` only after its delay.
+  const snapshotProvider = { name: 'snapshot', async get(n: string) { reads.push({ name: n, at: Date.now() }); const v = stored.get(n); await sleep(readDelayMs); return v; } };
+  const useSnapshotProvider = () => {
+    const saved = state.providers;
+    state.providers = [snapshotProvider] as typeof saved;
+    return () => { state.providers = saved; };
+  };
+  const cleanupSecrets = (names: string[], values: string[]) => {
+    for (const n of names) { stored.delete(n); invalidateSecret(state, n); }
+    for (const v of values) state.secretValues.delete(v);
+    readDelayMs = 0;
+  };
+
+  it('AC1: a read in flight at invalidation returns the old value; the next read does a fresh provider read', async () => {
+    const A = 'LATENCY_TEST_RACE_A';
+    stored.set(A, 'old-value-a');
+    const restore = useSnapshotProvider();
+    try {
+      readDelayMs = 200;
+      const inFlight = readSecretCached(state, A);
+      await sleep(20);
+      stored.set(A, 'new-value-a');
+      invalidateSecret(state, A);
+      assert.equal(await inFlight, 'old-value-a', 'the in-flight caller still gets the value it read');
+      readDelayMs = 0;
+      assert.equal(await readSecretCached(state, A), 'new-value-a');
+      assert.equal(reads.filter((r) => r.name === A).length, 2, 'the next read went to the provider');
+    } finally {
+      restore();
+      cleanupSecrets([A], ['old-value-a', 'new-value-a']);
+    }
+  });
+
+  it('AC2: invalidating A during a read of A and B leaves B cached; A is re-read', async () => {
+    const A = 'LATENCY_TEST_RACE_2A';
+    const B = 'LATENCY_TEST_RACE_2B';
+    stored.set(A, 'old-value-2a');
+    stored.set(B, 'value-2b');
+    const restore = useSnapshotProvider();
+    try {
+      readDelayMs = 200;
+      const readA = readSecretCached(state, A);
+      const readB = readSecretCached(state, B);
+      await sleep(20);
+      stored.set(A, 'new-value-2a');
+      invalidateSecret(state, A);
+      assert.equal(await readA, 'old-value-2a');
+      assert.equal(await readB, 'value-2b');
+      readDelayMs = 0;
+      assert.equal(await readSecretCached(state, A), 'new-value-2a', 'the next read of A is the new value');
+      const bReads = reads.filter((r) => r.name === B).length;
+      assert.equal(await readSecretCached(state, B), 'value-2b');
+      assert.equal(reads.filter((r) => r.name === B).length, bReads, 'the next read of B does no provider read');
+    } finally {
+      restore();
+      cleanupSecrets([A, B], ['old-value-2a', 'new-value-2a', 'value-2b']);
+    }
+  });
+
+  it('AC3: an old read settling after invalidation does not remove a newer read from the in-flight map', async () => {
+    const C = 'LATENCY_TEST_RACE_C';
+    stored.set(C, 'old-value-c');
+    const restore = useSnapshotProvider();
+    try {
+      readDelayMs = 200;
+      const oldRead = readSecretCached(state, C);
+      stored.set(C, 'new-value-c');
+      invalidateSecret(state, C);
+      readDelayMs = 300;
+      const newRead = readSecretCached(state, C);
+      assert.equal(await oldRead, 'old-value-c');
+      // The old read has settled (its finally has run); the new read is still in flight and must be shared.
+      const sharer = readSecretCached(state, C);
+      assert.equal(await newRead, 'new-value-c');
+      assert.equal(await sharer, 'new-value-c');
+      assert.equal(reads.filter((r) => r.name === C).length, 2, 'two concurrent post-invalidation reads share one provider read');
+    } finally {
+      restore();
+      cleanupSecrets([C], ['old-value-c', 'new-value-c']);
+    }
   });
 });
