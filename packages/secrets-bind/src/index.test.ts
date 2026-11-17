@@ -1,9 +1,25 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { awsSecretsManagerProvider, bindSecrets, envProvider, fileProvider, httpProvider } from './index.js';
+import { awsSecretsManagerProvider, bindSecrets, envProvider, fileProvider, httpProvider, type SecretsManagerSend } from './index.js';
+
+// K6: a stand-in for SecretsManagerClient that records each command's class name and input and answers from `answer`.
+type Recorded = { name: string; input: Record<string, any> };
+function fakeSecrets(answer: (call: Recorded) => unknown) {
+  const calls: Recorded[] = [];
+  const client: SecretsManagerSend = {
+    async send(command) {
+      const c = command as { constructor: { name: string }; input: Record<string, any> };
+      const call = { name: c.constructor.name, input: c.input };
+      calls.push(call);
+      return answer(call);
+    },
+  };
+  return { client, calls };
+}
+const notFound = () => Object.assign(new Error("Secrets Manager can't find the specified secret."), { name: 'ResourceNotFoundException' });
 
 describe('bindSecrets', () => {
   it('binds names from env without storing values in the factory', async () => {
@@ -54,20 +70,29 @@ describe('bindSecrets', () => {
     }
   });
 
-  it('reads AWS Secrets Manager under the task-definition prefix', async () => {
-    const asked: string[] = [];
-    const provider = awsSecretsManagerProvider('factory/prod/', async (args) => {
-      const id = args[args.indexOf('--secret-id') + 1];
-      asked.push(id);
-      if (id === 'factory/prod/ECHO_WEBHOOK_SECRET') return 'from-sm\n';
-      throw new Error('ResourceNotFoundException');
+  it('K6: reads AWS Secrets Manager under the task-definition prefix; a missing secret is undefined', async () => {
+    const { client, calls } = fakeSecrets((c) => {
+      if (c.input.SecretId === 'factory/prod/ECHO_WEBHOOK_SECRET') return { SecretString: 'from-sm' };
+      throw notFound();
     });
+    const provider = awsSecretsManagerProvider('factory/prod/', client);
     const ok = await bindSecrets(['ECHO_WEBHOOK_SECRET'], [provider]);
     assert.equal(ok.ok, true);
     if (ok.ok) assert.equal(ok.env.ECHO_WEBHOOK_SECRET, 'from-sm');
     const missing = await bindSecrets(['NOPE'], [provider]);
     assert.equal(missing.ok, false);
-    assert.deepEqual(asked, ['factory/prod/ECHO_WEBHOOK_SECRET', 'factory/prod/NOPE']);
+    assert.deepEqual(
+      calls.map((c) => [c.name, c.input.SecretId]),
+      [
+        ['GetSecretValueCommand', 'factory/prod/ECHO_WEBHOOK_SECRET'],
+        ['GetSecretValueCommand', 'factory/prod/NOPE'],
+      ],
+    );
+  });
+
+  it('K6: treats a stored value of exactly None as missing', async () => {
+    const { client } = fakeSecrets(() => ({ SecretString: 'None' }));
+    assert.equal(await awsSecretsManagerProvider('factory/prod/', client).get('X'), undefined);
   });
 
   it('reads GCP Secret Manager and handles missing secrets cleanly', async () => {
@@ -87,63 +112,60 @@ describe('bindSecrets', () => {
     assert.deepEqual(asked, ['my-project/MY_GCP_SECRET', 'my-project/UNSET_SECRET']);
   });
 
-  it('lists which AWS secrets exist in one metadata call, never reading a value (GAP-056)', async () => {
-    const calls: string[][] = [];
-    const provider = awsSecretsManagerProvider('factory/prod/', async (args) => {
-      calls.push(args);
-      return JSON.stringify(['factory/prod/NOTION_API_KEY', 'factory/prod/connections/donna/google', 'factory/staging/OTHER']);
+  it('K6: lists AWS secrets with one ListSecrets call per page, never reading a value (GAP-056)', async () => {
+    const { client, calls } = fakeSecrets((c) => {
+      if (!c.input.NextToken) {
+        return {
+          SecretList: [
+            { Name: 'factory/prod/NOTION_API_KEY', SecretVersionsToStages: { v1: ['AWSCURRENT'] } },
+            { Name: 'factory/prod/OLD_KEY', SecretVersionsToStages: { v0: ['AWSPREVIOUS'] } },
+            { Name: 'factory/staging/OTHER', SecretVersionsToStages: { v1: ['AWSCURRENT'] } },
+          ],
+          NextToken: 'page-2',
+        };
+      }
+      return {
+        SecretList: [
+          { Name: 'factory/prod/connections/donna/google', SecretVersionsToStages: { v2: ['AWSCURRENT', 'AWSPENDING'] } },
+          { Name: 'factory/prod/GONE', SecretVersionsToStages: {} },
+        ],
+      };
     });
-    assert.deepEqual([...(await provider.present!())].sort(), ['NOTION_API_KEY', 'connections/donna/google']);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0][1], 'list-secrets');
-    assert.deepEqual(calls[0].slice(2, 4), ['--filters', 'Key=name,Values=factory/prod/']);
-    assert.ok(!calls[0].some((a) => /get-secret-value|SecretString/.test(a)), 'metadata only');
+    assert.deepEqual([...(await awsSecretsManagerProvider('factory/prod/', client).present!())].sort(), [
+      'NOTION_API_KEY',
+      'connections/donna/google',
+    ]);
+    assert.deepEqual(calls.map((c) => c.name), ['ListSecretsCommand', 'ListSecretsCommand']);
+    assert.deepEqual(calls[0].input.Filters, [{ Key: 'name', Values: ['factory/prod/'] }]);
+    assert.equal(calls[1].input.NextToken, 'page-2');
+    assert.ok(!calls.some((c) => c.name === 'GetSecretValueCommand'), 'metadata only');
   });
 
-  it('writes AWS secrets over stdin, creating the secret when it does not exist yet', async () => {
-    const calls: Array<{ args: string[]; input?: string }> = [];
+  it('K6: writes AWS secrets with PutSecretValue, creating the secret when it does not exist yet', async () => {
+    const value = '{"refreshToken":"rt-secret"}';
     const existing = new Set<string>();
-    const provider = awsSecretsManagerProvider('factory/prod/', async (args, input) => {
-      calls.push({ args, input });
-      const id = args[args.indexOf(args.includes('--name') ? '--name' : '--secret-id') + 1];
-      if (args[1] === 'put-secret-value' && !existing.has(id)) throw new Error('An error occurred (ResourceNotFoundException) when calling the PutSecretValue operation');
-      if (args[1] === 'create-secret') existing.add(id);
-      return '{}';
+    const { client, calls } = fakeSecrets((c) => {
+      if (c.name === 'PutSecretValueCommand' && !existing.has(c.input.SecretId)) throw notFound();
+      if (c.name === 'CreateSecretCommand') existing.add(c.input.Name);
+      return {};
     });
-    await provider.put!('connections/donna/google', '{"refreshToken":"rt-secret"}');
-    assert.deepEqual(calls.map((c) => c.args[1]), ['put-secret-value', 'create-secret']);
-    assert.equal(calls[1].args[calls[1].args.indexOf('--name') + 1], 'factory/prod/connections/donna/google');
+    const provider = awsSecretsManagerProvider('factory/prod/', client);
+    await provider.put!('connections/donna/google', value);
+    assert.deepEqual(calls.map((c) => c.name), ['PutSecretValueCommand', 'CreateSecretCommand']);
+    assert.equal(calls[1].input.Name, 'factory/prod/connections/donna/google');
     for (const c of calls) {
-      assert.equal(c.input, '{"refreshToken":"rt-secret"}');
-      assert.equal(c.args.join(' ').includes('rt-secret'), false, 'secret value never in argv');
+      assert.equal(c.input.SecretString, value);
+      assert.equal(JSON.stringify({ ...c.input, SecretString: undefined }).includes('rt-secret'), false, 'secret value only in SecretString');
     }
     calls.length = 0;
     await provider.put!('connections/donna/google', '{"refreshToken":"rt-2"}');
-    assert.deepEqual(calls.map((c) => c.args[1]), ['put-secret-value']);
+    assert.deepEqual(calls.map((c) => c.name), ['PutSecretValueCommand']);
   });
 
-  it('the real CLI spawn lets `aws` read the value from file:///dev/stdin (regression: ENXIO on Linux)', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'fake-aws-'));
-    const out = join(dir, 'written');
-    // A stand-in `aws` that opens its --secret-string file:// path exactly as the real CLI does.
-    writeFileSync(join(dir, 'aws'), '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --secret-string ] && cat "${2#file://}" > "$FAKE_AWS_OUT"; shift; done\n', { mode: 0o755 });
-    const saved = { PATH: process.env.PATH, FAKE_AWS_OUT: process.env.FAKE_AWS_OUT, AWS_REGION: process.env.AWS_REGION };
-    process.env.PATH = `${dir}:${process.env.PATH}`;
-    process.env.FAKE_AWS_OUT = out;
-    delete process.env.AWS_REGION;
-    try {
-      await awsSecretsManagerProvider('factory/prod/').put!('connections/donna/google', '{"refreshToken":"rt-live"}');
-      assert.equal(readFileSync(out, 'utf8'), '{"refreshToken":"rt-live"}');
-    } finally {
-      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('surfaces AWS and GCP write errors other than not-found; http backend says writes are not implemented', async () => {
-    const provider = awsSecretsManagerProvider('p/', async () => {
+  it('K6: surfaces AWS and GCP write errors other than not-found; http backend says writes are not implemented', async () => {
+    const provider = awsSecretsManagerProvider('p/', fakeSecrets(() => {
       throw new Error('AccessDeniedException');
-    });
+    }).client);
     await assert.rejects(provider.put!('x', 'v'), /AccessDenied/);
     const { gcpSecretManagerProvider, writableProvider, SecretWriteNotImplementedError } = await import('./index.js');
     const gcpProvider = gcpSecretManagerProvider('p', async () => {
@@ -154,6 +176,22 @@ describe('bindSecrets', () => {
     assert.equal(writableProvider([envProvider({})]), undefined);
     assert.equal(writableProvider([envProvider({}), provider])?.name, 'aws-sm');
     assert.equal(writableProvider([envProvider({}), gcpProvider])?.name, 'gcp-sm');
+  });
+
+  it('K6: a hung AWS call returns within the bound: get is undefined, has is false, put rejects, and the request is aborted', async () => {
+    let signal: AbortSignal | undefined;
+    // Never settles and ignores its abort signal, as a stuck SDK step would.
+    const hung: SecretsManagerSend = {
+      send(_command, options) {
+        signal = options?.abortSignal;
+        return new Promise(() => {});
+      },
+    };
+    const provider = awsSecretsManagerProvider('factory/prod/', hung, { timeoutMs: 20 });
+    assert.equal(await provider.get('X'), undefined);
+    assert.equal(signal?.aborted, true, 'the request was aborted when the bound passed');
+    assert.equal(await provider.has!('X'), false);
+    await assert.rejects(provider.put!('X', 'v'), /timed out after 20 ms/);
   });
 
   it('supports GCP Secret Manager REST API (get, put, has, present) with prefix and slash encoding', async () => {
@@ -220,25 +258,22 @@ describe('bindSecrets', () => {
     assert.ok(providers.some((p) => p.name === 'gcp-sm'));
   });
 
-  it('secretPresent answers without the value; AWS reads metadata only (DescribeSecret), never the value', async () => {
+  it('K6: secretPresent answers without the value; AWS reads metadata only (DescribeSecret), never the value', async () => {
     const { secretPresent } = await import('./index.js');
-    const calls: string[][] = [];
-    const aws = awsSecretsManagerProvider('factory/prod/', async (args) => {
-      calls.push(args);
-      const id = args[args.indexOf('--secret-id') + 1];
-      if (id === 'factory/prod/HAVE') return '[true, true]\n';
-      if (id === 'factory/prod/EMPTY') return '[true, false]\n'; // entry exists, no value was ever set
-      if (id === 'factory/prod/DELETED') return '[false, true]\n'; // scheduled for deletion
-      throw new Error('ResourceNotFoundException');
+    const { client, calls } = fakeSecrets((c) => {
+      const id = c.input.SecretId;
+      if (id === 'factory/prod/HAVE') return { VersionIdsToStages: { v1: ['AWSCURRENT'] } };
+      if (id === 'factory/prod/EMPTY') return { VersionIdsToStages: {} }; // entry exists, no value was ever set
+      if (id === 'factory/prod/DELETED') return { DeletedDate: new Date(), VersionIdsToStages: { v1: ['AWSCURRENT'] } }; // scheduled for deletion
+      throw notFound();
     });
+    const aws = awsSecretsManagerProvider('factory/prod/', client);
     assert.equal(await secretPresent('HAVE', [aws]), true);
     assert.equal(await secretPresent('EMPTY', [aws]), false);
     assert.equal(await secretPresent('DELETED', [aws]), false);
     assert.equal(await secretPresent('NOPE', [aws]), false);
-    for (const c of calls) {
-      assert.equal(c[1], 'describe-secret');
-      assert.equal(c.includes('get-secret-value'), false);
-    }
+    assert.ok(calls.length > 0);
+    for (const c of calls) assert.equal(c.name, 'DescribeSecretCommand');
     assert.equal(await secretPresent('A', [envProvider({ A: '' })]), false);
     assert.equal(await secretPresent('A', [envProvider({}), envProvider({ A: 'example-value' })]), true);
     const throwing = { name: 'broken', async get(): Promise<string | undefined> { throw new Error('down'); } };

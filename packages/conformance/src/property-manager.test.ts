@@ -18,6 +18,8 @@ import { files, read } from './support.js';
 //  - It does NOT guard `FactoryState`. It stays in `app.ts` and is assignable to the Property Manager's `PropertyManagerState`.
 //  - It does NOT guard the CodeBuild SDK as a whole: the Registrar's skill-check runner
 //    (`control-plane/src/aws/skill-checker.ts`) and the Accountant's `aws/accountant.ts` use it (ECS, Cost Explorer, STS).
+//  - One exception to the Secrets Manager SDK rule (K6, TSK-350): the Keymaster's `secrets-bind` (`packages/secrets-bind/src/`)
+//    may import `@aws-sdk/client-secrets-manager`, and nothing else does. `allowedImport` says so; no other SDK is exempt.
 
 /** Names the Property Manager owns. A definition of any of them outside the package is a second copy. */
 const OWNED_VALUES = [
@@ -34,7 +36,10 @@ const OWNED_VALUES = [
   'SYSTEM',
 ].join('|');
 
-/** The cloud SDKs only the Property Manager's adapters use (IAM, Secrets Manager, Cloud Build, Cloud Run, their auth). */
+/**
+ * The cloud SDKs only the Property Manager's adapters use (IAM, Secrets Manager, Cloud Build, Cloud Run, their auth).
+ * Secrets Manager is also imported by the Keymaster's `secrets-bind` (K6); `allowedImport` is the one exception.
+ */
 const PROPERTY_MANAGER_SDKS = /['"](?:@aws-sdk\/client-iam|@aws-sdk\/client-secrets-manager|@google-cloud\/[a-z-]+|google-auth-library)['"]/g;
 
 /** A second copy of the Property Manager's code: a definition of a name it owns. Never a use. */
@@ -56,6 +61,14 @@ const nonTestSource = (p: string) => !/\.test\.(?:ts|tsx|js|mjs|cjs)$/.test(p);
 const NOT_PROPERTY_MANAGER = (p: string) => !p.startsWith('packages/property-manager/');
 const ANY_PACKAGE_SOURCE = /^packages\/[^/]+\/src\/.*\.(?:ts|tsx|js|mjs|cjs)$/;
 const propertyManagerSource = () => files('packages/property-manager/src', (p) => ANY_PACKAGE_SOURCE.test(p));
+
+/**
+ * K6 (TSK-350): the one SDK import outside the Property Manager that is allowed. `secrets-bind` is the Keymaster's
+ * secret store (DESIGN_AUTHORITY.md §6.15, §6.11 K6) and calls Secrets Manager in-process. Any other file, or any other
+ * SDK, is still a violation. `matchText` is the matched import, or the report line that contains it.
+ */
+export const allowedImport = (file: string, matchText: string): boolean =>
+  file.startsWith('packages/secrets-bind/src/') && matchText.includes('@aws-sdk/client-secrets-manager');
 
 describe('Property Manager: one copy of the compute lifecycle, and the dependency points one way', () => {
   it('the patterns recognize what they exist to forbid, and not what callers legitimately do', () => {
@@ -101,9 +114,25 @@ describe('Property Manager: one copy of the compute lifecycle, and the dependenc
 
   it('no package outside the Property Manager defines its rules or imports the cloud SDKs only it uses', () => {
     const found = files('packages', (p) => ANY_PACKAGE_SOURCE.test(p) && nonTestSource(p) && NOT_PROPERTY_MANAGER(p)).flatMap((f) =>
-      matches(read(f), SECOND_COPY).map((m) => `${f}:${m}`),
+      matches(read(f), SECOND_COPY)
+        .filter((m) => !allowedImport(f, m))
+        .map((m) => `${f}:${m}`),
     );
     assert.deepEqual(found, [], 'use the Property Manager through its entry point (@beercanlabs/factory-property-manager), do not write the rule again');
+  });
+
+  it('K6: the one allowed import is the Secrets Manager SDK in secrets-bind; other files and other SDKs are not allowed', () => {
+    const smImport = "import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';";
+    assert.equal(allowedImport('packages/secrets-bind/src/index.ts', smImport), true);
+    assert.equal(allowedImport('packages/secrets-bind/src/index.ts', "import { IAMClient } from '@aws-sdk/client-iam';"), false);
+    assert.equal(allowedImport('packages/control-plane/src/x.ts', smImport), false);
+  });
+
+  it('K6: the AWS secret store starts no aws process', () => {
+    const src = read('packages/secrets-bind/src/index.ts');
+    assert.equal(src.includes('spawnAwsCli'), false, 'no spawnAwsCli');
+    assert.equal(/['"]aws['"]/.test(src), false, "no 'aws' or \"aws\" command string");
+    assert.equal(src.includes('cat | aws'), false, 'no cat | aws');
   });
 
   it('the Property Manager imports no caller and no other member perimeter package (one-way dependency)', () => {
