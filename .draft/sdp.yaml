@@ -1,176 +1,258 @@
 schemaVersion: '1.0'
-uid: SDP0000002-AGENTFACTORY
+uid: 01M7KQAQCD-VV8V
 type: software_deployment_pattern
 name: BeerCanLabs Agent Factory
+aliases:
+  - Agent Factory
+  - Agent Factory Platform
 description: >-
-  Headless factory for portable agent cartridges. The kernel is cloud-agnostic
-  (contract, control plane, shim, secret bind, mind hydrate, ledger, idle gatekeeper-ingress).
-  Where it lands is a Draftsman interview: pick one of three baseline patterns,
-  then bind AWS, Azure, GCP, or a VM to the slots. Garrison is a client, not kernel.
-version: 1.1.0
-catalogStatus: incomplete
+  Turnkey headless hosting substrate for autonomous AI agent fleets organized into three
+  architectural tiers: (1) Hot-Swappable Heads (Web Console SPA :3000, Factory CLI, Agent
+  Garrison :3000, and external MCP clients holding zero authority or secrets), (2) the
+  Headless Neck (typed /api/v1/* REST, OpenAPI 3.1, Principal/Agent/Run MCP surfaces, and
+  an OAuth 2.1 Authorization Server with PKCE & RFC 9728 PRM), and (3) the 10-service Factory
+  Body (Gatekeeper, Keymaster, Executive, Property Manager, Auditor, Accountant, Bouncer,
+  Timekeeper, Registrar, Inspector) running disposable min=0 Dual-Mode cartridges inside
+  zero-internet-egress subnets backed by S3 Mind Safe hydration and a SHA-256 hash-chained
+  EFS + S3 Object Lock COMPLIANCE WORM ledger.
+version: 2.0.0
+catalogStatus: complete
 lifecycleStatus: preferred
-canonicalDoc: POSITION_PAPER.md
-followsReferenceArchitecture: 01KS8N4KR4-SVED
+followsReferenceArchitecture: 01KV0REFAR-CMSV
 owner:
   team: platform-ai-team
   contact: platform-ai@example.com
 tags:
   - agent-factory
   - multi-cloud
-  - core-product
-  - substrate
+  - headless-neck
+  - mcp
+  - oauth21
+  - zero-trust
+  - aws-ecs
 businessContext:
-  pillar: business-pillar.platform
   productFamily: Skippy / Agent Factory
 notes:
+  availabilityTarget: 99.9%
   availabilityRequirement: >-
-    Mailboxes (ingress, control plane, gatekeeper-ingress) are always reachable. Agent compute
-    is zero when idle. Availability of "the fleet" is the mailbox, not warm agents.
-  dataClassification: Confidential — ledger is metadata+hash only; mind is adopter data.
+    Mailboxes (Cloudflare + ALB ingress, Control Plane, gatekeeper-ingress, gatekeeper-egress,
+    Console) remain continuously reachable; Control Plane is a single writer (desiredCount=1,
+    stop-before-start) to preserve ledger hash-chain linearity while retrying agent long-polls.
+    Agent cartridge compute scales to zero (min=0) when idle.
+  dataClassification: >-
+    Confidential — execution ledger stores metadata and payloadSha256 only (secrets masked,
+    zero prompt text in ledger); per-agent mind Safe holds adopter data encrypted with AES-256.
   failureDomain:
     scope: service-group
     description: >-
-      Loss of control plane blocks wake/MCP. Loss of one agent task does not take
-      down the factory. gatekeeper-ingress failure affects Discord only.
+      Control Plane outage pauses new wakes and MCP calls without corrupting the WORM-anchored
+      ledger; gatekeeper-ingress failure affects Discord Gateway presence only; individual
+      cartridge crashes or OOMs isolate to a single ephemeral RunTask container and trip
+      crash-loop quarantine after threshold failures.
   patternDeviations: >-
-    Preferred RA is Serverless Event-Driven for *agents* (no sticky instance).
-    Control plane + gatekeeper-ingress may stay warm (orchestrated-tasks pattern) because they
-    are mailboxes, not cartridges. Compose pattern runs kernel on one host for CI/dev.
-  architecturalBaseline: >-
-    These questions are answered by the kernel, not by the cloud. Draftsman binds
-    provider products onto the slots in `baselinePatterns`.
-    1. What is always on? Ingress + control plane + gatekeeper-ingress. Not agents.
-    2. How do agents run? Scale-to-zero on wake from surface.yaml.
-    3. Where is mind? Object storage; local disk is disposable.
-    4. Where are secrets? Adopter BYO manager; factory binds names only.
-    5. How is spend observed? Sidecar intercept, not agent-coded telemetry.
-    6. What is the audit log? Append-only metadata + payloadSha256; optional TTL traces in mind.
-    7. Is Discord required? No. gatekeeper-ingress is installed idle.
-  baselinePatterns:
-    - id: serverless-containers
-      name: Serverless containers
-      follows: 01KS8N4KR4-SVED
-      when: >-
-        Default when the landing zone has request-woken containers (Azure Container
-        Apps, Cloud Run, App Runner / Lambda+HTTP). Agents min=0. Control plane may
-        also min=0 behind the same ingress.
-    - id: orchestrated-tasks
-      name: Orchestrated tasks
-      follows: 01KV0REFAR-CMSV
-      when: >-
-        Control plane + gatekeeper-ingress run as always-on services; agents are Jobs/RunTask
-        with a shim in the same task. Use when the org standard is AKS/ECS/GKE.
-    - id: compose-host
-      name: Compose on a host
-      follows: 01KV0REFAR-CMSV
-      when: >-
-        Single Linux VM or CI runner. Docker Compose. Not a cloud lock-in; not a
-        product SKU named for a specific workstation.
+    Follows Containerized Microservices (Orchestrated Tasks, 01KV0REFAR-CMSV) for persistent
+    mailbox services on AWS ECS Fargate (landing-zones/aws), while agent workers follow
+    Serverless Event-Driven scale-to-zero (01KS8N4KR4-SVED, ECS RunTask per wake, zero 24/7
+    agent services) in isolated route=[] subnets, and east-west discovery uses AWS Cloud Map
+    (factory.internal) + SG microsegmentation rather than a sidecar service mesh. Also supports
+    Compose Host (landing-zones/compose) and Serverless Containers slot bindings.
 networkZones:
   - id: edge
-    name: Edge / ingress
+    name: Edge & Identity-Aware Ingress
     tier: frontend
-    description: Load balancer or managed ingress. Holds inbound HTTP/MCP. Not Discord Gateway.
+    description: >-
+      Cloudflare Zero Trust Access, WAF custom rules, rate-limiting, /.cf-fk-bypass strip
+      Worker, and HTTPS-only TLS 1.3 AWS ALB restricted strictly to Cloudflare ingress CIDRs.
   - id: mailbox
-    name: Mailbox
+    name: Mailbox & Headless Neck Services
     tier: application
-    description: Control plane and gatekeeper-ingress. Cheap, always reachable.
+    description: >-
+      Public service subnets hosting Control Plane (:8088/:8089), gatekeeper-ingress (:8090),
+      gatekeeper-egress (:8081), and Stateless Web Console (:3000) under Cloud Map DNS.
   - id: agents
-    name: Agent compute
+    name: Zero-Egress Agent Compute
     tier: application
-    description: Disposable workers + shim. Scale to zero.
+    description: >-
+      Private subnets with route=[] (no NAT gateways, no internet gateways). Disposable RunTask
+      containers reach only Control Plane (:8088), gatekeeper-egress (:8081), and VPC endpoints.
   - id: data
-    name: Data
+    name: Durable Mind, WORM Ledger & Package Storage
     tier: data
-    description: Object-store mind and append-only ledger.
+    description: >-
+      Encrypted EFS single-writer hot ledger volume (:2049) and versioned/Object-Lock S3
+      buckets for agent minds, COMPLIANCE WORM checkpoints, configs, and skill packages.
 serviceGroups:
-  - name: Kernel mailbox
-    deploymentTarget: drafting-interview-required
-    notes: >-
-      Bind this group to Azure Container Apps / Cloud Run / ECS service / Compose
-      after the human names a provider. Do not assume AWS.
+  - name: Edge & Public Ingress
+    deploymentTarget: aws-us-east-1
     deployableObjects:
-      - ref: factory-control-plane
-        networkZone: mailbox
-        diagramTier: application
-        intent: ha
-        notes: REST + MCP. Headless console.
-      - ref: factory-gatekeeper-ingress
-        networkZone: mailbox
-        diagramTier: utility
-        intent: standalone
-        notes: Always deployed, idle until a discord-surface cartridge binds a bot token.
-      - ref: factory-ingress
+      - ref: 01M7KQAQCD-HXQZ
         networkZone: edge
         diagramTier: presentation
         intent: ha
-        notes: Cloud load balancer / Front Door / Cloud Run ingress. Discord Gateway cannot live here.
-  - name: Kernel data
-    deploymentTarget: drafting-interview-required
+        notes: Cloudflare Zero Trust Access + Edge Worker fronting HTTPS TLS 1.3 AWS ALB.
+  - name: Headless Neck, Console & Mailbox Services
+    deploymentTarget: aws-us-east-1
+    substrate: 01M7KQAQCD-WRAE
     deployableObjects:
-      - ref: factory-mind-store
+      - ref: 01M7KQAQCD-WRAE
+        networkZone: mailbox
+        diagramTier: application
+        intent: ha
+        notes: AWS ECS Fargate cluster orchestrating persistent mailbox services and RunTask workers.
+      - ref: 01M7KQAQCD-V4TP
+        networkZone: mailbox
+        diagramTier: application
+        intent: sa
+        notes: Single-writer Control Plane (:8088/:8089) hosting REST, MCP Neck, OAuth 2.1 AS, and 8 Cast modules.
+      - ref: 01M7KQAQCD-G3DY
+        networkZone: mailbox
+        diagramTier: utility
+        intent: sa
+        notes: Fargate On-Demand gatekeeper-ingress (:8090) holding optional Discord Gateway presence.
+      - ref: 01M7KQAQCD-E48K
+        networkZone: mailbox
+        diagramTier: presentation
+        intent: ha
+        notes: Zero-secret Web Console SPA (:3000) forwarding caller assertions to Control Plane.
+      - ref: 01M7KQAQCD-01CD
+        networkZone: edge
+        diagramTier: presentation
+        intent: sa
+        notes: Operator factory CLI and factory-bench deterministic Cost-vs-Quality harness.
+  - name: Zero-Egress Agent Cartridge Runtime & Perimeter
+    deploymentTarget: aws-us-east-1
+    substrate: 01M7KQAQCD-WRAE
+    deployableObjects:
+      - ref: 01M7KQAQCD-EH0J
+        networkZone: agents
+        diagramTier: application
+        intent: sa
+        notes: Scale-to-zero Shared Runtime, Generic Cartridge, and Python House Staff containers wrapped by PID 1 hydrate shim.
+      - ref: 01M7KQAQCD-AH4Q
+        networkZone: mailbox
+        diagramTier: application
+        intent: ha
+        notes: gatekeeper-egress (:8081) zero-trust reverse & HTTP CONNECT forward proxy with S1 secret injection.
+      - ref: 01M7KQAQCD-VPEH
+        networkZone: mailbox
+        diagramTier: application
+        intent: ha
+        notes: Executive + gatekeeper-egress model & MCP proxy metering LLM/BYOM usage and enforcing Bouncer holds.
+  - name: Admission Pipeline & Enterprise Event Bus
+    deploymentTarget: aws-us-east-1
+    deployableObjects:
+      - ref: 01M7KQAQCD-WD0R
+        networkZone: mailbox
+        diagramTier: utility
+        intent: ha
+        notes: CodeBuild projects (agent-builder, skills-builder, skill-checker) and scan-on-push ECR registries.
+      - ref: 01M7KQAQCD-GHF4
+        networkZone: mailbox
+        diagramTier: utility
+        intent: ha
+        notes: Amazon EventBridge bus publishing run outcomes, budget alerts, crashes, and approval events.
+  - name: Durable Mind, WORM Ledger & Package Stores
+    deploymentTarget: aws-us-east-1
+    deployableObjects:
+      - ref: 01M7KQAQCD-FP9D
         networkZone: data
         diagramTier: data
         intent: ha
-        notes: Object storage (S3 / Blob / GCS / volume). Hydrate on wake, push on sleep.
-      - ref: factory-ledger
+        notes: Encrypted multi-AZ EFS volume (:2049) for single-writer hash-chained ledger.jsonl and active state.
+      - ref: 01M7KQAQCD-EEEE
         networkZone: data
         diagramTier: data
         intent: ha
-        notes: Append-only metadata+hash. Not Postgres-required; EFS/JSONL/Blob are valid.
-  - name: Agent cartridge runtime
-    deploymentTarget: drafting-interview-required
-    notes: One task = worker + shim. No 24/7 service for agents.
-    deployableObjects:
-      - ref: factory-gatekeeper-egress
-        networkZone: agents
-        diagramTier: application
-        intent: standalone
-        notes: Intercept, kill-switch, redact, optional mind traces.
-      - ref: cartridge-worker
-        networkZone: agents
-        diagramTier: application
-        intent: standalone
-        notes: Portable OCI/serverless artifact. Factory does not author agent logic.
+        notes: Encrypted S3 buckets for Mind Safe, Object Lock COMPLIANCE WORM checkpoints, versioned config, and SHA-256 skill packages.
 tierVariants:
-  - tier: serverless-containers
-    notes: Map mailbox+agents to min=0 container platform. Mind+ledger to object storage. Secrets to Key Vault / SM.
+  - tier: 01M7KQAQCC-T9DS
     deploymentTarget:
-      provider: drafting-interview-required
-  - tier: orchestrated-tasks
-    notes: Mailbox as desiredCount>=1 services; agents as jobs. Sidecar colocated.
+      provider: aws
+      region: us-east-1
+    serviceGroupVariants:
+      - serviceGroup: Headless Neck, Console & Mailbox Services
+        replicaCount: 1
+        notes: Control plane fixed at replicaCount=1 (minHealthy=0, max=100) for single-writer ledger integrity.
+      - serviceGroup: Zero-Egress Agent Cartridge Runtime & Perimeter
+        autoscaling:
+          enabled: true
+          min: 0
+          max: 50
+        notes: Agent cartridges scale from 0 via ECS RunTask per wake; gatekeeper-egress runs on Fargate Spot.
+  - tier: 01M7KQAQCC-EG06
     deploymentTarget:
-      provider: drafting-interview-required
-  - tier: compose-host
-    notes: landing-zones/compose. Kernel on one Docker host.
-    deploymentTarget:
-      provider: docker
-decisionRecords:
-  - ref: local-baseline-mailbox-not-agent
-    key: always-on
-    notes: Always-on is the mailbox (ingress, control plane, gatekeeper-ingress). Agents are not always on.
-  - ref: local-baseline-object-mind
-    key: persistent-mind
-    notes: Mind is object storage. Local disk is disposable.
-  - ref: local-baseline-byo-secrets
-    key: secret-binding
-    notes: Factory binds names from the adopter vault. Factory is not a vault.
-  - ref: local-baseline-discord-optional
-    key: gatekeeper-ingress
-    notes: Discord is a choice. gatekeeper-ingress is installed empty. gatekeeper-egress is not a load balancer.
-  - ref: local-baseline-provider-interview
-    key: deploymentTargets
+      provider: on-premises
     notes: >-
-      AWS vs Azure vs GCP vs VM is a Draftsman onboarding interview, not a kernel
-      decision. landing-zones/aws is an orchestrated-tasks *example*, not the SDP.
-externalInteractions:
-  - name: Adopter IdP
-    type: external
-    notes: Cloudflare Access, Entra, Google OIDC, or bearer for first bring-up.
-  - name: Adopter secrets manager
-    type: external
-    notes: AWS SM, Azure Key Vault, GCP SM, Vault, or a file on a VM.
-  - name: Discord Gateway
-    type: external
-    notes: Optional. Only after a cartridge declares type discord and a bot token binds.
+      Single-host Docker Compose stack (landing-zones/compose) enforcing internal factory-agents
+      bridge isolation, docker-socket-proxy container spawning, and CI compose-proof verification.
+decisionRecords:
+  - ref: 01M7KQAQCC-4MCX
+    key: service-mesh
+  - ref: 01M7KQAQCC-4MCX
+    key: logs
+  - ref: 01M7KQAQCC-4MCX
+    key: interServiceConnections
+  - ref: 01M7KQAQCC-4MCX
+    key: deploymentTargets
+  - ref: 01M7KQAQCC-4MCX
+    key: availabilityRequirement
+  - ref: 01M7KQAQCC-4MCX
+    key: externalDependencies
+  - ref: 01M7KQAQCC-4MCX
+    key: dataClassification
+  - ref: 01M7KQAQCC-4MCX
+    key: failureDomain
+  - ref: 01M7KQAQCC-4MCX
+    key: patternDeviations
+  - ref: 01M7KQAQCC-4MCX
+    key: edgeProxyDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: localValidationDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: productRegistrationDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: modelInferenceSpecDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: secretsManagementDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: databaseMigrationStrategyDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: iacAutomationDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: gateEnforcementDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: testDataGovernanceDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: rollbackStrategyDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: composableIacDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: previewEnvironmentsDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: structuredLoggingDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: sloPolicyDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: zeroDowntimeStrategyDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: automatedSecurityGatesDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: queryParameterizationDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: accessControlModelDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: cryptographyStandardDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: sessionManagementDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: errorHandlingLoggingDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: dependencySecurityDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: gameTierClassificationDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: gameUatDeploymentDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: gameAuthPersistenceDecision
+  - ref: 01M7KQAQCC-4MCX
+    key: gameRepoScaffoldingDecision
