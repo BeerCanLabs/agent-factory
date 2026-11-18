@@ -549,6 +549,9 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
         ? state.policies.get(agent.id).models?.[0]
         : state.defaultModel);
     const archetype = state.configs?.current(agent.id)?.agent?.memory?.archetype;
+    // E1.4: a helper is provisioned with memory: false (no mind-bucket IAM). The shim skips mind pull/push when
+    // FACTORY_MEMORY=false, so a sync AccessDenied cannot fail the worker.
+    const memoryDisabled = Boolean(agent.ephemeral);
     // GAP-255: an admin's non-secret deployment settings for this agent, first, so nothing the factory sets is replaced,
     // and never under the name of a secret bound for this run (every runtime lays runEnv over the secrets).
     const policyEnv = Object.fromEntries(
@@ -561,6 +564,7 @@ async function startRun(state: PropertyManagerState, run: Run, secrets?: Record<
       ...(state.publicUrl ? { FACTORY_URL: state.publicUrl } : {}),
       ...(effectiveModel ? { FACTORY_MODEL: effectiveModel } : {}),
       ...(archetype ? { FACTORY_MEMORY_ARCHETYPE: archetype } : {}),
+      ...(memoryDisabled ? { FACTORY_MEMORY: 'false' } : {}),
       // AM3: the factory-wide notebook rotation policy and where closed volumes go.
       ...notebookEnv(),
       ...(state.gatekeeperEgressUrl ? { FACTORY_GATEKEEPER_EGRESS_URL: state.gatekeeperEgressUrl } : {}),

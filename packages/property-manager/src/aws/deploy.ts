@@ -25,7 +25,7 @@ export function awsDeployProvider(): DeployProvider {
 
     async provisionHelperCompute(computeId: string, imageUri: string): Promise<void> {
       const { taskRoleArn, executionRoleArn } = await provisionAgentRoles(computeId, [], { memory: false });
-      await registerAgentTaskDefinition(computeId, imageUri, [], taskRoleArn, executionRoleArn, computeId);
+      await registerAgentTaskDefinition(computeId, imageUri, [], taskRoleArn, executionRoleArn, computeId, { FACTORY_MEMORY: 'false' });
     },
 
     async registerCompute(
