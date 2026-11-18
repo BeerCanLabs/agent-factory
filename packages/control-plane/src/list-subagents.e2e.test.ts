@@ -169,6 +169,22 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
     assert.ok(runNames.includes('list_subagents'));
   });
 
+  it('a throwing run handler on POST /mcp matches POST /mcp/run, with no OAuth challenge (#510 B5)', async () => {
+    const orig = state.policies.get.bind(state.policies);
+    state.policies.get = (() => { throw new Error('boom'); }) as typeof orig;
+    try {
+      const onMcp = await listCall('/mcp', runs.reviewer.token);
+      const onRun = await listCall('/mcp/run', runs.reviewer.token);
+      assert.equal(onMcp.status, onRun.status);
+      assert.deepEqual(onMcp.body, onRun.body);
+      assert.equal(onMcp.status, 400);
+      assert.equal(onMcp.body.error, 'boom');
+      assert.equal(onMcp.headers.get('www-authenticate'), null);
+    } finally {
+      state.policies.get = orig;
+    }
+  });
+
   it('a policy with a malformed subagents list is refused', async () => {
     assert.equal((await call(port, '/api/v1/agents/other/policy', 'PUT', ADMIN, { routes: [], subagents: 'juror' })).status, 400);
   });

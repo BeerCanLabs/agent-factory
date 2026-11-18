@@ -5610,14 +5610,17 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     // headers) is dispatched to handleRunMcp, same as POST /mcp/run. identify() does not
     // accept run tokens. A refused run token (ended run, wrong agent, unknown run) is 401
     // invalid_run_token with no OAuth challenge, matching /mcp/run. Fall through to
-    // requirePrivilege only when the bearer is not a run token, or when the path or
-    // headers are outside the shim (so /mcp/readonly, /mcp/x/*, and those headers keep
-    // the main behaviour). If verification throws, fall through rather than failing the
-    // request. Remove this shim when BeerCanLabs/agentic-sdlc#132 lands.
+    // requirePrivilege only when the bearer is not a run token — including when
+    // verification throws — or when the path or headers are outside the shim
+    // (/mcp/readonly, /mcp/x/*, and those headers keep the main behaviour). Once a
+    // live token is accepted, handler errors take the same path as /mcp/run.
+    // Remove this shim when BeerCanLabs/agentic-sdlc#132 lands.
     const headerOn = (value: string | string[] | undefined) =>
       (Array.isArray(value) ? value : [value]).some((v) => typeof v === 'string' && v.trim() !== '');
     const shimPath = path === '/mcp' && !headerOn(req.headers['x-mcp-readonly']) && !headerOn(req.headers['x-mcp-toolsets']);
     if (shimPath && apiKeyFromAuthorization(req.headers.authorization) === undefined && state.runTokens) {
+      let acceptedRun: Run | undefined;
+      let refused = false;
       try {
         const runVerdict = await verifyRun({
           tokens: state.runTokens,
@@ -5625,18 +5628,20 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
           runOf: (id) => state.runs.get(id),
           ended: (r) => isTerminal(r.state),
         });
-        if (runVerdict.kind === 'ok') {
-          const runPayload = await readMcpJsonRpcPayload(req, res);
-          if (!runPayload) return;
-          json(res, 200, await handleRunMcp(state, runPayload, runVerdict.run));
-          return;
-        }
-        if (runVerdict.kind === 'refused') {
-          json(res, 401, { error: 'invalid_run_token' });
-          return;
-        }
+        if (runVerdict.kind === 'ok') acceptedRun = runVerdict.run;
+        else if (runVerdict.kind === 'refused') refused = true;
       } catch {
-        // A stub or broken verifier must not turn a principal MCP call into a 400.
+        // A throw from verification is treated as not a run token.
+      }
+      if (acceptedRun) {
+        const runPayload = await readMcpJsonRpcPayload(req, res);
+        if (!runPayload) return;
+        json(res, 200, await handleRunMcp(state, runPayload, acceptedRun));
+        return;
+      }
+      if (refused) {
+        json(res, 401, { error: 'invalid_run_token' });
+        return;
       }
     }
 
