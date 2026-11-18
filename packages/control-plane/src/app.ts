@@ -96,7 +96,7 @@ import { agentConfigForRun, applyAgentOwnershipGrant, deployConfigured, handleAg
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
 import { accountableLeadOf, changeReason, configOf, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
-import { effectiveAgentSkillActionHolds, handleSkills, resumeSkillChecks } from './skills.js';
+import { backfillMissingSkillPackages, effectiveAgentSkillActionHolds, handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
 import { handleRunProgress } from './progress-routes.js';
@@ -3326,7 +3326,8 @@ export function createFactoryServer(state: FactoryState): http.Server {
   wireHelperWakes(state);
   // #493: finish a fleet-resumed fan-out a previous control plane did not.
   void resumeFleetWakes(state).catch((err) => console.warn('[control-plane] could not resume fleet-resumed wakes:', err));
-  // SK1: follow skill checks a previous control plane started and did not see end.
+  // SK1: copy registered packages still only on the local volume into the configured store, then follow in-flight checks.
+  void backfillMissingSkillPackages(state).catch((err) => console.warn('[control-plane] could not backfill skill packages:', err));
   void resumeSkillChecks(state).catch((err) => console.warn('[control-plane] could not resume skill checks:', err));
   const discoveryTimer =
     state.subscriptionDiscoveryIntervalMs !== undefined || (state.gatekeeperEgressUrl && state.gatekeeperEgressToken)

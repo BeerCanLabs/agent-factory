@@ -162,6 +162,60 @@ function defaultSkillPackagesDir(): string {
   return join(dirname(process.env.FACTORY_LEDGER_PATH || join(process.cwd(), 'data', 'ledger.jsonl')), 'skill-packages');
 }
 
+/** Directory next to the skills registry, where a LocalSkillPackageStore writes `packages/<sha>.tar.gz`. */
+function localSkillPackagesDir(skillsDir?: string): string {
+  return skillsDir ? join(dirname(skillsDir), 'skill-packages') : defaultSkillPackagesDir();
+}
+
+/** The configured object store when FACTORY_SKILL_PACKAGES_URI is set; otherwise the local volume. */
+function openSkillPackageStore(localDir: string): SkillPackageStore {
+  const uri = process.env.FACTORY_SKILL_PACKAGES_URI;
+  return uri ? skillPackageStoreFromUri(uri) : new LocalSkillPackageStore(localDir);
+}
+
+const localPackageDirs = new WeakMap<FactoryState, string>();
+
+function leftoverLocalStore(state: FactoryState): LocalSkillPackageStore {
+  return new LocalSkillPackageStore(localPackageDirs.get(state) ?? defaultSkillPackagesDir());
+}
+
+/**
+ * If the configured store is missing a registered package that still exists on the local volume,
+ * copy it up (recover packages written only to disk when loadSkills ignored the URI).
+ * Returns true when a copy was written.
+ */
+export async function ensurePackageInStore(state: FactoryState, sha256: string): Promise<boolean> {
+  const store = skillPackageStore(state);
+  if (await store.has(sha256)) return false;
+  const buf = await leftoverLocalStore(state).get(sha256);
+  if (!buf) return false;
+  await store.put(sha256, buf);
+  console.log(`[control-plane] backfilled skill package ${sha256} into the package store`);
+  return true;
+}
+
+/** Copy every registered package that is on the local volume but missing from the configured store. */
+export async function backfillMissingSkillPackages(state: FactoryState): Promise<number> {
+  if (!process.env.FACTORY_SKILL_PACKAGES_URI) return 0;
+  const registry = skillRegistry(state);
+  let n = 0;
+  for (const id of registry.ids()) {
+    for (const rec of registry.versions(id)) {
+      if (!rec.packageHash) continue;
+      try {
+        if (await ensurePackageInStore(state, rec.packageHash)) n++;
+      } catch (err) {
+        console.warn(
+          `[control-plane] could not backfill skill package ${rec.packageHash} for ${id}@${rec.version}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+  if (n) console.log(`[control-plane] backfilled ${n} skill package(s) into the package store`);
+  return n;
+}
+
 /** Opens the registry at `dir` (or the default data directory) and loads it into memory. Call once at start. */
 export function loadSkills(state: FactoryState, dir: string | undefined = defaultSkillsDir()): SkillRegistry {
   const registry = new SkillRegistry(dir, warnFromControlPlane);
@@ -169,9 +223,12 @@ export function loadSkills(state: FactoryState, dir: string | undefined = defaul
   // Adoption requests and revocations sit beside the skills (R1: the control plane's backed-up volume).
   adoptionStores.set(state, new AdoptionStore(dir ? join(dirname(dir), 'skill-adoptions') : undefined, warnFromControlPlane));
   defaultSkillsStores.set(state, new DefaultSkillsStore(dir ? join(dirname(dir), 'skill-defaults.json') : undefined, warnFromControlPlane));
+  const pkgDir = localSkillPackagesDir(dir);
+  localPackageDirs.set(state, pkgDir);
   if (!state.skillPackages && !packageStores.has(state)) {
-    const pkgDir = dir ? join(dirname(dir), 'skill-packages') : defaultSkillPackagesDir();
-    packageStores.set(state, new LocalSkillPackageStore(pkgDir));
+    // Honor FACTORY_SKILL_PACKAGES_URI so a registry load (register, helper wakes, admission)
+    // cannot pin a LocalSkillPackageStore and skip the object store (A21).
+    packageStores.set(state, openSkillPackageStore(pkgDir));
   }
   return registry;
 }
@@ -209,8 +266,7 @@ export function skillPackageStore(state: FactoryState): SkillPackageStore {
   if (state.skillPackages) return state.skillPackages;
   let store = packageStores.get(state);
   if (!store) {
-    const uri = process.env.FACTORY_SKILL_PACKAGES_URI;
-    store = uri ? skillPackageStoreFromUri(uri) : new LocalSkillPackageStore(defaultSkillPackagesDir());
+    store = openSkillPackageStore(localPackageDirs.get(state) ?? defaultSkillPackagesDir());
     packageStores.set(state, store);
   }
   return store;
@@ -1065,6 +1121,16 @@ export async function startSkillChecks(state: FactoryState, id: string, version:
   const rec = registry.get(id, version);
   if (!rec) return { error: 'not_found' };
   if (rec.status === 'approved') return { record: rec, error: 'already_approved', message: 'an approved version has passed its checks; they are not re-run' };
+  if (rec.packageHash) {
+    try {
+      await ensurePackageInStore(state, rec.packageHash);
+    } catch (err) {
+      console.warn(
+        `[control-plane] could not backfill skill package ${rec.packageHash} for ${id}@${version} before checks:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
   const checker = await checkerFor(state);
   if (!checker) {
     return { record: rec, error: 'checker_not_configured', message: 'no skill checker is configured (FACTORY_SKILL_CHECKER); the version stays pending-build' };
