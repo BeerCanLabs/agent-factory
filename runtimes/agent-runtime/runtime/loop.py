@@ -20,6 +20,9 @@ from runtime.skills import Tool, load_skills, log_tool_error, run_tool
 
 MAX_ROUNDS = 6
 MAX_USER_CHARS = 20000
+# Helper/subagent run results store the model text under output.reply (sdlc-reviewer _reply_text).
+MAX_HELPER_REPLY_CHARS = 20000
+HELPER_REPLY_TRUNCATION = "\n… [truncated]"
 DEFAULT_SOUL = "You are a helpful assistant."
 
 
@@ -27,6 +30,21 @@ def write_result(result: dict) -> None:
     path = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2), "utf-8")
+
+
+def is_helper_payload(payload: dict) -> bool:
+    """A spawn_subagent run: the factory sets input.subagent. Ordinary turns and smoke are not helpers."""
+    sub = payload.get("subagent") if isinstance(payload, dict) else None
+    return isinstance(sub, str) and bool(sub.strip())
+
+
+def capped_helper_reply(text: str) -> str:
+    """The full final assistant text, cut at MAX_HELPER_REPLY_CHARS with a visible truncation mark."""
+    s = str(text)
+    if len(s) <= MAX_HELPER_REPLY_CHARS:
+        return s
+    keep = max(0, MAX_HELPER_REPLY_CHARS - len(HELPER_REPLY_TRUNCATION))
+    return s[:keep] + HELPER_REPLY_TRUNCATION
 
 
 def caller_of(payload: dict) -> dict:
@@ -190,9 +208,11 @@ def main(factory: Factory | None = None) -> int:
     turns = 0
     last_reply = None
     is_smoke = False
+    is_helper = False
     try:
         payload = factory.input()
         is_smoke = payload.get("factoryKind") == "smoke"
+        is_helper = is_helper_payload(payload)
         last_reply = handle(factory, soul, mind, tools, payload)
         turns += 1
         # A conversational agent stays warm to answer follow-ups without a cold start; the idle window is the factory's.
@@ -242,6 +262,10 @@ def main(factory: Factory | None = None) -> int:
         output["silent"] = True
     if is_smoke and last_reply is not None:
         output["reply"] = last_reply
+    elif is_helper and last_reply is not None:
+        # Parent skills (sdlc-reviewer 1.3.0 _reply_text) read result.reply. Smoke already
+        # stored it; ordinary conversational runs still do not (they deliver on the channel).
+        output["reply"] = capped_helper_reply(last_reply)
     write_result({"status": "succeeded", "output": output})
     print("[runtime] done")
     return 0

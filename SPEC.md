@@ -121,7 +121,7 @@ The control plane is the only ingress point to the factory kernel. Routes expect
 | GET | `/api/v1/runs/:runId/input` | run token | agent fetches its input |
 | GET | `/api/v1/runs/:runId/agent-config` | run token | the run's own configuration (soul, memory, skills). A helper/subagent run (`<template>.helper.<hash>`) is served its helper template's configuration. |
 | GET | `/api/v1/runs/:runId/mailbox` | run token | long-poll follow-up messages during warm window (`?timeout=ms`) |
-| POST | `/api/v1/runs/:runId/result` | run token | agent reports `{status: succeeded\|failed, output?, error?}` |
+| POST | `/api/v1/runs/:runId/result` | run token | agent reports `{status: succeeded\|failed, output?, error?}`. A succeeded helper/subagent run includes `output.reply`: the model's final assistant text, capped, which a parent (for example sdlc-reviewer) reads from the run result. Smoke runs already include `reply`. Ordinary conversational runs do not; they deliver on the channel. |
 | POST | `/api/v1/hooks/:id` | cartridge secret | webhook trigger, creates a run |
 | GET | `/api/v1/ledger` | viewer | audit query |
 | POST | `/api/v1/ledger` | ingest | metadata-only event write |
