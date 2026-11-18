@@ -67,8 +67,8 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
     rmSync(registryDir, { recursive: true, force: true });
   });
 
-  const mcp = async (id: string) => {
-    const r = await call(port, '/mcp/run', 'POST', runs[id].token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } });
+  const mcp = async (id: string, path = '/mcp/run') => {
+    const r = await call(port, path, 'POST', runs[id].token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } });
     return JSON.parse(r.body.result.content[0].text);
   };
 
@@ -91,6 +91,13 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
     assert.ok(list.body.result.tools.some((t: any) => t.name === 'list_subagents'));
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents`, 'GET')).status, 401);
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents`, 'GET', runs.other.token)).status, 401);
+  });
+
+  it('a valid run token on POST /mcp is handled like POST /mcp/run (#510)', async () => {
+    assert.deepEqual(await mcp('reviewer', '/mcp'), await mcp('reviewer', '/mcp/run'));
+    assert.deepEqual(await mcp('other', '/mcp'), { subagents: [] });
+    const denied = await call(port, '/mcp', 'POST', undefined, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } });
+    assert.equal(denied.status, 401);
   });
 
   it('a policy with a malformed subagents list is refused', async () => {
