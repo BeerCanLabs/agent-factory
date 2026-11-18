@@ -61,7 +61,38 @@ def who_of(payload: dict) -> str:
 
 
 def text_of(payload: dict) -> str:
+    """The user text for this turn.
+
+    A spawn_subagent run carries the parent's task in `prompt`. That field is the user
+    message, and this never falls back to `wake` when a prompt is present. Ordinary
+    turns still use message / content / raw_input, then `wake`.
+    """
+    if is_helper_payload(payload):
+        prompt = payload.get("prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt[:MAX_USER_CHARS]
+        for key in ("message", "content", "raw_input"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val[:MAX_USER_CHARS]
+        return ""
     return str(payload.get("message") or payload.get("content") or payload.get("raw_input") or "wake")[:MAX_USER_CHARS]
+
+
+def helper_system_soul(soul: str, payload: dict) -> str:
+    """The system text for a helper run: `input.instructions` is the helper's brief.
+
+    A configured soul is kept ahead of the brief when the two are different. Ordinary
+    turns keep using `soul` (or DEFAULT_SOUL) unchanged.
+    """
+    configured = (soul or "").strip()
+    if not is_helper_payload(payload):
+        return configured or DEFAULT_SOUL
+    instr = payload.get("instructions")
+    brief = instr.strip() if isinstance(instr, str) and instr.strip() else ""
+    if brief and configured and brief != configured:
+        return f"{configured}\n\n{brief}"
+    return brief or configured or DEFAULT_SOUL
 
 
 def system_prompt(soul: str, payload: dict) -> str:
@@ -76,7 +107,7 @@ def system_prompt(soul: str, payload: dict) -> str:
         scheduled_note = "\n\nThis is a scheduled background check. If nothing needs to be reported or said, respond with NO_REPLY."
     now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
-    return f"{soul.strip() or DEFAULT_SOUL}{speaking}{scheduled_note}\n\nIt is {now}.{history_note}"
+    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:
