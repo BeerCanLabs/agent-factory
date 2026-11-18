@@ -1169,18 +1169,22 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
       headers['accept-encoding'] = 'identity';
       if (body.length) headers['content-length'] = String(body.length);
-      if (authHeaderName && authHeader) {
-        // #334: a GitHub App key always goes in Authorization, whatever header the route's static credential uses.
-        headers[authHeaderName] = authHeader;
-      } else if (route.connection) {
-        // §6.11: only the Keymaster's token goes upstream; the caller's credentials never do.
-        if (authHeader) headers['authorization'] = authHeader;
-      } else if (route.credential && route.credential.header && authHeader) {
-        headers[route.credential.header.toLowerCase()] = authHeader;
-      } else if (req.headers['x-upstream-authorization']) {
-        headers['authorization'] = req.headers['x-upstream-authorization'];
-      } else if (req.headers['authorization'] && req.headers['x-factory-run-token']) {
-        headers['authorization'] = req.headers['authorization'];
+      // Signed billing requests already carry the gatekeeper-computed Authorization.
+      // Do not let x-upstream-authorization or a run token overwrite it (S1).
+      if (!signed) {
+        if (authHeaderName && authHeader) {
+          // #334: a GitHub App key always goes in Authorization, whatever header the route's static credential uses.
+          headers[authHeaderName] = authHeader;
+        } else if (route.connection) {
+          // §6.11: only the Keymaster's token goes upstream; the caller's credentials never do.
+          if (authHeader) headers['authorization'] = authHeader;
+        } else if (route.credential && route.credential.header && authHeader) {
+          headers[route.credential.header.toLowerCase()] = authHeader;
+        } else if (req.headers['x-upstream-authorization']) {
+          headers['authorization'] = req.headers['x-upstream-authorization'];
+        } else if (req.headers['authorization'] && req.headers['x-factory-run-token']) {
+          headers['authorization'] = req.headers['authorization'];
+        }
       }
       const transport = dest.protocol === 'https:' ? https : http;
       const up = transport.request(dest, { method: req.method, headers }, (upRes) => {
