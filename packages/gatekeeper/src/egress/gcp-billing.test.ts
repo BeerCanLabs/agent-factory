@@ -86,7 +86,7 @@ describe('gcp-billing token mint and cache', () => {
       req.on('end', () => {
         seen.push({ body });
         res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ access_token: 'ya29.test-access-token', expires_in: 3600, token_type: 'Bearer' }));
+        res.end(JSON.stringify({ access_token: 'gcp-test-at', expires_in: 3600, token_type: 'Bearer' }));
       });
     });
     const port = await listen(tok);
@@ -97,8 +97,8 @@ describe('gcp-billing token mint and cache', () => {
         tokenUrl: `http://127.0.0.1:${port}/token`,
         secretValues,
       });
-      assert.equal(minted.accessToken, 'ya29.test-access-token');
-      assert.ok(secretValues.has('ya29.test-access-token'));
+      assert.equal(minted.accessToken, 'gcp-test-at');
+      assert.ok(secretValues.has('gcp-test-at'));
       const params = new URLSearchParams(seen[0]!.body);
       assert.equal(params.get('grant_type'), 'urn:ietf:params:oauth:grant-type:jwt-bearer');
       const assertion = params.get('assertion') ?? '';

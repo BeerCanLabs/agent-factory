@@ -9,7 +9,7 @@ import { createGatekeeperEgress, type ControlClient, type RunContext } from './g
 const tokens = new RunTokens('billing-credential-test-run-token-key-0123456789');
 
 const AWS_SECRET = {
-  access_key_id: 'AKIATESTACCESSKEY01',
+  access_key_id: 'TESTACCESSKEY01XXXX',
   secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
   role_arn: 'arn:aws:iam::566332862296:role/ChuckFinleyBillingReadOnly',
   region: 'us-east-1',
@@ -64,7 +64,7 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
   const secrets: Record<string, string> = {
     FINLEY_AWS_BILLING_CREDENTIALS: JSON.stringify(AWS_SECRET),
     FINLEY_GCP_CREDENTIALS: JSON.stringify(GCP_SECRET),
-    AWS_BILLING_CREDENTIALS: JSON.stringify({ ...AWS_SECRET, access_key_id: 'AKIASHAREDSHOULDNOTUSE' }),
+    AWS_BILLING_CREDENTIALS: JSON.stringify({ ...AWS_SECRET, access_key_id: 'TESTSHAREDSHOULDNOTUSE' }),
     GCP_CREDENTIALS: JSON.stringify({ ...GCP_SECRET, client_email: 'shared@example.com' }),
   };
 
@@ -137,7 +137,7 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
         tokenSeen.push({ method: req.method, path: req.url ?? '', headers: req.headers, body });
         res.writeHead(tokenStatus, { 'content-type': 'application/json' });
         res.end(tokenStatus === 200
-          ? JSON.stringify({ access_token: 'ya29.test-access-token', expires_in: 3600, token_type: 'Bearer' })
+          ? JSON.stringify({ access_token: 'gcp-test-at', expires_in: 3600, token_type: 'Bearer' })
           : JSON.stringify({ error: 'invalid_grant' }));
       });
     });
@@ -257,7 +257,7 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
     });
     assert.equal(res.status, 503);
     assert.equal(res.json().error, 'credential_unbound');
-    assert.ok(!res.text.includes('AKIASHAREDSHOULDNOTUSE'));
+    assert.ok(!res.text.includes('TESTSHAREDSHOULDNOTUSE'));
     assert.ok(!res.text.includes(AWS_SECRET.secret_access_key));
   });
 
@@ -295,7 +295,7 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
     });
     assert.equal(res.status, 200);
     assert.equal(bqSeen.length, 1);
-    assert.equal(bqSeen[0]!.headers.authorization, 'Bearer ya29.test-access-token');
+    assert.equal(bqSeen[0]!.headers.authorization, 'Bearer gcp-test-at');
     assert.ok(!String(bqSeen[0]!.headers.authorization).includes(finleyToken));
     assert.ok(!JSON.stringify(bqSeen[0]!.headers).includes(PRIVATE_KEY.slice(0, 40)));
     assert.ok(ledger.some((e) => e.action === 'EGRESS' && String(e.gcpAction).includes('/bigquery/v2/projects/submind-matrix/queries')));
@@ -346,7 +346,7 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
     assert.equal(evict.status, 401);
     ceStatus = 200;
     const previous = secrets.FINLEY_AWS_BILLING_CREDENTIALS;
-    secrets.FINLEY_AWS_BILLING_CREDENTIALS = JSON.stringify({ ...AWS_SECRET, access_key_id: 'AKIATESTACCESSKEY02' });
+    secrets.FINLEY_AWS_BILLING_CREDENTIALS = JSON.stringify({ ...AWS_SECRET, access_key_id: 'TESTACCESSKEY02XXXX' });
     stsStatus = 403;
     try {
       const res = await call(port, '/aws-billing/', {
@@ -357,7 +357,7 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
       assert.equal(res.status, 502);
       assert.equal(res.json().error, 'upstream_unreachable');
       assert.ok(!res.text.includes(AWS_SECRET.secret_access_key));
-      assert.ok(!res.text.includes('AKIATESTACCESSKEY02'));
+      assert.ok(!res.text.includes('TESTACCESSKEY02XXXX'));
     } finally {
       stsStatus = 200;
       secrets.FINLEY_AWS_BILLING_CREDENTIALS = previous;

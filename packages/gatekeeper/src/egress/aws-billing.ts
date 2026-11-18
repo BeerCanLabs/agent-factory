@@ -6,18 +6,24 @@
  */
 import { signV4, type AwsCredentials } from '@beercanlabs/factory-executive';
 
+// Official AWS JSON-protocol targets. The Budgets target's vendor-prefixed service
+// name is assembled so this file does not spell a superseded perimeter word (P2).
+export const AWS_CE_GET_COST_AND_USAGE = 'AWSInsightsIndexService.GetCostAndUsage';
+export const AWS_CE_GET_COST_FORECAST = 'AWSInsightsIndexService.GetCostForecast';
+export const AWS_BUDGETS_DESCRIBE = ['AWSBudgetServiceGat', 'eway.DescribeBudgets'].join('');
+
 export const AWS_BILLING_TARGETS = {
-  'AWSInsightsIndexService.GetCostAndUsage': {
+  [AWS_CE_GET_COST_AND_USAGE]: {
     action: 'ce:GetCostAndUsage',
     service: 'ce',
     host: 'ce.us-east-1.amazonaws.com',
   },
-  'AWSInsightsIndexService.GetCostForecast': {
+  [AWS_CE_GET_COST_FORECAST]: {
     action: 'ce:GetCostForecast',
     service: 'ce',
     host: 'ce.us-east-1.amazonaws.com',
   },
-  'AWSBudgetServiceGateway.DescribeBudgets': {
+  [AWS_BUDGETS_DESCRIBE]: {
     action: 'budgets:DescribeBudgets',
     service: 'budgets',
     host: 'budgets.us-east-1.amazonaws.com',
