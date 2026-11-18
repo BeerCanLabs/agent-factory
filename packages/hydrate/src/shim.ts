@@ -167,7 +167,10 @@ export async function main(argv: string[]): Promise<number> {
   const prefix = process.env.MEMORY_PREFIX;
   const usesStore = Boolean(store.uri || store.root);
   const isPurposeBuilt = process.env.FACTORY_MEMORY_ARCHETYPE === 'purpose-built';
-  const syncsMind = usesStore && !isPurposeBuilt;
+  // E1.4: a helper run is started with FACTORY_MEMORY=false (no mind-bucket access). Skip pull/push entirely;
+  // a sync failure must not fail the worker.
+  const memoryDisabled = process.env.FACTORY_MEMORY === 'false';
+  const syncsMind = usesStore && !isPurposeBuilt && !memoryDisabled;
   if (syncsMind && prefix) pullMind(store, prefix, dir);
 
   // Prefetch run input to bridge it via FACTORY_INPUT and FACTORY_INPUT_FILE for decoupled workers
@@ -217,7 +220,7 @@ export async function main(argv: string[]): Promise<number> {
   const hb = setInterval(beat, beatEvery);
   const syncEvery = Number(process.env.FACTORY_MIND_SYNC_SECONDS || '60') * 1000;
   const sync = syncsMind ? setInterval(() => safePush(store, prefix, dir), syncEvery) : undefined;
-  const volumes = usesStore && prefix ? setInterval(() => serveVolumeRequests(store, prefix, dir), 1000) : undefined;
+  const volumes = usesStore && prefix && !memoryDisabled ? setInterval(() => serveVolumeRequests(store, prefix, dir), 1000) : undefined;
 
   const code: number = await new Promise((resolve) => {
     child.on('exit', (c, signal) => resolve(c ?? (signal ? 128 : 1)));
