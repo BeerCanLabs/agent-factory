@@ -57,7 +57,8 @@ describe('aws-billing parse and allowlist', () => {
     assert.equal(forecast.ok, true);
     const budgets = billingActionOf('POST', '/', { 'x-amz-target': AWS_BUDGETS_DESCRIBE });
     assert.equal(budgets.ok, true);
-    if (budgets.ok) assert.equal(budgets.dest.href, 'https://budgets.us-east-1.amazonaws.com/');
+    if (budgets.ok) assert.equal(budgets.dest.href, 'https://budgets.amazonaws.com/');
+    if (budgets.ok) assert.notEqual(budgets.dest.hostname, 'budgets.us-east-1.amazonaws.com');
 
     assert.equal(billingActionOf('GET', '/', { 'x-amz-target': 'AWSInsightsIndexService.GetCostAndUsage' }).ok, false);
     assert.equal(billingActionOf('POST', '/elsewhere', { 'x-amz-target': 'AWSInsightsIndexService.GetCostAndUsage' }).ok, false);
