@@ -323,6 +323,25 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
     assert.ok(ledger.some((e) => e.action === 'EGRESS' && String(e.gcpAction).includes('/bigquery/v2/projects/submind-matrix/queries')));
   });
 
+  it('does not let agent authorization headers overwrite the GCP access token', async () => {
+    asFinley();
+    bqSeen.length = 0;
+    const res = await call(port, '/gcp-billing/bigquery/v2/projects/submind-matrix/queries', {
+      token: finleyToken,
+      body: { query: 'SELECT 1', useLegacySql: false },
+      headers: {
+        'x-upstream-authorization': 'Bearer spoofed-upstream',
+        'x-factory-run-token': finleyToken,
+      },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(bqSeen.length, 1);
+    assert.equal(bqSeen[0]!.headers.authorization, 'Bearer gcp-test-at');
+    assert.ok(!String(bqSeen[0]!.headers.authorization).includes(finleyToken));
+    assert.ok(!JSON.stringify(bqSeen[0]!.headers).includes(finleyToken));
+    assert.ok(!JSON.stringify(bqSeen[0]!.headers).includes('spoofed-upstream'));
+  });
+
   it('allows GET of a query job in submind-matrix and refuses any other project or write method', async () => {
     asFinley();
     const ok = await call(port, '/gcp-billing/bigquery/v2/projects/submind-matrix/queries/job_abc-1?location=US', {
