@@ -1050,3 +1050,27 @@ class TestHelperRunResult(Base):
         self.assertTrue(loop.is_helper_payload(helper_turn()))
         self.assertFalse(loop.is_helper_payload({"subagent": "  "}))
 
+
+    def test_a_helper_run_sends_the_task_prompt_to_the_model_not_wake(self):
+        # spawn_subagent stores the parent's task in input.prompt and the helper brief
+        # in input.instructions. The model must see those, not the ordinary-turn fallback "wake".
+        seen = {}
+        task = "Vote keep or drop on F1. The finding is in the attached diff."
+        brief = "You are one of three independent jurors. Reply with JSON only."
+
+        def model(messages, tools):
+            seen["messages"] = messages
+            return {"role": "assistant", "content": '{"votes":[{"finding_id":"F1","keep":true,"reason":"agreed"}]}'}
+
+        code, _, result = self.wake(HELPER, [helper_turn(task, instructions=brief)], model)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIn("messages", seen)
+        user = [m["content"] for m in seen["messages"] if m.get("role") == "user"]
+        self.assertEqual(user[-1], task)
+        self.assertNotIn("wake", user)
+        self.assertIn(brief, seen["messages"][0]["content"])
+        self.assertEqual(loop.text_of(helper_turn(task, instructions=brief)), task)
+        self.assertEqual(loop.text_of({"subagent": "juror", "prompt": task}), task)
+        self.assertNotEqual(loop.text_of({"subagent": "juror", "instructions": brief}), "wake")
+
