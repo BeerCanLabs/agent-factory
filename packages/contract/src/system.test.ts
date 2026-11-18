@@ -41,6 +41,41 @@ describe('system definition schemas', () => {
     }
   });
 
+  it('validates an aws-sigv4 billing credential without a header', () => {
+    const res = validateSystemProposal({
+      id: 'aws-billing',
+      name: 'AWS billing',
+      kind: 'http',
+      upstream: 'https://ce.us-east-1.amazonaws.com',
+      credential: {
+        secret: '{agent}_AWS_BILLING_CREDENTIALS',
+        fallback: false,
+        encoding: 'aws-sigv4',
+      },
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.proposal.credential?.encoding, 'aws-sigv4');
+      assert.equal(res.proposal.credential?.fallback, false);
+      assert.equal(res.proposal.credential?.header, undefined);
+    }
+  });
+
+  it('rejects aws-sigv4 omitted but also no header', () => {
+
+    const res = validateSystemProposal({
+      id: 'no-header',
+      name: 'No header',
+      kind: 'http',
+      upstream: 'https://example.com',
+      credential: { secret: 'SOME_KEY' },
+    });
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.ok(res.issues.some((i) => i.message.includes('header is required unless encoding is aws-sigv4')));
+    }
+  });
+
   it('validates a valid system proposal with Keymaster connection and hold', () => {
     const res = validateSystemProposal({
       id: 'linkedin',

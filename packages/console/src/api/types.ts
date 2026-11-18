@@ -406,7 +406,7 @@ export interface SystemDefinition {
     header: string;
     format?: string;
     fallback?: boolean;
-    encoding?: 'basic';
+    encoding?: 'basic' | 'aws-sigv4';
   };
   connection?: string;
   scopes?: string[];

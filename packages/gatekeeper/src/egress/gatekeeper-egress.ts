@@ -15,6 +15,7 @@ import type { Meter } from '@opentelemetry/api';
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
 import { GROUNDING_RETRY_NOTICE, NO_TOOLS_FOOTNOTE, ReplyBook, footnoteDiscordBody, isDiscordReply, isDiscordRoute, isReadMethod, mcpResultOk, replySha256, toolNamesOf, toolResultsInTurn, withGroundingNote } from './grounding.js';
 import { readOnlyVerdict } from './read-only.js';
+import { assumeBillingRole, billingActionOf, billingSessionCache, isAwsSigV4, parseBillingSecret, signBillingRequest } from './aws-billing.js';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {
@@ -28,7 +29,7 @@ export type Route = {
    * the per-agent secret is the only candidate: an agent without its own gets `credential_unbound`, never the
    * shared unprefixed secret. Omitted (the default) keeps the shared fallback (discord).
    */
-  credential?: { secret: string; header: string; format?: string; fallback?: boolean; encoding?: 'basic' };
+  credential?: { secret: string; header?: string; format?: string; fallback?: boolean; encoding?: 'basic' | 'aws-sigv4' };
   /**
    * Keymaster connection (§6.11 K3): the gatekeeper-egress asks the control plane for a current access token for
    * (agent, connection) and injects it as `Authorization: Bearer`. Never combined with `credential`.
@@ -249,6 +250,12 @@ export type GatekeeperEgressOptions = {
   modelFetch?: typeof fetch;
   /** Tests: replace wall-clock `Date.now` for subscription window/cap/throttle checks. */
   now?: () => number;
+  /** Tests: STS endpoint for aws-sigv4 AssumeRole (production uses sts.<region>.amazonaws.com). */
+  stsEndpoint?: string;
+  /** Tests: replace STS fetch for aws-sigv4 AssumeRole. */
+  stsFetch?: typeof fetch;
+  /** Tests: send ce/budgets calls to a local host:port instead of official AWS endpoints. */
+  awsBillingHosts?: { ce?: string; budgets?: string };
   /** Tests: await catalog refresh on every `/models` call instead of refreshing in the background. */
   eagerCatalogRefresh?: boolean;
   /**
@@ -604,6 +611,16 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   /** Keymaster access tokens by agent × connection, until 60s before expiry. */
   const connCache = new Map<string, { token: string; expiresAtMs: number }>();
   const secretValues = new Set<string>();
+  const billingSessions = billingSessionCache({
+    now: opts.now,
+    assume: (parsed) =>
+      assumeBillingRole(parsed, {
+        now: opts.now,
+        fetchImpl: opts.stsFetch,
+        stsEndpoint: opts.stsEndpoint,
+        secretValues,
+      }),
+  });
   /** AP3: each run's recent final answers, to footnote the replies built from them. */
   const replies = new ReplyBook();
   const trustedModelHosts = new Set((opts.trustedModelHosts ?? []).map((h) => h.toLowerCase()));
@@ -915,6 +932,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
     }
     if (!value) return undefined;
+    // aws-sigv4 needs the JSON secret intact; `{}` in the body must not be treated as a format placeholder.
+    if (route.credential.encoding === 'aws-sigv4') return value;
     const formatted = (route.credential.format ?? '{}').replace('{}', value);
     // HTTP Basic (git over HTTPS): `x-access-token:{}` becomes `Basic base64(x-access-token:<token>)`.
     return route.credential.encoding === 'basic' ? `Basic ${Buffer.from(formatted).toString('base64')}` : formatted;
@@ -1121,6 +1140,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     onResponse?: (status: number, isSse: boolean) => { chunk: (b: Buffer) => void },
     beforeEnd?: () => void,
     authHeaderName?: string,
+    signed?: { dest: URL; headers: Record<string, string> },
   ): Promise<number> {
     const t0 = performance.now();
     const done = (status: number) => {
@@ -1133,7 +1153,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         resolve(500);
         return;
       }
-      const target = resolveUpstreamTarget(route.upstream, rest);
+      const target = signed ? { ok: true as const, dest: signed.dest } : resolveUpstreamTarget(route.upstream, rest);
       if (!target.ok) {
         send(res, 400, { error: 'bad_path' });
         resolve(400);
@@ -1141,7 +1161,12 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
       const dest = target.dest;
       const headers: Record<string, string | string[]> = {};
-      for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
+      if (signed) {
+        // S1: only the SigV4 headers the gatekeeper computed go upstream, never the agent's token or the raw key.
+        for (const [k, v] of Object.entries(signed.headers)) headers[k.toLowerCase()] = v;
+      } else {
+        for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
+      }
       headers['accept-encoding'] = 'identity';
       if (body.length) headers['content-length'] = String(body.length);
       if (authHeaderName && authHeader) {
@@ -1150,7 +1175,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       } else if (route.connection) {
         // §6.11: only the Keymaster's token goes upstream; the caller's credentials never do.
         if (authHeader) headers['authorization'] = authHeader;
-      } else if (route.credential && authHeader) {
+      } else if (route.credential && route.credential.header && authHeader) {
         headers[route.credential.header.toLowerCase()] = authHeader;
       } else if (req.headers['x-upstream-authorization']) {
         headers['authorization'] = req.headers['x-upstream-authorization'];
@@ -2490,6 +2515,38 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
       const app = await githubAppCredential(route, ctx, rest, graphql);
       const appCred = app?.header;
+      if (isAwsSigV4(route.credential?.encoding)) {
+        const action = billingActionOf(req.method, rest, req.headers as Record<string, unknown>, opts.awsBillingHosts);
+        if (!action.ok) return deny(res, ctx, route, 403, 'action_not_allowed');
+        const rawSecret = await credential(route, ctx);
+        if (!rawSecret) return deny(res, ctx, route, 503, 'credential_unbound');
+        const parsed = parseBillingSecret(rawSecret, secretValues);
+        if (!parsed) return deny(res, ctx, route, 503, 'credential_unbound');
+        let session;
+        try {
+          session = await billingSessions.get(parsed);
+        } catch (err) {
+          console.error(`[gatekeeper-egress] aws-sigv4 assume-role ${route.id}: ${err instanceof Error ? err.message : 'failed'}`);
+          return deny(res, ctx, route, 502, 'upstream_unreachable');
+        }
+        const contentType = String(req.headers['content-type'] ?? 'application/x-amz-json-1.1');
+        const signedHeaders = signBillingRequest({
+          dest: action.dest,
+          service: action.service,
+          body: raw,
+          contentType,
+          target: action.target,
+          creds: session,
+          now: opts.now ? new Date(opts.now()) : undefined,
+        });
+        const status = await forward(req, res, route, rest, raw, undefined, undefined, undefined, undefined, { dest: action.dest, headers: signedHeaders });
+        ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS', awsAction: action.action });
+        if (status === 401) {
+          evictCredential(route, ctx);
+          billingSessions.clear();
+        }
+        return;
+      }
       const cred = appCred ?? (await credential(route, ctx));
       if (route.credential && !cred) return deny(res, ctx, route, 503, 'credential_unbound');
       const status = await forward(req, res, route, rest, raw, cred, undefined, undefined, appCred ? 'authorization' : undefined);

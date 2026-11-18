@@ -34,7 +34,7 @@ export type EgressRoute = {
   id: string;
   kind: 'http' | 'mcp';
   upstream?: string;
-  credential?: { secret: string; header: string; format?: string; fallback?: boolean; encoding?: 'basic' };
+  credential?: { secret: string; header?: string; format?: string; fallback?: boolean; encoding?: 'basic' | 'aws-sigv4' };
   connection?: string;
   scopes?: string[];
   hold?: { methods: string[]; preview?: string };

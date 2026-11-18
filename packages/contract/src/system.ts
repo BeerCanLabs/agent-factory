@@ -33,13 +33,21 @@ export const aiProviderConfigSchema = z
 export const systemCredentialSchema = z
   .object({
     secret: z.string().min(1),
-    header: z.string().min(1),
+    header: z.string().min(1).optional(),
     format: z.string().optional(),
     fallback: z.boolean().optional(),
-    /** `basic`: the formatted value is sent as HTTP Basic credentials (base64), e.g. git over HTTPS (`x-access-token:{}`). */
-    encoding: z.enum(['basic']).optional(),
+    /**
+     * `basic`: the formatted value is sent as HTTP Basic credentials (base64), e.g. git over HTTPS (`x-access-token:{}`).
+     * `aws-sigv4`: the gatekeeper-egress assumes the role in a JSON secret and SigV4-signs only
+     * ce:GetCostAndUsage, ce:GetCostForecast and budgets:DescribeBudgets (S1). `header` is not used.
+     */
+    encoding: z.enum(['basic', 'aws-sigv4']).optional(),
   })
-  .strict();
+  .strict()
+  .refine((c) => c.encoding === 'aws-sigv4' || Boolean(c.header), {
+    message: 'header is required unless encoding is aws-sigv4',
+    path: ['header'],
+  });
 
 export const systemHoldSchema = z
   .object({
