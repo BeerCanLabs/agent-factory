@@ -15,14 +15,25 @@ import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 // E1.3 (#294): an agent lists only the helpers its admin-set policy allows; none without an allow-list entry.
 const ADMIN = 'admin-token';
 
-async function call(port: number, path: string, method: string, token?: string, body?: unknown) {
+async function call(
+  port: number,
+  path: string,
+  method: string,
+  token?: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+) {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...extraHeaders,
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
+  return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
 }
 
 describe('list_subagents (E1.3)', { concurrency: false }, () => {
@@ -93,11 +104,69 @@ describe('list_subagents (E1.3)', { concurrency: false }, () => {
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents`, 'GET', runs.other.token)).status, 401);
   });
 
+  const listCall = (path: string, token?: string, extraHeaders?: Record<string, string>) =>
+    call(port, path, 'POST', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } }, extraHeaders);
+  const listTools = (path: string, token?: string) =>
+    call(port, path, 'POST', token, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+
   it('a valid run token on POST /mcp is handled like POST /mcp/run (#510)', async () => {
     assert.deepEqual(await mcp('reviewer', '/mcp'), await mcp('reviewer', '/mcp/run'));
     assert.deepEqual(await mcp('other', '/mcp'), { subagents: [] });
-    const denied = await call(port, '/mcp', 'POST', undefined, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_subagents', arguments: {} } });
+    const denied = await listCall('/mcp');
     assert.equal(denied.status, 401);
+    assert.equal(denied.body.error, 'unauthorized');
+  });
+
+  it('a run token on /mcp/readonly, /mcp/x/*, or with read-only or toolset headers is still 401 (#510 B2)', async () => {
+    const token = runs.reviewer.token;
+    for (const path of ['/mcp/readonly', '/mcp/x/all', '/mcp/x/not-a-toolset']) {
+      const r = await listCall(path, token);
+      assert.equal(r.status, 401, path);
+      assert.equal(r.body.error, 'unauthorized', path);
+    }
+    const readonlyHeader = await listCall('/mcp', token, { 'x-mcp-readonly': 'true' });
+    assert.equal(readonlyHeader.status, 401);
+    assert.equal(readonlyHeader.body.error, 'unauthorized');
+    const toolsetHeader = await listCall('/mcp', token, { 'x-mcp-toolsets': 'all' });
+    assert.equal(toolsetHeader.status, 401);
+    assert.equal(toolsetHeader.body.error, 'unauthorized');
+  });
+
+  it('a refused run token on POST /mcp is 401 invalid_run_token with no OAuth challenge (#510 B3)', async () => {
+    const ended = state.runs.create({ agentId: 'reviewer', state: 'WORKING', actor: 'test', trigger: 'api' } as any);
+    const endedToken = await tokens.mint({ runId: ended.runId, agentId: 'reviewer' });
+    state.runs.update(ended.runId, { state: 'DONE' } as any);
+    const endedRes = await listCall('/mcp', endedToken);
+    assert.equal(endedRes.status, 401);
+    assert.equal(endedRes.body.error, 'invalid_run_token');
+    assert.equal(endedRes.headers.get('www-authenticate'), null);
+
+    const wrongAgent = await tokens.mint({ runId: runs.reviewer.runId, agentId: 'other' });
+    const wrongRes = await listCall('/mcp', wrongAgent);
+    assert.equal(wrongRes.status, 401);
+    assert.equal(wrongRes.body.error, 'invalid_run_token');
+    assert.equal(wrongRes.headers.get('www-authenticate'), null);
+
+    const endedOnRun = await listCall('/mcp/run', endedToken);
+    assert.equal(endedOnRun.status, 401);
+    assert.equal(endedOnRun.body.error, 'invalid_run_token');
+  });
+
+  it('a forged run token on POST /mcp still gets the OAuth 401; an admin bearer still reaches handleMcp (#510 B3)', async () => {
+    const forged = await listCall('/mcp', 'forged-not-a-run-token');
+    assert.equal(forged.status, 401);
+    assert.equal(forged.body.error, 'unauthorized');
+    assert.ok((forged.headers.get('www-authenticate') ?? '').includes('oauth-protected-resource/mcp'));
+
+    const admin = await listTools('/mcp', ADMIN);
+    assert.equal(admin.status, 200);
+    const adminTools = (admin.body.result?.tools ?? []).map((t: any) => t.name);
+    assert.ok(adminTools.length > 4, 'principal MCP exposes more than the run toolset');
+    assert.ok(!adminTools.includes('list_subagents'));
+    const runTools = await listTools('/mcp', runs.reviewer.token);
+    assert.equal(runTools.status, 200);
+    const runNames = (runTools.body.result?.tools ?? []).map((t: any) => t.name);
+    assert.ok(runNames.includes('list_subagents'));
   });
 
   it('a policy with a malformed subagents list is refused', async () => {

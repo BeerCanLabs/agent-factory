@@ -339,13 +339,30 @@ describe('Agent Run-Token Model Management E2E (TSK-287, GAP-210, M2, E7)', { co
     });
     const token = await tokens.mint({ runId: run.runId, agentId: 'alpha' });
 
-    // Boundary check: run token on /mcp returns 401
+    // #510: a live run token on POST /mcp is served like POST /mcp/run
     const runOnPrincipalMcp = await call(port, '/mcp', 'POST', token, { jsonrpc: '2.0', id: 99, method: 'tools/list' });
-    assert.equal(runOnPrincipalMcp.status, 401, 'run token on /mcp must return 401');
+    const runOnRunMcp = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', id: 99, method: 'tools/list' });
+    assert.equal(runOnPrincipalMcp.status, 200, 'run token on /mcp is served like /mcp/run');
+    assert.deepEqual(runOnPrincipalMcp.body, runOnRunMcp.body);
 
     // Boundary check: principal token on /mcp/run returns 401
     const principalOnRunMcp = await call(port, '/mcp/run', 'POST', ADMIN, { jsonrpc: '2.0', id: 100, method: 'tools/list' });
     assert.equal(principalOnRunMcp.status, 401, 'principal token on /mcp/run must return 401');
+
+    // B2: run tokens on /mcp/readonly and /mcp/x/* stay refused
+    assert.equal((await call(port, '/mcp/readonly', 'POST', token, { jsonrpc: '2.0', id: 99, method: 'tools/list' })).status, 401);
+    assert.equal((await call(port, '/mcp/x/all', 'POST', token, { jsonrpc: '2.0', id: 99, method: 'tools/list' })).status, 401);
+
+    // B3: an ended or wrong-agent run token on /mcp is 401 invalid_run_token
+    const endedRun = state.runs.create({ agentId: 'alpha', state: 'WORKING', actor: 'cloudflare:alice@example.com', trigger: 'manual' });
+    const endedTok = await tokens.mint({ runId: endedRun.runId, agentId: 'alpha' });
+    state.runs.update(endedRun.runId, { state: 'DONE' } as any);
+    const endedRes = await call(port, '/mcp', 'POST', endedTok, { jsonrpc: '2.0', id: 99, method: 'tools/list' });
+    assert.equal(endedRes.status, 401);
+    assert.equal(endedRes.body.error, 'invalid_run_token');
+    const wrongRes = await call(port, '/mcp', 'POST', await tokens.mint({ runId: run.runId, agentId: 'beta' }), { jsonrpc: '2.0', id: 99, method: 'tools/list' });
+    assert.equal(wrongRes.status, 401);
+    assert.equal(wrongRes.body.error, 'invalid_run_token');
 
     // Notification check: valid notification on /mcp/run returns 202
     const notifyRes = await call(port, '/mcp/run', 'POST', token, { jsonrpc: '2.0', method: 'notifications/initialized' });

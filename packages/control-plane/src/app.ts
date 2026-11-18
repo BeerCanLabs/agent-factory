@@ -5606,22 +5606,37 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   const mcpAgentMatch = path.match(/^\/mcp\/agents\/([^/]+)$/);
 
   if ((path === '/mcp' || path === '/mcp/readonly' || mcpToolsetsMatch) && req.method === 'POST') {
-    // #510: a valid run token on POST /mcp is the in-VPC agent contract from before #497.
-    // /mcp is also the OAuth-protected resource, and identify() does not accept run tokens, so
-    // those calls 401'd. Dispatch a valid run token to handleRunMcp (same as POST /mcp/run).
-    // API keys, OAuth tokens, missing or invalid bearers, and unauthenticated callers fall through.
-    if (apiKeyFromAuthorization(req.headers.authorization) === undefined && state.runTokens) {
-      const runVerdict = await verifyRun({
-        tokens: state.runTokens,
-        token: bearerOf(req),
-        runOf: (id) => state.runs.get(id),
-        ended: (r) => isTerminal(r.state),
-      });
-      if (runVerdict.kind === 'ok') {
-        const runPayload = await readMcpJsonRpcPayload(req, res);
-        if (!runPayload) return;
-        json(res, 200, await handleRunMcp(state, runPayload, runVerdict.run));
-        return;
+    // #510 temporary shim: a live run token on exactly POST /mcp (no read-only or toolset
+    // headers) is dispatched to handleRunMcp, same as POST /mcp/run. identify() does not
+    // accept run tokens. A refused run token (ended run, wrong agent, unknown run) is 401
+    // invalid_run_token with no OAuth challenge, matching /mcp/run. Fall through to
+    // requirePrivilege only when the bearer is not a run token, or when the path or
+    // headers are outside the shim (so /mcp/readonly, /mcp/x/*, and those headers keep
+    // the main behaviour). If verification throws, fall through rather than failing the
+    // request. Remove this shim when BeerCanLabs/agentic-sdlc#132 lands.
+    const headerOn = (value: string | string[] | undefined) =>
+      (Array.isArray(value) ? value : [value]).some((v) => typeof v === 'string' && v.trim() !== '');
+    const shimPath = path === '/mcp' && !headerOn(req.headers['x-mcp-readonly']) && !headerOn(req.headers['x-mcp-toolsets']);
+    if (shimPath && apiKeyFromAuthorization(req.headers.authorization) === undefined && state.runTokens) {
+      try {
+        const runVerdict = await verifyRun({
+          tokens: state.runTokens,
+          token: bearerOf(req),
+          runOf: (id) => state.runs.get(id),
+          ended: (r) => isTerminal(r.state),
+        });
+        if (runVerdict.kind === 'ok') {
+          const runPayload = await readMcpJsonRpcPayload(req, res);
+          if (!runPayload) return;
+          json(res, 200, await handleRunMcp(state, runPayload, runVerdict.run));
+          return;
+        }
+        if (runVerdict.kind === 'refused') {
+          json(res, 401, { error: 'invalid_run_token' });
+          return;
+        }
+      } catch {
+        // A stub or broken verifier must not turn a principal MCP call into a 400.
       }
     }
 
