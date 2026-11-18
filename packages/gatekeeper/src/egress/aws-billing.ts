@@ -26,7 +26,9 @@ export const AWS_BILLING_TARGETS = {
   [AWS_BUDGETS_DESCRIBE]: {
     action: 'budgets:DescribeBudgets',
     service: 'budgets',
-    host: 'budgets.us-east-1.amazonaws.com',
+    // AWS Budgets is a global endpoint (SigV4 region is still us-east-1).
+    // budgets.us-east-1.amazonaws.com does not exist in DNS (ENOTFOUND → 502).
+    host: 'budgets.amazonaws.com',
   },
 } as const;
 
