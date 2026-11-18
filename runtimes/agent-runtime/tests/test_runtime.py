@@ -990,3 +990,63 @@ class TestMemoryEngineIsNotForked(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+HELPER = {"soul": "You are a juror.", "memory": {"archetype": "purpose-built"}, "skills": []}
+
+
+def helper_turn(prompt="Vote keep or drop on F1.", **extra):
+    """The factory's spawn_subagent input: subagent, instructions, and the parent's task prompt."""
+    return {"subagent": "juror", "instructions": "You are a juror.", "prompt": prompt, **extra}
+
+
+class TestHelperRunResult(Base):
+    """Helper/subagent run results must include the model's final text as output.reply (sdlc-reviewer 1.3.0).
+
+    Before this change, only smoke runs stored reply; a helper run that ended DONE posted only
+    {summary, archetype, processed_at}, which is what sdlc-sandbox#4 round 3 hit on 17 Nov 2026.
+    """
+
+    def test_an_ordinary_turn_result_is_still_summary_only(self):
+        code, _, result = self.wake(PA, [turn("hi")], lambda m, t: {"role": "assistant", "content": "Hello Dale."})
+        self.assertEqual(code, 0)
+        self.assertEqual(result["output"]["summary"], "handled 1 turn(s)")
+        self.assertEqual(result["output"]["archetype"], "personal-assistant")
+        self.assertIn("processed_at", result["output"])
+        self.assertNotIn("reply", result["output"])
+        self.assertNotIn("response", result["output"])
+        self.assertNotIn("content", result["output"])
+        self.assertNotIn("text", result["output"])
+
+    def test_a_helper_run_used_to_be_summary_only_and_now_includes_reply(self):
+        ballot = '{"votes":[{"finding_id":"F1","keep":true,"reason":"the story count and the single-story wording disagree"}]}'
+        code, fake, result = self.wake(HELPER, [helper_turn()], lambda m, t: {"role": "assistant", "content": ballot})
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["output"]["summary"], "handled 1 turn(s)")
+        self.assertEqual(result["output"]["archetype"], "purpose-built")
+        self.assertIn("processed_at", result["output"])
+        # The field sdlc-reviewer 1.3.0 _reply_text reads (after response/content/text).
+        self.assertEqual(result["output"]["reply"], ballot)
+        self.assertNotIn("response", result["output"])
+        self.assertNotIn("content", result["output"])
+        self.assertNotIn("text", result["output"])
+
+    def test_a_long_helper_reply_is_capped_with_a_truncation_mark(self):
+        huge = "A" * (loop.MAX_HELPER_REPLY_CHARS + 500)
+        code, _, result = self.wake(HELPER, [helper_turn()], lambda m, t: {"role": "assistant", "content": huge})
+        self.assertEqual(code, 0)
+        reply = result["output"]["reply"]
+        self.assertLessEqual(len(reply), loop.MAX_HELPER_REPLY_CHARS)
+        self.assertTrue(reply.endswith(loop.HELPER_REPLY_TRUNCATION))
+        self.assertTrue(reply.startswith("A"))
+        self.assertEqual(len(reply), loop.MAX_HELPER_REPLY_CHARS)
+
+    def test_capped_helper_reply_is_a_no_op_when_the_text_fits(self):
+        self.assertEqual(loop.capped_helper_reply("keep"), "keep")
+        self.assertEqual(len(loop.capped_helper_reply("x" * loop.MAX_HELPER_REPLY_CHARS)), loop.MAX_HELPER_REPLY_CHARS)
+        self.assertFalse(loop.is_helper_payload(turn("hi")))
+        self.assertFalse(loop.is_helper_payload({"factoryKind": "smoke", "message": "ok"}))
+        self.assertTrue(loop.is_helper_payload(helper_turn()))
+        self.assertFalse(loop.is_helper_payload({"subagent": "  "}))
+
