@@ -40,12 +40,14 @@ export const systemCredentialSchema = z
      * `basic`: the formatted value is sent as HTTP Basic credentials (base64), e.g. git over HTTPS (`x-access-token:{}`).
      * `aws-sigv4`: the gatekeeper-egress assumes the role in a JSON secret and SigV4-signs only
      * ce:GetCostAndUsage, ce:GetCostForecast and budgets:DescribeBudgets (S1). `header` is not used.
+     * `gcp-sa-jwt`: the gatekeeper-egress mints an access token from a per-agent service-account JSON
+     * secret and injects it only on read-only BigQuery jobs/query for project `submind-matrix`. `header` is not used.
      */
-    encoding: z.enum(['basic', 'aws-sigv4']).optional(),
+    encoding: z.enum(['basic', 'aws-sigv4', 'gcp-sa-jwt']).optional(),
   })
   .strict()
-  .refine((c) => c.encoding === 'aws-sigv4' || Boolean(c.header), {
-    message: 'header is required unless encoding is aws-sigv4',
+  .refine((c) => c.encoding === 'aws-sigv4' || c.encoding === 'gcp-sa-jwt' || Boolean(c.header), {
+    message: 'header is required unless encoding is aws-sigv4 or gcp-sa-jwt',
     path: ['header'],
   });
 

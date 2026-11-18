@@ -16,6 +16,7 @@ import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
 import { GROUNDING_RETRY_NOTICE, NO_TOOLS_FOOTNOTE, ReplyBook, footnoteDiscordBody, isDiscordReply, isDiscordRoute, isReadMethod, mcpResultOk, replySha256, toolNamesOf, toolResultsInTurn, withGroundingNote } from './grounding.js';
 import { readOnlyVerdict } from './read-only.js';
 import { assumeBillingRole, billingActionOf, billingSessionCache, isAwsSigV4, parseBillingSecret, signBillingRequest } from './aws-billing.js';
+import { gcpBillingActionOf, gcpTokenCache, isGcpSaJwt, mintGcpAccessToken, parseServiceAccount } from './gcp-billing.js';
 import { ProgressCall, ProgressEmitter, type ProgressEvent, type ProgressOptions } from '@beercanlabs/factory-inspector';
 
 export type Route = {
@@ -29,7 +30,7 @@ export type Route = {
    * the per-agent secret is the only candidate: an agent without its own gets `credential_unbound`, never the
    * shared unprefixed secret. Omitted (the default) keeps the shared fallback (discord).
    */
-  credential?: { secret: string; header?: string; format?: string; fallback?: boolean; encoding?: 'basic' | 'aws-sigv4' };
+  credential?: { secret: string; header?: string; format?: string; fallback?: boolean; encoding?: 'basic' | 'aws-sigv4' | 'gcp-sa-jwt' };
   /**
    * Keymaster connection (§6.11 K3): the gatekeeper-egress asks the control plane for a current access token for
    * (agent, connection) and injects it as `Authorization: Bearer`. Never combined with `credential`.
@@ -256,6 +257,12 @@ export type GatekeeperEgressOptions = {
   stsFetch?: typeof fetch;
   /** Tests: send ce/budgets calls to a local host:port instead of official AWS endpoints. */
   awsBillingHosts?: { ce?: string; budgets?: string };
+  /** Tests: send BigQuery jobs/query calls to a local host:port instead of bigquery.googleapis.com. */
+  gcpBillingHosts?: { bigquery?: string };
+  /** Tests: token endpoint for gcp-sa-jwt minting (production uses oauth2.googleapis.com/token). */
+  gcpTokenUrl?: string;
+  /** Tests: replace token-endpoint fetch for gcp-sa-jwt. */
+  gcpTokenFetch?: typeof fetch;
   /** Tests: await catalog refresh on every `/models` call instead of refreshing in the background. */
   eagerCatalogRefresh?: boolean;
   /**
@@ -621,6 +628,16 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         secretValues,
       }),
   });
+  const gcpTokens = gcpTokenCache({
+    now: opts.now,
+    mint: (sa) =>
+      mintGcpAccessToken(sa, {
+        now: opts.now,
+        fetchImpl: opts.gcpTokenFetch,
+        tokenUrl: opts.gcpTokenUrl,
+        secretValues,
+      }),
+  });
   /** AP3: each run's recent final answers, to footnote the replies built from them. */
   const replies = new ReplyBook();
   const trustedModelHosts = new Set((opts.trustedModelHosts ?? []).map((h) => h.toLowerCase()));
@@ -932,8 +949,8 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
       }
     }
     if (!value) return undefined;
-    // aws-sigv4 needs the JSON secret intact; `{}` in the body must not be treated as a format placeholder.
-    if (route.credential.encoding === 'aws-sigv4') return value;
+    // Signing encodings need the JSON secret intact; `{}` in the body must not be treated as a format placeholder.
+    if (route.credential.encoding === 'aws-sigv4' || route.credential.encoding === 'gcp-sa-jwt') return value;
     const formatted = (route.credential.format ?? '{}').replace('{}', value);
     // HTTP Basic (git over HTTPS): `x-access-token:{}` becomes `Basic base64(x-access-token:<token>)`.
     return route.credential.encoding === 'basic' ? `Basic ${Buffer.from(formatted).toString('base64')}` : formatted;
@@ -2548,6 +2565,35 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         if (status === 401) {
           evictCredential(route, ctx);
           billingSessions.clear();
+        }
+        return;
+      }
+      if (isGcpSaJwt(route.credential?.encoding)) {
+        const action = gcpBillingActionOf(req.method, rest, opts.gcpBillingHosts);
+        if (!action.ok) return deny(res, ctx, route, 403, 'action_not_allowed');
+        const rawSecret = await credential(route, ctx);
+        if (!rawSecret) return deny(res, ctx, route, 503, 'credential_unbound');
+        const parsed = parseServiceAccount(rawSecret, secretValues);
+        if (!parsed) return deny(res, ctx, route, 503, 'credential_unbound');
+        let accessToken: string;
+        try {
+          accessToken = await gcpTokens.get(parsed);
+        } catch (err) {
+          console.error(`[gatekeeper-egress] gcp-sa-jwt mint ${route.id}: ${err instanceof Error ? err.message : 'failed'}`);
+          return deny(res, ctx, route, 502, 'upstream_unreachable');
+        }
+        const contentType = String(req.headers['content-type'] ?? 'application/json');
+        const signedHeaders: Record<string, string> = {
+          authorization: `Bearer ${accessToken}`,
+          host: action.dest.host,
+          accept: 'application/json',
+          'content-type': contentType,
+        };
+        const status = await forward(req, res, route, rest, raw, undefined, undefined, undefined, undefined, { dest: action.dest, headers: signedHeaders });
+        ledger(ctx, route, { type: 'action', action: status === 401 ? 'RUNTIME_AUTH_FAILURE' : 'EGRESS', gcpAction: `${action.method} ${action.dest.pathname}` });
+        if (status === 401) {
+          evictCredential(route, ctx);
+          gcpTokens.clear();
         }
         return;
       }

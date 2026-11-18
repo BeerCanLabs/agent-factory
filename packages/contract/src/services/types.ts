@@ -47,6 +47,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/gatekeeper/src/policy/index.ts',
       'packages/gatekeeper/src/run-token/index.ts',
       'packages/gatekeeper/src/egress/aws-billing.ts',
+      'packages/gatekeeper/src/egress/gcp-billing.ts',
       'packages/gatekeeper/src/egress/gatekeeper-egress.ts',
       'packages/gatekeeper/src/egress/grounding.ts',
       'packages/gatekeeper/src/egress/read-only.ts',

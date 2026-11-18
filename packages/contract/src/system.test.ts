@@ -61,6 +61,25 @@ describe('system definition schemas', () => {
     }
   });
 
+  it('validates a gcp-sa-jwt billing credential without a header', () => {
+    const res = validateSystemProposal({
+      id: 'gcp-billing',
+      name: 'GCP billing',
+      kind: 'http',
+      upstream: 'https://bigquery.googleapis.com',
+      credential: {
+        secret: '{agent}_GCP_CREDENTIALS',
+        fallback: false,
+        encoding: 'gcp-sa-jwt',
+      },
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.proposal.credential?.encoding, 'gcp-sa-jwt');
+      assert.equal(res.proposal.credential?.fallback, false);
+    }
+  });
+
   it('rejects aws-sigv4 omitted but also no header', () => {
 
     const res = validateSystemProposal({
@@ -72,7 +91,7 @@ describe('system definition schemas', () => {
     });
     assert.equal(res.ok, false);
     if (!res.ok) {
-      assert.ok(res.issues.some((i) => i.message.includes('header is required unless encoding is aws-sigv4')));
+      assert.ok(res.issues.some((i) => i.message.includes('header is required unless encoding is aws-sigv4 or gcp-sa-jwt')));
     }
   });
 
