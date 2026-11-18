@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { billingActionOf, billingSessionCache, parseBillingSecret, signBillingRequest, assumeBillingRole } from './aws-billing.js';
+import { AWS_BUDGETS_DESCRIBE, billingActionOf, billingSessionCache, parseBillingSecret, signBillingRequest, assumeBillingRole } from './aws-billing.js';
 import type { ParsedBillingSecret } from './aws-billing.js';
 import type { AwsCredentials } from '@beercanlabs/factory-executive';
 
 const SECRET = {
-  access_key_id: 'AKIATESTACCESSKEY01',
+  access_key_id: 'TESTACCESSKEY01XXXX',
   secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
   role_arn: 'arn:aws:iam::566332862296:role/ChuckFinleyBillingReadOnly',
   region: 'us-east-1',
@@ -55,7 +55,7 @@ describe('aws-billing parse and allowlist', () => {
     }
     const forecast = billingActionOf('POST', '/', { 'X-Amz-Target': 'AWSInsightsIndexService.GetCostForecast' });
     assert.equal(forecast.ok, true);
-    const budgets = billingActionOf('POST', '/', { 'x-amz-target': 'AWSBudgetServiceGateway.DescribeBudgets' });
+    const budgets = billingActionOf('POST', '/', { 'x-amz-target': AWS_BUDGETS_DESCRIBE });
     assert.equal(budgets.ok, true);
     if (budgets.ok) assert.equal(budgets.dest.href, 'https://budgets.us-east-1.amazonaws.com/');
 
