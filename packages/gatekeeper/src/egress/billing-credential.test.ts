@@ -237,6 +237,28 @@ describe('gatekeeper-egress aws-sigv4 and gcp-sa-jwt billing credentials', { con
     assert.ok(ledger.some((e) => e.action === 'EGRESS' && e.awsAction === 'ce:GetCostAndUsage'));
   });
 
+  it('does not let agent authorization headers overwrite the SigV4 signature', async () => {
+    asFinley();
+    ceSeen.length = 0;
+    const res = await call(port, '/aws-billing/', {
+      token: finleyToken,
+      body: { Metrics: ['UnblendedCost'] },
+      headers: {
+        'x-amz-target': 'AWSInsightsIndexService.GetCostAndUsage',
+        'content-type': 'application/x-amz-json-1.1',
+        'x-upstream-authorization': 'Bearer spoofed-upstream',
+        'x-factory-run-token': finleyToken,
+      },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(ceSeen.length, 1);
+    const auth = String(ceSeen[0]!.headers.authorization ?? '');
+    assert.match(auth, /AWS4-HMAC-SHA256/);
+    assert.ok(!auth.includes(finleyToken), 'run token must not reach AWS');
+    assert.ok(!auth.includes('spoofed-upstream'));
+    assert.ok(!JSON.stringify(ceSeen[0]!.headers).includes(finleyToken));
+  });
+
   it('refuses a billing action that is not on the allowlist', async () => {
     asFinley();
     const res = await call(port, '/aws-billing/', {
