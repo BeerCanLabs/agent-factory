@@ -2,7 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,7 +186,59 @@ describe('shim process', () => {
     }
   });
 
+  it('with MEMORY_STORE_URI a failing S3 sync is attempted (the helper AccessDenied path)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'shim-aws-'));
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const log = join(root, 'aws.log');
+    writeFileSync(join(bin, 'aws'), '#!/bin/sh\necho "fatal error: AccessDenied ListObjectsV2" >&2\necho "$@" >> "$SHIM_AWS_LOG"\nexit 255\n');
+    chmodSync(join(bin, 'aws'), 0o755);
+    const { out } = await run(
+      `process.exit(0)`,
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        MEMORY_STORE_URI: 's3://agent-factory-mind-prod-924cfefd',
+        MEMORY_PREFIX: '__helper_juror',
+        SHIM_AWS_LOG: log,
+        FACTORY_FINAL_SYNC_SECONDS: '1',
+      },
+    );
+    assert.equal(existsSync(log), true, 'aws s3 sync was invoked');
+    assert.match(readFileSync(log, 'utf8'), /s3 sync/);
+    assert.match(out.stderr, /mind push failed|AccessDenied/);
+    // pullMind swallows a failed pull, so the worker still runs; the final push is what logs the failure.
+    assert.equal(out.status, 0, out.stderr);
+  });
+
+  it('skips mind pull and push when FACTORY_MEMORY=false, so an S3 AccessDenied does not fail the worker', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'shim-nomem-'));
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const log = join(root, 'aws.log');
+    writeFileSync(join(bin, 'aws'), '#!/bin/sh\necho "fatal error: AccessDenied ListObjectsV2" >&2\necho called >> "$SHIM_AWS_LOG"\nexit 255\n');
+    chmodSync(join(bin, 'aws'), 0o755);
+    const { out } = await run(
+      `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(process.env.FACTORY_RESULT_FILE, JSON.stringify({ status: 'succeeded', output: { ok: true } }));
+      `,
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        MEMORY_STORE_URI: 's3://agent-factory-mind-prod-924cfefd',
+        MEMORY_PREFIX: '__helper_juror',
+        FACTORY_MEMORY: 'false',
+        SHIM_AWS_LOG: log,
+        FACTORY_FINAL_SYNC_SECONDS: '1',
+      },
+    );
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(existsSync(log), false, 'aws must not be invoked when memory is false');
+    assert.equal(out.stderr.includes('mind push failed'), false, out.stderr);
+    assert.equal(out.stderr.includes('final mind push'), false, out.stderr);
+  });
+
   it('refuses to start without MEMORY_DIR', () => {
+
     const out = spawnSync(process.execPath, ['--import', 'tsx', shim, '--', 'true'], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
     assert.equal(out.status, 2);
     assert.equal(existsSync('/nonexistent'), false);

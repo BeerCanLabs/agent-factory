@@ -156,4 +156,39 @@ describe('spawn_subagent (E1.4)', { concurrency: false }, () => {
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents/spawn`, 'POST', undefined, {})).status, 401);
     assert.equal((await call(port, `/api/v1/runs/${runs.reviewer.runId}/subagents/spawn`, 'POST', runs.other.token, {})).status, 401);
   });
+  it('serves a helper run its template configuration on agent-config; other tokens cannot read it', async () => {
+    const r = await spawn('reviewer', { subagent: 'juror', model: 'grok-4', prompt: 'judge F1' });
+    assert.ok(r.status < 300, JSON.stringify(r.body));
+    const run = state.runs.get(r.body.runId)!;
+    const helperToken = await tokens.mint({ runId: run.runId, agentId: run.agentId });
+    const got = await call(port, `/api/v1/runs/${run.runId}/agent-config`, 'GET', helperToken);
+    assert.equal(got.status, 200, JSON.stringify(got.body));
+    assert.equal(got.body.soul, 'You are a juror.');
+    assert.deepEqual(got.body.memory, { archetype: 'purpose-built' });
+    assert.deepEqual(got.body.skills, []);
+    assert.equal(got.body.version, 1);
+    assert.equal((await call(port, `/api/v1/runs/${run.runId}/agent-config`, 'GET', ADMIN)).status, 401, 'a principal is not a run');
+    assert.equal((await call(port, `/api/v1/runs/${run.runId}/agent-config`, 'GET', runs.reviewer.token)).status, 401, "the parent's token does not read the helper's config");
+    assert.equal((await call(port, `/api/v1/runs/${run.runId}/agent-config`, 'GET', runs.other.token)).status, 401, "another agent's token does not read it");
+    const start = (state.runtime as { started: Array<{ agentId: string; runEnv: Record<string, string> }> }).started.find((s) => s.agentId === run.agentId);
+    assert.equal(start?.runEnv.FACTORY_MEMORY, 'false');
+    await finishRun(state, run.runId, 'DONE', { actor: 'test' });
+  });
+
+  it('a helper run whose template is gone still gets 404 no_agent_configuration (the previous 404 for every helper)', async () => {
+    const r = await spawn('reviewer', { subagent: 'juror', model: 'grok-4', prompt: 'x' });
+    const run = state.runs.get(r.body.runId)!;
+    const helperToken = await tokens.mint({ runId: run.runId, agentId: run.agentId });
+    const saved = state.subagents!.get('juror')!;
+    state.subagents!.delete('juror');
+    try {
+      const got = await call(port, `/api/v1/runs/${run.runId}/agent-config`, 'GET', helperToken);
+      assert.equal(got.status, 404);
+      assert.equal(got.body.error, 'no_agent_configuration');
+    } finally {
+      state.subagents!.set('juror', saved);
+    }
+    await finishRun(state, run.runId, 'DONE', { actor: 'test' });
+  });
+
 });

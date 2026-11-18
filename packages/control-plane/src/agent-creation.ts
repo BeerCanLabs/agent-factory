@@ -3,7 +3,8 @@
  * run on the shared runtime that reads it.
  *
  *   POST /api/v1/agents                         create a new agent from a configuration (admin)
- *   GET  /api/v1/runs/:id/agent-config          the run's own agent's configuration (run token)
+ *   GET  /api/v1/runs/:id/agent-config          the run's own agent's configuration (run token);
+ *                                               a helper/subagent run is served its template's configuration
  *
  * A new agent has no repository and no cartridge: its pinned source is the pinned runtime version, its egress is nothing
  * until an admin grants it (E7), its roles may name only skills it has adopted, and it is owned by whoever created it.
@@ -40,6 +41,8 @@ import {
   visibilityOf,
   type AgentRecord,
   type ConfigSkill,
+  SubagentStore,
+  type SubagentRecord,
   type SharedRuntimePin,
   type SkillAdoptionProvenance,
 } from '@beercanlabs/factory-registrar';
@@ -79,9 +82,43 @@ export function registrationRefusal(state: FactoryState, agentId: string): { sta
   };
 }
 
-/** The run's own agent's configuration, for the shared runtime. Only an agent created from a configuration has one. */
+/** E1.4: an ephemeral helper run id is `<template>.helper.<hex>`. */
+const HELPER_RUN_ID = /^([a-z0-9][a-z0-9_-]*)\.helper\.[0-9a-f]+$/;
+
+function subagentMap(state: FactoryState): Map<string, SubagentRecord> {
+  state.subagents ??= new SubagentStore(state.registryDir, (m, e) => console.warn(`[control-plane] ${m}`, e ?? '')).load();
+  return state.subagents;
+}
+
+/** The helper template id for an ephemeral helper/subagent run, or undefined if this is not one. */
+export function helperTemplateId(agent: AgentRecord | undefined, agentId: string): string | undefined {
+  const named = agent?.ephemeral?.subagent;
+  if (typeof named === 'string' && named) return named;
+  return HELPER_RUN_ID.exec(agentId)?.[1];
+}
+
+/**
+ * The run's own agent's configuration, for the shared runtime. Only an agent created from a configuration has one,
+ * except an ephemeral helper/subagent run, which is served its helper template's configuration (prompt as soul,
+ * no skills, purpose-built memory). Authorization stays on the route: a run token reads only its own run.
+ */
 export function agentConfigForRun(state: FactoryState, run: Run, res: http.ServerResponse): void {
   const agent = state.agents.get(run.agentId);
+  const templateId = helperTemplateId(agent, run.agentId);
+  if (templateId) {
+    const helper = subagentMap(state).get(templateId);
+    if (!helper) {
+      json(res, 404, { error: 'no_agent_configuration' });
+      return;
+    }
+    json(res, 200, {
+      soul: helper.prompt,
+      memory: { archetype: 'purpose-built' },
+      skills: [],
+      version: 1,
+    });
+    return;
+  }
   const current = (agent as any)?.pendingConfig ?? state.configs?.current(run.agentId);
   if (!agent || agent.createdFrom !== 'configuration' || !current?.agent) {
     json(res, 404, { error: 'no_agent_configuration' });
