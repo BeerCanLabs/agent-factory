@@ -30,7 +30,7 @@ export const AWS_BILLING_TARGETS = {
   },
 } as const;
 
-export type AwsBillingTarget = keyof typeof AWS_BILLING_TARGETS;
+export type AwsBillingTarget = Extract<keyof typeof AWS_BILLING_TARGETS, string>;
 
 export type ParsedBillingSecret = {
   longLived: AwsCredentials;
