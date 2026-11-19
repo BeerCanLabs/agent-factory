@@ -216,7 +216,7 @@ async function callback(state: FactoryState, res: http.ServerResponse, url: URL)
   const writer = writableProvider(state.providers);
   if (!writer) return page(res, 503, 'Setup failed', 'The factory has no writable secret store.');
 
-  let app: { id?: unknown; slug?: unknown; pem?: unknown; webhook_secret?: unknown };
+  let app: { id?: unknown; slug?: unknown; pem?: unknown; webhook_secret?: unknown; owner?: unknown };
   try {
     const r = await fetch(`${apiBase(state)}/app-manifests/${code}/conversions`, { method: 'POST', headers: { accept: 'application/vnd.github+json' } });
     if (r.status !== 201) throw new Error(String(r.status));
@@ -229,6 +229,18 @@ async function callback(state: FactoryState, res: http.ServerResponse, url: URL)
     return page(res, 502, 'Setup failed', 'GitHub returned an incomplete app.');
   }
   const owner = typeof parsed.owner === 'string' && OWNER.test(parsed.owner) ? parsed.owner.toLowerCase() : undefined;
+  if (owner) {
+    // Jury #522 G2: the app must belong to the signed owner. A user-owned app is made under whichever GitHub user is
+    // signed in, so a wrong account would otherwise be recorded as this owner's app. Checked before anything is stored.
+    const got = app.owner && typeof app.owner === 'object' ? (app.owner as { login?: unknown; type?: unknown }) : {};
+    const gotType = got.type === 'Organization' ? 'org' : got.type === 'User' ? 'user' : undefined;
+    const wantType = parsed.ownerType === 'user' ? 'user' : 'org';
+    if (typeof got.login !== 'string' || got.login.toLowerCase() !== owner || gotType !== wantType) {
+      const gotLogin = typeof got.login === 'string' && OWNER.test(got.login) ? got.login : 'another account';
+      state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'GITHUB_APP_OWNER_MISMATCH', actor: parsed.actor, owner, appSlug: app.slug, ...(gotLogin !== 'another account' ? { createdUnder: gotLogin } : {}) });
+      return page(res, 409, 'Setup failed', `GitHub created the app "${app.slug}" under ${gotLogin}, not ${owner} (${wantType}). Nothing was stored. Delete that app on GitHub, sign in as ${owner}${wantType === 'org' ? ' (or an owner of it)' : ''}, and start again from the factory.`);
+    }
+  }
   const names = githubAppSecretNames(parsed.agentId, owner);
   // Redact before anything else can see them (S1 backstop).
   state.secretValues.add(app.pem);

@@ -35,7 +35,7 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
   const stored = new Map<string, string>();
   const ghCalls: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), 'gh-app-owners-'));
-  let nextApp: Record<string, unknown> = { id: 7001, slug: 'flow-getdraft', webhook_secret: OWNER_SECRET };
+  let nextApp: Record<string, unknown> = { id: 7001, slug: 'flow-getdraft', webhook_secret: OWNER_SECRET, owner: { login: 'getdraft', type: 'Organization' } };
 
   before(async () => {
     gh = http.createServer((req, res) => {
@@ -129,7 +129,7 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
 
   it('stores an owner app under its own names and records the owner, leaving the original app and other owners alone', async () => {
     const before = new Map(stored);
-    nextApp = { id: 7001, slug: 'flow-getdraft', webhook_secret: OWNER_SECRET };
+    nextApp = { id: 7001, slug: 'flow-getdraft', webhook_secret: OWNER_SECRET, owner: { login: 'GetDraft', type: 'Organization' } };
     const s1 = (await start({ owner: 'getdraft' })).body.state;
     assert.equal((await cb(s1, 'one')).status, 200);
     const g = githubAppSecretNames('flow', 'getdraft');
@@ -137,7 +137,7 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     assert.equal(stored.get(g.slug), 'flow-getdraft');
     assert.equal(stored.get(g.webhookSecret), OWNER_SECRET);
     for (const [k, v] of before) assert.equal(stored.get(k), v, `${k} untouched`);
-    nextApp = { id: 7002, slug: 'flow-dsackr', webhook_secret: 'example-user-webhook-secret-xyz0123456' }; // secret-scan:allow
+    nextApp = { id: 7002, slug: 'flow-dsackr', webhook_secret: 'example-user-webhook-secret-xyz0123456', owner: { login: 'dsackr', type: 'User' } }; // secret-scan:allow
     const s2 = (await start({ owner: 'dsackr' })).body.state;
     assert.equal((await cb(s2, 'two')).status, 200);
     assert.equal(stored.get(githubAppSecretNames('flow', 'dsackr').slug), 'flow-dsackr');
@@ -230,6 +230,30 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     } finally {
       write(saved);
     }
+  });
+
+  it('jury #522 G2: an app GitHub created under another account than the signed owner is refused before anything is stored', async () => {
+    const before = new Map(stored);
+    const recBefore = JSON.stringify(record());
+    const cases: Array<[string, unknown]> = [
+      ['wrong login', { login: 'someone-else', type: 'User' }],
+      ['wrong type', { login: 'newuser', type: 'Organization' }],
+      ['no owner', undefined],
+    ];
+    for (const [label, owner] of cases) {
+      nextApp = { id: 7100, slug: 'flow-newuser', webhook_secret: 'example-mismatch-webhook-secret-00000', ...(owner ? { owner } : {}) }; // secret-scan:allow
+      const s = (await start({ owner: 'newuser', ownerType: 'user' })).body.state;
+      const r = await cb(s, 'mismatch');
+      assert.equal(r.status, 409, label);
+      assert.match(await r.text(), /Nothing was stored/);
+      assert.deepEqual(new Map(stored), before, `${label}: no secret written`);
+      assert.equal(JSON.stringify(record()), recBefore, `${label}: no owner recorded`);
+    }
+    assert.ok((state.ledger as MemoryLedger).query().some((e: any) => e.action === 'GITHUB_APP_OWNER_MISMATCH'), 'the refusal is ledgered');
+    nextApp = { id: 7101, slug: 'flow-newuser', webhook_secret: 'example-match-webhook-secret-0000000', owner: { login: 'NewUser', type: 'User' } }; // secret-scan:allow
+    const ok = await cb((await start({ owner: 'newuser', ownerType: 'user' })).body.state, 'match');
+    assert.equal(ok.status, 200, 'the same owner, case-insensitive, is stored');
+    assert.equal(record().owners.newuser.type, 'user');
   });
 
   it('jury #522 G1: an owner the original app already serves gets its own app only with migrate, which moves it off the chosen list', async () => {
