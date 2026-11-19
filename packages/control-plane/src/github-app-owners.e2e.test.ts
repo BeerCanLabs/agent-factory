@@ -256,6 +256,15 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     assert.equal(record().owners.newuser.type, 'user');
   });
 
+  it('jury #522 G3: replacing an owner app stops serving keys minted from the old one', async () => {
+    assert.equal((await token('getdraft')).body.accessToken, 'ghs_inst2_app7001');
+    nextApp = { id: 7003, slug: 'flow-getdraft-2', webhook_secret: OWNER_SECRET, owner: { login: 'getdraft', type: 'Organization' } };
+    const st = await start({ owner: 'getdraft', replace: true });
+    assert.equal(st.status, 200, JSON.stringify(st.body));
+    assert.equal((await cb(st.body.state, 'replace')).status, 200);
+    assert.equal((await token('getdraft')).body.accessToken, 'ghs_inst2_app7003', 'the new app\'s key, not the cached one');
+  });
+
   it('jury #522 G1: an owner the original app already serves gets its own app only with migrate, which moves it off the chosen list', async () => {
     assert.ok(record().orgs.includes('BeerCanLabs'));
     const refused = await start({ owner: 'BeerCanLabs', ownerType: 'org' });

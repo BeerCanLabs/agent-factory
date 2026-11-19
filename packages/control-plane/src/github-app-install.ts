@@ -56,6 +56,17 @@ export const GITHUB_CALL_TIMEOUT_MS = 8_000;
 /** #501: how long the token route waits for a mint; under the gatekeeper-egress's 10 s call limit. */
 export const TOKEN_ROUTE_DEADLINE_MS = 8_000;
 
+/**
+ * Jury #522 G3: forget an agent's cached keys (and installation ids), e.g. when one of its apps is created or replaced,
+ * so a key minted from the old app is not served until it expires.
+ */
+export function forgetMintedKeys(state: FactoryState, agentId: string): void {
+  for (const m of [cache.get(state), installations.get(state)]) {
+    if (!m) continue;
+    for (const k of [...m.keys()]) if (k.startsWith(`${agentId}/`)) m.delete(k);
+  }
+}
+
 const mapOf = <V>(m: WeakMap<FactoryState, Map<string, V>>, s: FactoryState): Map<string, V> => {
   const v = m.get(s) ?? new Map<string, V>();
   m.set(s, v);
@@ -94,6 +105,10 @@ async function mint(state: FactoryState, agentId: string, org: string, key: stri
     // #501: both app secrets at once, through the short-lived secret cache (each uncached read spawns the AWS CLI).
     Promise.all([readSecretCached(state, names.id), readSecretCached(state, names.privateKey)]);
   let [appId, pem] = own ? await read(githubAppSecretNames(agentId, own.owner)) : [undefined, undefined];
+  if (own && (!appId || !pem)) {
+    // Jury #522 N2: an owner recorded without its app's key is not a normal state; say so (names only, never values).
+    console.warn(`[github-app] token ${agentId}/${org}: ${own.owner} is recorded with its own app but ${githubAppSecretNames(agentId, own.owner).id} or its key is missing; using the agent's original app`);
+  }
   if (!appId || !pem) [appId, pem] = await read(githubAppSecretNames(agentId));
   let t = lap('secrets', t0);
   if (!appId || !pem) return done({ ok: false, status: 428, error: 'github_app_missing' });

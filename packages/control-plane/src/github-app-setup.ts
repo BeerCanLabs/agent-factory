@@ -16,6 +16,7 @@ import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { signConsentState, verifyConsentState } from './connections.js';
 import { invalidateCredentials } from './credentials.js';
 import { invalidateSecret, readSecret } from './app-setup-providers.js';
+import { forgetMintedKeys } from './github-app-install.js';
 import { OWNER, legacyOrgs, readAppRecord, writeAppRecord, type OwnerType } from './github-app-owners.js';
 
 const STATE_TTL_MS = 10 * 60_000;
@@ -264,6 +265,8 @@ async function callback(state: FactoryState, res: http.ServerResponse, url: URL)
     if (!writeAppRecord(state, parsed.agentId, rec)) console.error(`[keymaster] ${parsed.agentId}: no registry dir; the ${owner} app is stored but not recorded`);
   }
   invalidateCredentials(state);
+  // Jury #522 G3: a key minted from the app this one replaces is not served from the cache.
+  forgetMintedKeys(state, parsed.agentId);
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'GITHUB_APP_CREATED', actor: parsed.actor, appSlug: app.slug, ...(owner ? { owner } : {}), ...(owner && parsed.migrate === true ? { migrated: true } : {}) });
   page(res, 200, `GitHub App ready for ${state.agents.get(parsed.agentId)?.name ?? parsed.agentId}`, 'The app key is stored with the Keymaster. You can close this window.');
 }
