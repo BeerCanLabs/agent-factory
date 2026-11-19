@@ -283,7 +283,21 @@ describe('control plane', { concurrency: false }, () => {
         assert.equal((await put({ routes: [], env: bad })).status, 400, JSON.stringify(bad).slice(0, 40));
       }
       state.secretValues.add('known-secret-value-for-env-test');
-      assert.equal((await put({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 400);
+      const refused = await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_NOTE: 'has known-secret-value-for-env-test inside' } });
+      assert.equal(refused.status, 400);
+      const refusedText = JSON.stringify(refused.json);
+      assert.match(refusedText, /SDLC_NOTE/, 'the error names the offending key');
+      assert.ok(!refusedText.includes('known-secret-value-for-env-test'), 'the error never carries the value');
+      // A value the agent already has is not re-judged: a secret the factory learns later (here, one already inside
+      // SDLC_FLEET_CONFIG) does not block saving the same env again or changing another key.
+      state.secretValues.add('flow-bot');
+      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200, 'unchanged env saves');
+      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds2' } })).status, 200, 'changing another key saves');
+      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200);
+      const changed = await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet + ' ', SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } });
+      assert.equal(changed.status, 400, 'a changed value is still checked');
+      assert.match(JSON.stringify(changed.json), /SDLC_FLEET_CONFIG/);
+      state.secretValues.delete('flow-bot');
       // The budget route (registry.budget.set) keeps the env policy.set wrote and cannot change it.
       const budget = (body: unknown) => request(port, '/api/v1/registry/agents/echo-agent/budget', { method: 'PUT', token: TOKENS.admin, body });
       const kept = { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' };
