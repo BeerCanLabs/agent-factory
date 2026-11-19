@@ -288,29 +288,31 @@ describe('control plane', { concurrency: false }, () => {
       const refusedText = JSON.stringify(refused.json);
       assert.match(refusedText, /SDLC_NOTE/, 'the error names the offending key');
       assert.ok(!refusedText.includes('known-secret-value-for-env-test'), 'the error never carries the value');
-      // A value the agent already has is not re-judged: a secret the factory learns later (here, one already inside
-      // SDLC_FLEET_CONFIG) does not block saving the same env again or changing another key.
-      state.secretValues.add('flow-bot');
-      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200, 'unchanged env saves');
-      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds2' } })).status, 200, 'changing another key saves');
-      assert.equal((await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } })).status, 200);
-      const changed = await put({ routes: [], env: { SDLC_FLEET_CONFIG: fleet + ' ', SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' } });
-      assert.equal(changed.status, 400, 'a changed value is still checked');
-      assert.match(JSON.stringify(changed.json), /SDLC_FLEET_CONFIG/);
-      state.secretValues.delete('flow-bot');
       // The budget route (registry.budget.set) keeps the env policy.set wrote and cannot change it.
       const budget = (body: unknown) => request(port, '/api/v1/registry/agents/echo-agent/budget', { method: 'PUT', token: TOKENS.admin, body });
       const kept = { SDLC_FLEET_CONFIG: fleet, SDLC_APPROVALS_URL: 'https://factory.example/api/v1/agents/flow/holds' };
       assert.equal((await budget({ routes: [], env: { SDLC_NOTE: 'has known-secret-value-for-env-test inside' } })).status, 403);
       assert.equal((await budget({ routes: [], env: { SDLC_FLEET_CONFIG: 'other' } })).status, 403);
       assert.deepEqual(state.policies.get('echo-agent').env, kept);
-      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 7 } })).status, 200);
+      // Env only contains public slugs (the conductor login in SDLC_FLEET_CONFIG). Those are not in the
+      // secret-value set, so a budget-only save still succeeds.
+      assert.equal((await budget({ routes: [], budgetUsd: { perDay: 7 } })).status, 200, 'budget-only save succeeds when env only contains public slugs');
       assert.deepEqual(state.policies.get('echo-agent').env, kept, 'a whole-policy save without env keeps it');
       assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: kept })).status, 200, 'the same env, as the console sends it back');
       const reordered = Object.fromEntries(Object.entries(kept).reverse());
       assert.equal((await budget({ routes: [], budgetUsd: { perDay: 8 }, env: reordered })).status, 200, 'the same env in another key order');
       assert.equal((await budget({ spendLimitUsd: 9, period: 'daily' })).status, 200);
       assert.deepEqual(state.policies.get('echo-agent').env, kept);
+      // A real secret already in env is still checked on a later budget-only save.
+      state.secretValues.delete('known-secret-value-for-env-test');
+      const planted = { SDLC_FLEET_CONFIG: fleet, SDLC_NOTE: 'has known-secret-value-for-env-test inside' };
+      assert.equal((await put({ routes: [], env: planted })).status, 200);
+      state.secretValues.add('known-secret-value-for-env-test');
+      const budgetHeld = await budget({ routes: [], budgetUsd: { perDay: 10 } });
+      assert.equal(budgetHeld.status, 400, 'budget-only save is refused while a real secret already in env is in the set');
+      const budgetHeldText = JSON.stringify(budgetHeld.json);
+      assert.match(budgetHeldText, /SDLC_NOTE/, 'the error names the offending key');
+      assert.ok(!budgetHeldText.includes('known-secret-value-for-env-test'), 'the error never carries the value');
       state.secretValues.delete('known-secret-value-for-env-test');
       assert.equal((await request(port, '/api/v1/policies/budget', { method: 'PUT', token: TOKENS.admin, body: { routes: [], env: { SDLC_X: 'y' } } })).status, 400);
       state.policies.set('echo-agent', { routes: [] });

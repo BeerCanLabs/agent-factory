@@ -5185,7 +5185,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       json(res, 400, { error: checked.error });
       return;
     }
-    const envError = policyEnvSecretError(state, checked.policy, existing?.env);
+    const envError = policyEnvSecretError(state, checked.policy);
     if (envError) {
       json(res, 400, { error: envError });
       return;
@@ -6263,7 +6263,7 @@ function skillIdsFor(agent: { skillIds?: string[]; skillRoutes?: Record<string, 
       json(res, 400, { error: checked.error });
       return;
     }
-    const budgetEnvError = policyEnvSecretError(state, checked.policy, currentEnv);
+    const budgetEnvError = policyEnvSecretError(state, checked.policy);
     if (budgetEnvError) {
       json(res, 400, { error: budgetEnvError });
       return;
@@ -6552,14 +6552,12 @@ export function createProbeServer(): http.Server {
 
 /**
  * GAP-255: a deployment setting is never a credential the factory already holds. Checked on every route that writes a
- * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches).
- *
- * Only values that are new or changed against the agent's current env (`currentEnv`) are compared: a value the factory
- * already accepted is not re-judged on every save, so a secret the control plane learns later (a value it reads
- * afterwards) cannot block unrelated edits. The error names the offending env key, never its value.
+ * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches). Every env
+ * value is checked against secretValues, including values already stored. The error names the offending env key,
+ * never its value. Public GitHub App ids and slugs are kept out of secretValues at the source (isPublicSecretName).
  */
-function policyEnvSecretError(state: FactoryState, policy: AgentPolicy, currentEnv?: Record<string, string>): string | undefined {
-  const entries = Object.entries(policy.env ?? {}).filter(([k, v]) => v.length >= 8 && currentEnv?.[k] !== v);
+function policyEnvSecretError(state: FactoryState, policy: AgentPolicy): string | undefined {
+  const entries = Object.entries(policy.env ?? {}).filter(([, v]) => v.length >= 8);
   if (!entries.length) return undefined;
   for (const secret of state.secretValues) {
     if (secret.length < 8) continue;
