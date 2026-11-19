@@ -76,14 +76,14 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.ok(buildManifest('https://f.example', 'a', 'A'.repeat(60)).name.length <= 34);
   });
 
-  it('#483: the ops leader also gets workflow_run and actions read; no other agent does', () => {
+  it('#483: the ops leader also gets workflow_run and Actions write (to dispatch its workflows); no other agent does', () => {
     const ops = buildManifest('https://f.example', 'sdlc-ops', 'Ops', appNeeds({ skillIds: ['sdlc-ops'] }));
     assert.deepEqual(ops.hook_attributes, { url: 'https://f.example/hooks/sdlc-ops', active: true });
     assert.deepEqual(ops.default_events, ['workflow_run'], 'jury #485 B2: an ops-only app takes only workflow_run');
-    assert.deepEqual(ops.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', actions: 'read' });
+    assert.deepEqual(ops.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', actions: 'write' });
     const both = buildManifest('https://f.example', 'lead', 'Lead', appNeeds({ skillIds: ['sdlc-conductor', 'sdlc-ops'] }));
     assert.deepEqual(both.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status', 'workflow_run']);
-    assert.deepEqual([both.default_permissions.checks, both.default_permissions.statuses, both.default_permissions.actions], ['read', 'read', 'read']);
+    assert.deepEqual([both.default_permissions.checks, both.default_permissions.statuses, both.default_permissions.actions], ['read', 'read', 'write']);
     const conductor = buildManifest('https://f.example', 'flow', 'Flow', appNeeds({ skillIds: ['sdlc-conductor'] }));
     assert.equal(conductor.default_events.includes('workflow_run'), false);
     assert.equal('actions' in conductor.default_permissions, false);
@@ -105,6 +105,12 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.deepEqual(appNeeds({ skillIds: ['sdlc-coder'] }), { events: false, projects: false }, 'a coder takes no app events');
     assert.deepEqual(appNeeds({}, { events: true, projects: true }), { events: true, projects: true }, 'the admin can declare them');
     assert.deepEqual(appNeeds({}, { events: 'yes' }), { events: false, projects: false });
+    // The reviewer reads checks and statuses with no hook or events.
+    const rev = buildManifest('https://f.example', 'rev', 'Rev', appNeeds({ skillIds: ['sdlc-reviewer'] }));
+    assert.deepEqual(rev.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' });
+    assert.equal('hook_attributes' in rev, false);
+    assert.deepEqual(rev.default_events, []);
+    assert.deepEqual(appNeeds({}, { ci: true }), { events: false, projects: false, ci: true }, 'the admin can declare it');
   });
 
   it('names secrets per agent', () => {

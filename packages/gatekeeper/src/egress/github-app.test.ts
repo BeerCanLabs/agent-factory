@@ -114,6 +114,13 @@ describe('github route uses the agent GitHub App key (#334)', { concurrency: fal
     assert.deepEqual(seen.map((x) => x.auth), ['token gh-pat', 'token gh-pat', 'token gh-pat']);
   });
 
+  it('a /users/:login call is for that personal account (multi-owner apps): its owner is asked for', async () => {
+    await as('archie');
+    await send(port, 'GET', '/github/users/dsackr/repos', token);
+    assert.deepEqual(asked[0], { runId: ctx.run.runId, agentId: 'archie', org: 'dsackr' });
+    assert.equal(seen[0].auth, 'token gh-pat', 'no app key for dsackr here, so the route credential is kept');
+  });
+
   it('git over HTTPS gets Basic x-access-token with the app key', async () => {
     await as('archie');
     await send(port, 'GET', '/github-git/BeerCanLabs/agentic-sdlc.git/info/refs?service=git-upload-pack', token);

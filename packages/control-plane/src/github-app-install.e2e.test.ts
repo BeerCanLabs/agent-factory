@@ -130,7 +130,10 @@ describe('GitHub App install and installation keys (E5.1b)', { concurrency: fals
   });
   it('GAP-256: a call with no org (GraphQL) uses the only chosen org; with two chosen it is refused, never guessed', async () => {
     assert.equal((await token({ runId, agentId: 'archie' })).body.error, 'org_ambiguous');
-    assert.equal((await post('/api/v1/keymaster/agents/archie/github-app/installations', ADMIN, { orgs: ['sandbox-org'] })).status, 200);
+    // The chosen list is merged by default; replace:true narrows it to the one org.
+    assert.equal((await post('/api/v1/keymaster/agents/archie/github-app/installations', ADMIN, { orgs: ['sandbox-org'] })).body.chosen.length, 2, 'merged, not replaced');
+    assert.equal((await token({ runId, agentId: 'archie' })).body.error, 'org_ambiguous');
+    assert.deepEqual((await post('/api/v1/keymaster/agents/archie/github-app/installations', ADMIN, { orgs: ['sandbox-org'], replace: true })).body.chosen, ['sandbox-org']);
     const r = await token({ runId, agentId: 'archie' });
     assert.equal(r.status, 200);
     assert.equal(r.body.org, 'sandbox-org');

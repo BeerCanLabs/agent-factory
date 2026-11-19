@@ -63,7 +63,7 @@ export function consentUnavailable(state: FactoryState): string | undefined {
 
 // ---- signed consent state ----------------------------------------------------------------------
 
-type ConsentState = { agentId: string; provider: string; scopes: string[]; actor: string; nonce: string; exp: number };
+type ConsentState = { agentId: string; provider: string; scopes: string[]; actor: string; nonce: string; exp: number; owner?: string; ownerType?: 'org' | 'user'; migrate?: boolean };
 
 function stateKey(state: FactoryState): Buffer | undefined {
   const key = state.connectionStateKey ?? state.callbacks.signingKey;

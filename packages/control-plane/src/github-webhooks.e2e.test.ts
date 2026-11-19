@@ -22,7 +22,7 @@ const SHA = 'a'.repeat(40);
 const repo = { full_name: 'BeerCanLabs/sdlc-sandbox' };
 
 describe('conductorEventFor maps GitHub events to sdlc-on-event events', () => {
-  const map = (event: string, payload: unknown, self?: string) => conductorEventFor(event, payload, self);
+  const map = (event: string, payload: unknown, self?: string | string[]) => conductorEventFor(event, payload, self);
   it('issues: a plan issue is plan-submitted; any other new issue is issue-opened', () => {
     assert.deepEqual(map('issues', { action: 'opened', repository: repo, issue: { number: 3, labels: [{ name: 'sdlc:plan' }] } }), { event: { type: 'plan-submitted', repo: repo.full_name, issue: 3 } });
     assert.deepEqual(map('issues', { action: 'labeled', label: { name: 'sdlc:plan' }, repository: repo, issue: { number: 3, labels: [] } }), { event: { type: 'plan-submitted', repo: repo.full_name, issue: 3 } });
@@ -36,6 +36,13 @@ describe('conductorEventFor maps GitHub events to sdlc-on-event events', () => {
     assert.ok('ignored' in map('issue_comment', { action: 'created', sender: { login: 'Flow-App[bot]' }, repository: repo, issue: { number: 3 }, comment: { id: 9, body: '/approve' } }, 'flow-app[bot]'));
     // ...but its merges still do: the next story hangs on them.
     assert.deepEqual(map('pull_request', { action: 'closed', sender: { login: 'flow-app[bot]' }, repository: repo, pull_request: { number: 7, merged: true, head: { ref: 'sdlc/story-1' } } }, 'flow-app[bot]'), { event: { type: 'pr-merged', repo: repo.full_name, pr: 7 } });
+  });
+  it('jury #522 G1: with an app per owner, every one of the agent\'s apps is self', () => {
+    const selves = ['flow-bcl[bot]', 'flow-getdraft[bot]'];
+    assert.ok('ignored' in map('issue_comment', { action: 'created', sender: { login: 'Flow-GetDraft[bot]' }, repository: repo, issue: { number: 3 }, comment: { id: 9, body: '/approve' } }, selves));
+    assert.ok('ignored' in map('issues', { action: 'labeled', label: { name: 'sdlc:plan' }, sender: { login: 'flow-bcl[bot]' }, repository: repo, issue: { number: 3 } }, selves));
+    assert.ok('event' in map('issue_comment', { action: 'created', sender: { login: 'dale' }, repository: repo, issue: { number: 3 }, comment: { id: 9, body: '/approve' } }, selves));
+    assert.ok('event' in map('issue_comment', { action: 'created', sender: { login: '' }, repository: repo, issue: { number: 3 }, comment: { id: 9, body: '/approve' } }, ['']), 'an empty login is never self');
   });
   it('pull requests, reviews and CI', () => {
     assert.deepEqual(map('pull_request', { action: 'synchronize', repository: repo, pull_request: { number: 7 } }), { event: { type: 'pr-updated', repo: repo.full_name, pr: 7 } });
