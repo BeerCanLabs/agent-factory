@@ -84,6 +84,7 @@ import { handleSubscriptionWindows } from './subscription-windows.js';
 import { getSubscriptionCaps } from './subscription-caps.js';
 import { handleCredentials } from './credentials.js';
 import { githubAppSecretNames, handleGitHubAppSetup } from './github-app-setup.js';
+import { ownerApps } from './github-app-owners.js';
 import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
 import { handleAppSetup, readSecretCached } from './app-setup-providers.js';
@@ -3747,8 +3748,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     // checks the cartridge trigger's secret.
     const githubEventHeader = typeof req.headers['x-github-event'] === 'string' ? req.headers['x-github-event'] : undefined;
     const hasTrigger = Boolean(trigger?.type === 'webhook' && trigger.secretRef);
-    const appSecret = agent && hmacSignature && githubEventHeader ? await readSecretCached(state, githubAppSecretNames(agent.id).webhookSecret) : undefined;
-    const usableApp = typeof appSecret === 'string' && appSecret.trim() ? appSecret : undefined;
+    // Multi-owner apps: the agent's original app and each owner app may deliver here; each one's secret is tried.
+    const appCandidates = agent && hmacSignature && githubEventHeader ? [undefined, ...ownerApps(state, agent.id).map((o) => o.owner)] : [];
+    const appSecrets = (await Promise.all(appCandidates.map(async (owner) => ({ owner, secret: await readSecretCached(state, githubAppSecretNames(agent!.id, owner).webhookSecret) }))))
+      .filter((x): x is { owner: string | undefined; secret: string } => typeof x.secret === 'string' && Boolean(x.secret.trim()));
+    const usableApp = appSecrets.length ? appSecrets : undefined;
     if (!agent || (!usableApp && !hasTrigger)) {
       capDrain(req);
       json(res, 401, { error: 'bad_webhook_signature' });
@@ -3768,9 +3772,13 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     }
     const rawBytes = await readBodyBytes(req);
     let viaApp = false;
+    /** The app whose secret verified the delivery (undefined: the original app). Its slug is the agent's "self". */
+    let viaOwner: string | undefined;
     if (hmacSignature) {
-      if (usableApp && verifyWebhookHmac(rawBytes, usableApp, hmacSignature)) {
+      const matched = usableApp?.find((a) => verifyWebhookHmac(rawBytes, a.secret, hmacSignature));
+      if (matched) {
         viaApp = true;
+        viaOwner = matched.owner;
       } else if (!secret || !verifyWebhookHmac(rawBytes, secret, hmacSignature)) {
         json(res, 401, { error: 'bad_webhook_signature' });
         return;
@@ -3823,9 +3831,9 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         return;
       }
       // Fail closed: without its app's login the conductor cannot tell its own labels and comments, which would loop.
-      const slug = await readSecretCached(state, githubAppSecretNames(agent.id).slug);
+      const slug = await readSecretCached(state, githubAppSecretNames(agent.id, viaOwner).slug);
       if (!slug) {
-        console.error(`[webhooks] ${agent.id}: no ${githubAppSecretNames(agent.id).slug}; GitHub events are not mapped`);
+        console.error(`[webhooks] ${agent.id}: no ${githubAppSecretNames(agent.id, viaOwner).slug}; GitHub events are not mapped`);
         json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
         return;
       }

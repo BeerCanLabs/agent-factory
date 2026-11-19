@@ -1,7 +1,8 @@
 /**
  * E5.1b (#316): install an agent's GitHub App on the orgs an admin picks, and mint short-lived installation keys.
  *
- *   POST /api/v1/keymaster/agents/:agentId/github-app/installations   credentials.agent.set: { orgs } → install links
+ *   POST /api/v1/keymaster/agents/:agentId/github-app/installations   credentials.agent.set: { orgs, replace? } → install links
+ *                                                                        (orgs are added to the chosen list unless replace)
  *   POST /api/v1/gatekeeper-egress/github-app/token                      gatekeeper-egress only: { runId, agentId, org? }
  *                                                                        (no org: the app's only chosen org, GAP-256)
  *
@@ -11,12 +12,11 @@
  */
 import http from 'node:http';
 import { createSign } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
 import { agentPath, readSecret, readSecretCached, registerAppSetupProvider } from './app-setup-providers.js';
+import { ownerApp, ownerApps, readAppRecord, writeAppRecord } from './github-app-owners.js';
 
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const MAX_ORGS = 50;
@@ -24,18 +24,15 @@ const EARLY_MS = 5 * 60_000;
 
 const apiBase = (s: FactoryState) => (s.githubApiBase ?? 'https://api.github.com').replace(/\/$/, '');
 const webBase = (s: FactoryState) => (s.githubWebBase ?? 'https://github.com').replace(/\/$/, '');
-const orgsDir = (s: FactoryState) => (s.registryDir ? join(s.registryDir, 'github-apps') : undefined);
-
-/** The orgs an admin chose for this agent's app; empty when none were chosen. */
+/**
+ * The owners (orgs or user accounts) keys may be minted for: the ones an admin chose for the agent's original app plus
+ * every owner with its own app (multi-owner apps). Empty when none.
+ */
 export function chosenOrgs(state: FactoryState, agentId: string): string[] {
-  const d = orgsDir(state);
-  if (!d) return [];
-  try {
-    const v = JSON.parse(readFileSync(join(d, `${agentId}.json`), 'utf8')) as { orgs?: unknown };
-    return Array.isArray(v.orgs) ? v.orgs.filter((o): o is string => typeof o === 'string') : [];
-  } catch {
-    return [];
-  }
+  const rec = readAppRecord(state, agentId);
+  const out: string[] = [];
+  for (const o of [...rec.orgs, ...Object.keys(rec.owners)]) if (!out.some((x) => x.toLowerCase() === o.toLowerCase())) out.push(o);
+  return out;
 }
 
 /** A GitHub App JWT (RS256), valid ten minutes and backdated one for clock skew. */
@@ -68,7 +65,9 @@ const mapOf = <V>(m: WeakMap<FactoryState, Map<string, V>>, s: FactoryState): Ma
 export async function mintInstallationToken(state: FactoryState, agentId: string, org: string): Promise<MintResult> {
   const lower = org.toLowerCase();
   if (!chosenOrgs(state, agentId).some((o) => o.toLowerCase() === lower)) return { ok: false, status: 403, error: 'org_not_chosen' };
-  const key = `${agentId}/${lower}`;
+  // The key names which app serves this owner, so a key minted from the original app is not reused once the owner
+  // gets its own app.
+  const key = `${agentId}/${lower}/${ownerApp(state, agentId, org) ? 'owner' : 'legacy'}`;
   const hit = mapOf(cache, state).get(key);
   if (hit && Date.parse(hit.expiresAt) - EARLY_MS > Date.now()) return { ok: true, ...hit };
   const inFlight = mapOf(minting, state);
@@ -88,9 +87,13 @@ async function mint(state: FactoryState, agentId: string, org: string, key: stri
     console.log(`[github-app] token ${agentId}/${org}: ${out.ok ? 'minted' : out.error} in ${Date.now() - t0} ms (${phases.join(', ')})`);
     return out;
   };
-  const names = githubAppSecretNames(agentId);
-  // #501: both app secrets at once, through the short-lived secret cache (each uncached read spawns the AWS CLI).
-  const [appId, pem] = await Promise.all([readSecretCached(state, names.id), readSecretCached(state, names.privateKey)]);
+  // Multi-owner apps: the owner's own app when it has one, else the agent's original app.
+  const own = ownerApp(state, agentId, org);
+  const read = async (names: ReturnType<typeof githubAppSecretNames>) =>
+    // #501: both app secrets at once, through the short-lived secret cache (each uncached read spawns the AWS CLI).
+    Promise.all([readSecretCached(state, names.id), readSecretCached(state, names.privateKey)]);
+  let [appId, pem] = own ? await read(githubAppSecretNames(agentId, own.owner)) : [undefined, undefined];
+  if (!appId || !pem) [appId, pem] = await read(githubAppSecretNames(agentId));
   let t = lap('secrets', t0);
   if (!appId || !pem) return done({ ok: false, status: 428, error: 'github_app_missing' });
   const instKey = `${key}/${appId}`;
@@ -99,7 +102,11 @@ async function mint(state: FactoryState, agentId: string, org: string, key: stri
     const headers = { accept: 'application/vnd.github+json', authorization: `Bearer ${appJwt(appId, pem)}` };
     let id = known.get(instKey);
     if (id === undefined) {
-      const inst = await fetch(`${apiBase(state)}/orgs/${encodeURIComponent(org)}/installation`, { headers, signal: AbortSignal.timeout(GITHUB_CALL_TIMEOUT_MS) });
+      // An org's installation, or a personal account's (`/users/:login/installation`): the owner's recorded type
+      // decides; an owner of the original app has no recorded type, so a 404 for an org is retried as a user.
+      const at = (kind: 'orgs' | 'users') => fetch(`${apiBase(state)}/${kind}/${encodeURIComponent(org)}/installation`, { headers, signal: AbortSignal.timeout(GITHUB_CALL_TIMEOUT_MS) });
+      let inst = await at(own?.type === 'user' ? 'users' : 'orgs');
+      if (inst.status === 404 && !own) inst = await at('users');
       t = lap('installation', t);
       if (inst.status === 404) return done({ ok: false, status: 428, error: 'not_installed' });
       if (!inst.ok) return done({ ok: false, status: 502, error: 'github_unavailable' });
@@ -155,16 +162,23 @@ export async function handleGitHubAppInstall(state: FactoryState, req: http.Inco
     if (!state.agents.has(agentId)) return json(res, 404, { error: 'not_found' }), true;
     const b = await readJson(req);
     const orgs = Array.isArray(b.orgs) ? [...new Set(b.orgs.filter((o): o is string => typeof o === 'string'))] : [];
-    if (!orgs.length || orgs.length > MAX_ORGS || !orgs.every((o) => ORG.test(o))) return json(res, 400, { error: 'orgs_invalid', message: `send {"orgs": ["org", ...]}, 1 to ${MAX_ORGS} GitHub org names` }), true;
-    const slug = await readSecret(state, githubAppSecretNames(agentId).slug);
-    if (!slug) return json(res, 428, { error: 'github_app_missing', message: 'create the agent\'s GitHub App first' }), true;
-    const d = orgsDir(state);
-    if (!d) return json(res, 503, { error: 'no_registry_dir' }), true;
-    mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, `${agentId}.json`), JSON.stringify({ orgs, by: principal.actor, at: new Date().toISOString() }, null, 2));
-    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'GITHUB_APP_ORGS_CHOSEN', actor: principal.actor, orgs });
-    const installUrl = `${webBase(state)}/apps/${encodeURIComponent(slug)}/installations/new`;
-    json(res, 200, { agentId, orgs: orgs.map((org) => ({ org, installUrl })) });
+    if (!orgs.length || orgs.length > MAX_ORGS || !orgs.every((o) => ORG.test(o))) return json(res, 400, { error: 'orgs_invalid', message: `send {"orgs": ["org", ...]}, 1 to ${MAX_ORGS} GitHub org or user names` }), true;
+    const legacySlug = await readSecret(state, githubAppSecretNames(agentId).slug);
+    const slugFor = async (org: string) => {
+      const own = ownerApp(state, agentId, org);
+      return (own ? await readSecret(state, githubAppSecretNames(agentId, own.owner).slug) : undefined) ?? legacySlug;
+    };
+    const slugs = await Promise.all(orgs.map(slugFor));
+    if (slugs.some((x) => !x)) return json(res, 428, { error: 'github_app_missing', message: 'create the agent\'s GitHub App first' }), true;
+    const rec = readAppRecord(state, agentId);
+    // Merged into the chosen list (never replaces it, nor touches owner apps) unless the admin sends replace:true.
+    const kept = b.replace === true ? [] : rec.orgs;
+    const merged = [...kept];
+    for (const o of orgs) if (!merged.some((x) => x.toLowerCase() === o.toLowerCase())) merged.push(o);
+    if (merged.length > MAX_ORGS) return json(res, 400, { error: 'orgs_invalid', message: `at most ${MAX_ORGS} orgs` }), true;
+    if (!writeAppRecord(state, agentId, { ...rec, orgs: merged, by: principal.actor, at: new Date().toISOString() })) return json(res, 503, { error: 'no_registry_dir' }), true;
+    state.ledger.append({ timestamp: new Date().toISOString(), agentId, type: 'action', action: 'GITHUB_APP_ORGS_CHOSEN', actor: principal.actor, orgs: merged });
+    json(res, 200, { agentId, orgs: orgs.map((org, i) => ({ org, installUrl: `${webBase(state)}/apps/${encodeURIComponent(slugs[i]!)}/installations/new` })), chosen: merged });
     return true;
   }
 
@@ -201,11 +215,18 @@ registerAppSetupProvider({
   title: 'GitHub App',
   steps: (_s, agentId) => [
     { id: 'create', manual: false, text: 'Create this agent\'s own GitHub App from a prefilled manifest (optionally under an org), then approve it on GitHub. The factory stores its key.', action: { kind: 'browser-post', path: agentPath(agentId, 'github-app/start'), input: 'org', postField: 'manifest' } },
-    { id: 'orgs', manual: false, text: 'Choose the orgs the app is for (comma-separated). Keys are minted only for these.', action: { kind: 'list', path: agentPath(agentId, 'github-app/installations'), input: 'orgs' } },
+    { id: 'create-owner', manual: false, text: 'Optional: create an additional app for one more owner (an org or your personal account), so its repos get keys from their own app. The agent\'s other apps are kept.', action: { kind: 'browser-post', path: agentPath(agentId, 'github-app/start'), input: 'owner', postField: 'manifest' } },
+    { id: 'orgs', manual: false, text: 'Choose the orgs the app is for (comma-separated, added to the ones already chosen). Keys are minted only for these and for owners with their own app.', action: { kind: 'list', path: agentPath(agentId, 'github-app/installations'), input: 'orgs' } },
     { id: 'install', manual: true, text: 'Open the install link and install the app on each chosen org.' },
   ],
   async status(state, agentId) {
     const slug = await readSecret(state, githubAppSecretNames(agentId).slug);
-    return slug ? { configured: true, links: [{ label: 'Install the app on an org', url: `${webBase(state)}/apps/${encodeURIComponent(slug)}/installations/new` }] } : { configured: false };
+    const links: Array<{ label: string; url: string }> = slug ? [{ label: 'Install the app on an org', url: `${webBase(state)}/apps/${encodeURIComponent(slug)}/installations/new` }] : [];
+    // Multi-owner apps: one install link per owner app, for that owner.
+    for (const o of ownerApps(state, agentId)) {
+      const s = await readSecret(state, githubAppSecretNames(agentId, o.owner).slug);
+      if (s) links.push({ label: `Install ${s} on ${o.owner} (${o.type})`, url: `${webBase(state)}/apps/${encodeURIComponent(s)}/installations/new` });
+    }
+    return links.length ? { configured: true, links } : { configured: false };
   },
 });

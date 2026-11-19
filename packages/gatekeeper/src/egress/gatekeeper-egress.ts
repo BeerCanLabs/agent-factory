@@ -1000,7 +1000,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
     let org: string | undefined;
     const kind = githubAppHosts[host];
     if (graphql && isGithubGraphql(route, rest, graphql.req)) return githubGraphqlOrg(graphql.req, graphql.raw) ?? undefined;
-    if (kind === 'api') org = seg[0] === 'repos' || seg[0] === 'orgs' ? seg[1] : undefined;
+    if (kind === 'api') org = seg[0] === 'repos' || seg[0] === 'orgs' || seg[0] === 'users' ? seg[1] : undefined;
     else if (kind === 'git') org = seg[0];
     return org && GITHUB_ORG.test(org) ? org : undefined;
   }
