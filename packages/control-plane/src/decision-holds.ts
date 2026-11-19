@@ -5,14 +5,15 @@
  * returns the same approval. Nothing waits: the run goes on, and the decision reaches the agent through the existing
  * decision path when a person makes it (REST `POST /api/v1/approvals/:id` or MCP `decide_approval`, optionally with a cap).
  * The hold names its `approvers` (GitHub logins) and whether approving needs a cap (`requiresCap`); both are fixed when
- * it is asked. Only a person whose single linked, non-bot GitHub login is on the list may decide it (403 otherwise), and a
+ * it is asked. Only a person whose single linked, non-bot GitHub login is on the list may decide it (403 otherwise; a login
+ * linked to another actor of the same factory user counts, #524), and a
  * hold that needs a cap is never approved without one (400). The agent can read it back at any time with `GET` on the same
  * path, shaped `{state, cap_usd, by, comment}`: `by` is the GitHub login recorded when the decision was made, else null.
  * The console, channels and anything else that lists approvals show it because it is one; nothing is specific to a UI.
  */
 import type http from 'node:http';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
-import type { Approval, DecisionHold } from '@beercanlabs/factory-bouncer';
+import { normalizeActorToPrincipal, type Approval, type DecisionHold } from '@beercanlabs/factory-bouncer';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { bearerOf, json, readJson, requirePrivilege, visibleApprovals, type FactoryState } from './app.js';
@@ -42,11 +43,55 @@ export function parseCapUsd(v: unknown): number | null {
   return Number.isFinite(n) && n <= 1e9 ? n : null;
 }
 
-/** The GitHub login a person linked (`github:<login>`), when exactly one is; a fleet checks approvers by login. */
+/**
+ * #524: the factory user an actor is, when the principal store names one. Only the two forms the factory verifies are
+ * resolved: `user:<id>` and `cloudflare:<email>` (the same person when the store has that email on that `user:<id>`).
+ * Undefined for every other form, `oidc:` and unprefixed actors included (an `oidc:<sub>` is never matched to a user by
+ * id), and when there is no store, it is unhealthy, or no record exists (a deterministic `user:<email>` fallback is not a
+ * person on file). Note: whoever holds `grants.manage` can put an email on a user record, and so can make a
+ * `cloudflare:<email>` actor that user for this purpose; both privileges sit in the admin role today.
+ */
+function factoryUserOf(state: FactoryState, actor: string): string | undefined {
+  const store = state.principals;
+  if (!store || !store.healthy) return undefined;
+  const lower = actor.trim().toLowerCase();
+  const isUser = lower.startsWith('user:');
+  const isCloudflareEmail = lower.startsWith('cloudflare:') && lower.slice('cloudflare:'.length).includes('@');
+  if (!isUser && !isCloudflareEmail) return undefined;
+  try {
+    const id = normalizeActorToPrincipal(actor, store);
+    return id.startsWith('user:') && store.get(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The one login among these links, else undefined (none, or more than one distinct login: ambiguous names none). */
+function soleLogin(links: ReadonlyArray<{ id: string }>): string | undefined {
+  const logins = new Map<string, string>();
+  for (const l of links) logins.set(l.id.toLowerCase(), l.id);
+  return logins.size === 1 ? [...logins.values()][0] : undefined;
+}
+
+/**
+ * The GitHub login a person linked (`github:<login>`), when exactly one is; a fleet checks approvers by login.
+ *
+ * Links on the deciding actor's own actor string (case-insensitive) decide first, exactly as before #524: if any exist,
+ * the answer comes from those alone. #524: only when the actor has no such link does a link on another actor of the same
+ * factory user count, where both resolve to one `user:<id>` in the principal store through `user:` or
+ * `cloudflare:<email>` (for example the console's `user:dale.sackrider` and the link's
+ * `cloudflare:dale.sackrider@gmail.com`, an email on that user). Nothing else makes two actors one person. More than one
+ * distinct login among the links considered is ambiguous and names none.
+ */
 export function githubLoginOf(state: FactoryState, actor: string | undefined): string | undefined {
   if (!actor) return undefined;
-  const mine = (state.identityLinks?.list() ?? []).filter((l) => l.provider === 'github' && l.actor.toLowerCase() === actor.toLowerCase());
-  return mine.length === 1 ? mine[0].id : undefined;
+  const lower = actor.toLowerCase();
+  const github = (state.identityLinks?.list() ?? []).filter((l) => l.provider === 'github');
+  const exact = github.filter((l) => l.actor.toLowerCase() === lower);
+  if (exact.length > 0) return soleLogin(exact);
+  const me = factoryUserOf(state, actor);
+  if (me === undefined) return undefined;
+  return soleLogin(github.filter((l) => factoryUserOf(state, l.actor) === me));
 }
 
 /**

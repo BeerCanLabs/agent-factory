@@ -9,13 +9,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
-import { createFactoryServer, type FactoryState } from './app.js';
+import { createFactoryServer, decideApproval, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
-import { ApprovalStore, IdentityLinkStore } from '@beercanlabs/factory-bouncer';
+import { ApprovalStore, FileDocBackend, IdentityLinkStore, PrincipalStore, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { handleMcp } from './mcp.js';
-import { parseCapUsd } from './decision-holds.js';
+import { githubLoginOf, holdDecider, parseCapUsd } from './decision-holds.js';
 
 const VIEWER = 'viewer-decision-e2e';
 const ADMIN = 'admin-decision-e2e';
@@ -273,6 +273,153 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
     for (const approvers of [undefined, [], ['flow-app[bot]'], ['ok', 42]]) {
       assert.equal((await call(holdPath('conductor', 'other-key'), 'PUT', again, { ...ask, id: 'other-key', approvers })).status, 400, JSON.stringify(approvers));
     }
+  });
+
+  describe('#524: a GitHub login linked to another actor of the same factory user', () => {
+    const admin = (actor: string) => ({ actor, roles: ['viewer', 'admin'] }) as never;
+    const mcpDecide = async (actor: string, approvalId: string) =>
+      (await handleMcp(
+        state,
+        { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'decide_approval', arguments: { approvalId, decision: 'reject' } } },
+        admin(actor),
+      )) as { result?: { isError?: boolean; structuredContent?: { error?: string; status?: string } } };
+
+    beforeEach(async () => {
+      // Production-shaped: the console signs Dale in as `user:dale.sackrider`; `github:dsackr` is linked to his Cloudflare
+      // Access actor, an email the principal store has on that user. Eve is another person on file.
+      const principals = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(join(mkdtempSync(join(tmpdir(), 'decision-principals-')), 'principals.json')));
+      await principals.create({ id: 'user:dale.sackrider', displayName: 'Dale', emails: ['dale.sackrider@gmail.com', 'dale@beercanlabs.com'], by: 'user:dale.sackrider' });
+      await principals.create({ id: 'user:eve', displayName: 'Eve', emails: ['eve@example.com'], by: 'user:dale.sackrider' });
+      state.principals = principals;
+      state.identityLinks = new IdentityLinkStore(join(mkdtempSync(join(tmpdir(), 'decision-holds-')), 'links'));
+      state.identityLinks.link('github', 'dsackr', 'cloudflare:dale.sackrider@gmail.com', 'service:deploy');
+      state.identityLinks.link('github', 'ops-person', 'token:ops', 'admin');
+    });
+    after(() => {
+      delete (state as { principals?: unknown }).principals;
+    });
+
+    it('the direct link still decides, and the login is found by the exact actor without the store', async () => {
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), 'dsackr');
+      assert.equal(githubLoginOf(state, 'CLOUDFLARE:Dale.Sackrider@gmail.com'), 'dsackr', 'case-insensitive');
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      const out = await decideApproval(state, h.approvalId, 'reject', admin('cloudflare:dale.sackrider@gmail.com'), 'direct link');
+      assert.equal(out.status, 200);
+      assert.equal((await call(holdPath(), 'GET', token)).body.by, 'dsackr');
+    });
+
+    it('the same person signed in as their factory user decides by the login linked to their Cloudflare actor (REST and MCP)', async () => {
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'dsackr');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale@beercanlabs.com'), 'dsackr', 'another email on the same user');
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, { ...ask, requiresCap: true });
+      const viaMcp = await mcpDecide('user:dale.sackrider', h.approvalId);
+      assert.notEqual(viaMcp.result?.structuredContent?.error, 'not_an_approver', 'MCP passes the approver check');
+      assert.equal(state.approvals.get(h.approvalId)?.state, 'pending', 'MCP still asks the human to confirm');
+      // Reject needs no cap, even on a hold that requires one to approve.
+      const out = await decideApproval(state, h.approvalId, 'reject', admin('user:dale.sackrider'), 'not now');
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      const read = (await call(holdPath(), 'GET', token)).body;
+      assert.equal(read.state, 'rejected');
+      assert.equal(read.by, 'dsackr', 'the GitHub login is what is recorded');
+      assert.equal(read.decidedBy, 'user:dale.sackrider', 'the signed-in principal is who decided');
+    });
+
+    it('an unrelated principal is still refused, as is an actor merely shaped like the same email with no person on file', async () => {
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      for (const actor of ['user:eve', 'cloudflare:eve@example.com', 'cloudflare:stranger@example.com', 'user:dale', 'token:ops']) {
+        assert.equal(githubLoginOf(state, actor) === 'dsackr', false, actor);
+        const out = await decideApproval(state, h.approvalId, 'reject', admin(actor));
+        assert.equal(out.status, 403, actor);
+        assert.equal((out.body as { error: string }).error, 'not_an_approver', actor);
+      }
+      const viaMcp = await mcpDecide('user:eve', h.approvalId);
+      assert.equal(viaMcp.result?.isError, true);
+      assert.equal(viaMcp.result?.structuredContent?.error, 'not_an_approver');
+      // No principal record: `cloudflare:<email>` and `user:<email>` are not joined by the fallback id alone.
+      state.identityLinks!.link('github', 'ghost-login', 'cloudflare:ghost@example.com', 'admin');
+      assert.equal(githubLoginOf(state, 'user:ghost@example.com'), undefined);
+      // Without a principal store, only the exact actor counts.
+      const saved = state.principals;
+      delete (state as { principals?: unknown }).principals;
+      try {
+        assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined);
+      } finally {
+        state.principals = saved;
+      }
+      assert.equal(state.approvals.get(h.approvalId)?.state, 'pending', 'refusals leave the hold for the real approver');
+    });
+
+    it('B1: an `oidc:` actor is never aliased to a factory user, as decider or as link actor; exact matches still count', async () => {
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      const oidcActors = ['oidc:dale.sackrider', 'oidc:dale.sackrider@gmail.com'];
+      // As the deciding actor: no exact link, so nothing names `dsackr` through the store.
+      for (const actor of oidcActors) {
+        assert.equal(githubLoginOf(state, actor), undefined, actor);
+        const out = await decideApproval(state, h.approvalId, 'reject', admin(actor));
+        assert.equal(out.status, 403, actor);
+        assert.equal((out.body as { error: string }).error, 'not_an_approver', actor);
+        const viaMcp = await mcpDecide(actor, h.approvalId);
+        assert.equal(viaMcp.result?.structuredContent?.error, 'not_an_approver', actor);
+      }
+      assert.equal(state.approvals.get(h.approvalId)?.state, 'pending');
+      // As the link actor: a login linked to an `oidc:` actor is not the factory user's.
+      state.identityLinks!.unlink('github', 'dsackr');
+      state.identityLinks!.link('github', 'oidc-sub-login', 'oidc:dale.sackrider', 'admin');
+      state.identityLinks!.link('github', 'oidc-email-login', 'oidc:dale.sackrider@gmail.com', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined, 'no alias through an oidc: link');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), undefined, 'no alias through an oidc: link');
+      // The exact actor string still finds its own link, as before #524.
+      assert.equal(githubLoginOf(state, 'oidc:dale.sackrider'), 'oidc-sub-login');
+      assert.equal(githubLoginOf(state, 'OIDC:Dale.Sackrider@gmail.com'), 'oidc-email-login');
+      // With `dsackr` back on the Cloudflare actor, the alias names it alone; the oidc: links do not join in.
+      state.identityLinks!.link('github', 'dsackr', 'cloudflare:dale.sackrider@gmail.com', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'dsackr');
+    });
+
+    it('B2: links on the deciding actor itself decide first; the alias is used only when there are none', async () => {
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      // A second login linked directly to `user:dale.sackrider`: each actor keeps its own exact link, as before #524,
+      // so linking a login to one alias does not lock the other actor out.
+      state.identityLinks!.link('github', 'second-approver', 'user:dale.sackrider', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'second-approver', 'exact link wins over the alias');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), 'dsackr', 'exact link wins over the alias');
+      const who = holdDecider(state, state.approvals.get(h.approvalId)!, 'user:dale.sackrider');
+      assert.equal(who.ok, true);
+      const out = await decideApproval(state, h.approvalId, 'reject', admin('user:dale.sackrider'));
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.equal((await call(holdPath(), 'GET', token)).body.by, 'second-approver', 'decided by the exact-actor login');
+      // An exact link that is not an approver is not rescued by an approver reached through the alias.
+      state.identityLinks!.unlink('github', 'second-approver');
+      state.identityLinks!.link('github', 'not-on-the-list', 'user:dale.sackrider', 'admin');
+      const { token: t2 } = await liveRun();
+      const { body: h2 } = await call(holdPath('conductor', 'k-b2'), 'PUT', t2, { ...ask, id: 'k-b2' });
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'not-on-the-list');
+      const refused = await decideApproval(state, h2.approvalId, 'reject', admin('user:dale.sackrider'));
+      assert.equal(refused.status, 403);
+      assert.equal((refused.body as { error: string }).error, 'not_an_approver');
+    });
+
+    it('more than one distinct GitHub login reached through the alias names none', async () => {
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      // Two logins on two of Dale's Cloudflare actors, none on `user:dale.sackrider` itself: the alias is ambiguous.
+      state.identityLinks!.link('github', 'dsackr-alt', 'cloudflare:dale@beercanlabs.com', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined);
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), 'dsackr', 'each Cloudflare actor keeps its exact link');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale@beercanlabs.com'), 'dsackr-alt', 'each Cloudflare actor keeps its exact link');
+      const who = holdDecider(state, state.approvals.get(h.approvalId)!, 'user:dale.sackrider');
+      assert.equal(who.ok, false);
+      const out = await decideApproval(state, h.approvalId, 'reject', admin('user:dale.sackrider'));
+      assert.equal(out.status, 403);
+      assert.equal((out.body as { error: string }).error, 'not_an_approver');
+      state.identityLinks!.unlink('github', 'dsackr-alt');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'dsackr', 'one login again once the other is unlinked');
+    });
   });
 
   it('a hold that requires a cap is never approved without one', async () => {
