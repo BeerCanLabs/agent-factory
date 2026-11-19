@@ -215,6 +215,8 @@ export type GatekeeperEgressOptions = {
   /** #334: hosts whose routes may carry an agent's GitHub App key: `api` (REST, org from /repos|/orgs) or `git` (org first). Tests point these at local servers. */
   githubAppHosts?: Record<string, 'api' | 'git'>;
   maxBodyBytes?: number;
+  /** Inactivity timeout on the upstream socket. Defaults to 180s so a long upload or a slow origin can finish. */
+  upstreamTimeoutMs?: number;
   meter?: Meter;
   /** Offered models for the `models` route (operations config, M3). */
   modelCatalog?: ModelCatalog;
@@ -289,6 +291,7 @@ const STRIP = new Set([
   'transfer-encoding',
   'upgrade',
   'content-length',
+  'expect',
   'authorization',
   'x-api-key',
   'x-factory-run-token',
@@ -610,6 +613,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   const ttl = opts.contextTtlMs ?? 1000;
 
   const limit = opts.maxBodyBytes ?? 10 * 1024 * 1024;
+  const upstreamTimeoutMs = opts.upstreamTimeoutMs ?? 180_000;
   const ctxCache = new Map<string, { at: number; ctx: RunContext }>();
   /** Spend settled here whose ledger write the control plane has not yet acknowledged. */
   const unacked = new Map<string, number>();
@@ -1185,6 +1189,10 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         for (const [k, v] of Object.entries(req.headers)) if (v !== undefined && !STRIP.has(k.toLowerCase())) headers[k] = v;
       }
       headers['accept-encoding'] = 'identity';
+      // Node 19+ reuses keep-alive sockets by default. A prior GET on this
+      // route can leave a socket that Cloudflare or a home tunnel already
+      // closed; the next large POST then fails with read ECONNRESET.
+      headers['connection'] = 'close';
       if (body.length) headers['content-length'] = String(body.length);
       // Signed billing requests already carry the gatekeeper-computed Authorization.
       // Do not let x-upstream-authorization or a run token overwrite it (S1).
@@ -1204,7 +1212,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         }
       }
       const transport = dest.protocol === 'https:' ? https : http;
-      const up = transport.request(dest, { method: req.method, headers }, (upRes) => {
+      const up = transport.request(dest, { method: req.method, headers, agent: false, timeout: upstreamTimeoutMs }, (upRes) => {
         const status = upRes.statusCode ?? 502;
         const outHeaders = { ...upRes.headers };
         delete outHeaders['content-length'];

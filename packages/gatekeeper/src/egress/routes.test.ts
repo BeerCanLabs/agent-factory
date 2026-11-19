@@ -170,6 +170,19 @@ describe('TSK-045 gatekeeper-egress routes (S1)', { concurrency: false }, () => 
     assert.equal(seen[0].headers.authorization, undefined);
   });
 
+  it('does not forward Expect and closes the upstream connection after each call', async () => {
+    await as('finley', ['motion']);
+    const r = await call(port, '/motion/tasks', token, {
+      method: 'POST',
+      body: Buffer.from('{"ok":true}'),
+      headers: { 'content-type': 'application/json', expect: '100-continue' },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(seen[0].headers.expect, undefined);
+    assert.equal(seen[0].headers.connection, 'close');
+    assert.equal(seen[0].headers['content-type'], 'application/json');
+  });
+
   it('passes a ~2 MB multipart POST body through unchanged', async () => {
     await as('finley', ['motion']);
     const boundary = 'tsk045boundary';
