@@ -57,6 +57,8 @@ export {
   discoverSubscriptionModels,
   subscriptionHeaders,
   subscriptionInferenceUrl,
+  subscriptionImageUrl,
+  generateSubscriptionImage,
   toResponsesRequest,
   fromResponses,
   readResponsesStream,
@@ -65,7 +67,7 @@ export {
   SubscriptionLimitError,
   SubscriptionNeedsReconsentError,
 } from './responses.js';
-export type { ResponsesAdapterOptions, SubscriptionTokenResult, SubscriptionDiscovery, SubscriptionModel } from './responses.js';
+export type { ResponsesAdapterOptions, SubscriptionTokenResult, SubscriptionDiscovery, SubscriptionModel, ImageGenerationRequest, ImageGenerationResult } from './responses.js';
 export function isSubscriptionEntry(entry: { credentialMode?: string; connection?: string }): entry is { credentialMode: 'subscription'; connection: string } {
   return entry.credentialMode === 'subscription' && typeof entry.connection === 'string' && entry.connection.length > 0;
 }

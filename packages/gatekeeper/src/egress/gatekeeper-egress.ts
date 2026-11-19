@@ -9,7 +9,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import { bindSecrets, type SecretProvider } from '@beercanlabs/factory-secrets-bind';
 import { checkStanding, costUsd, isZeroPrice, priceFor, type Price } from '@beercanlabs/factory-budget';
 import { writeTrace, type TraceConfig } from '@beercanlabs/factory-inspector';
-import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, SubscriptionLimitError, SubscriptionNeedsReconsentError, checkModel, discoverSubscriptionModels, formatModelDisplayLabel, isSubscriptionEntry, subscriptionResponses, selectModel, failbackCandidates, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ChatRequest, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type SubscriptionTokenResult, type Usage } from '@beercanlabs/factory-executive';
+import { BUILTIN_PROVIDER_HOSTS, BUILTIN_PROVIDER_SECRETS, SseMeter, SubscriptionLimitError, SubscriptionNeedsReconsentError, ModelUpstreamError, checkModel, discoverSubscriptionModels, formatModelDisplayLabel, isSubscriptionEntry, subscriptionResponses, generateSubscriptionImage, selectModel, failbackCandidates, complete, defaultModelAdapters, discoverVendorModels, findModel, offeredModels, resolveProviderSecret, usageFromJson, type CatalogEntry, type ChatRequest, type ModelAdapter, type ModelCatalog, type ModelPolicy, type Provider, type SubscriptionTokenResult, type Usage } from '@beercanlabs/factory-executive';
 import type { Meter } from '@opentelemetry/api';
 
 import { stripSignInLinksFromJson } from '@beercanlabs/factory-keymaster';
@@ -1513,9 +1513,138 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
   }
 
   /**
-   * Factory model API (§6.9 M1): `POST /models/v1/chat/completions` in OpenAI Chat Completions format.
+   * Image generation on the factory model API: `POST /models/v1/images/generations` in OpenAI Images format.
+   * Served only for a granted subscription catalog entry whose template names an image host. The OAuth token is
+   * sent only to that host. API-key catalog entries and the paid provider key are never used (M4, M5). The call must
+   * name the image model; current and primary chat slots are not applied. A run pin still binds via checkModel.
+   */
+  async function handleModelImages(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, raw: Buffer) {
+    const parsed = tryJson(raw) as Record<string, unknown> | undefined;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return deny(res, ctx, route, 400, 'invalid_json');
+    const prompt = parsed.prompt;
+    if (typeof prompt !== 'string' || !prompt.trim()) return deny(res, ctx, route, 400, 'missing_prompt');
+    const requestedName = typeof parsed.model === 'string' && parsed.model ? parsed.model : undefined;
+    if (!requestedName) return deny(res, ctx, route, 400, 'model_required');
+    const check = checkModel(modelPolicyOf(ctx), requestedName);
+    if (!check.allowed) return deny(res, ctx, route, check.status, check.code, check.detail);
+
+    replies.sawModelApiCall(ctx.run.runId);
+
+    const entry = findModel(activeCatalog, requestedName);
+    if (!entry) return deny(res, ctx, route, 503, 'model_not_offered', { model: requestedName });
+
+    const personalViolation = personalEntryViolation(entry, ctx);
+    if (personalViolation) return deny(res, ctx, route, 403, personalViolation, { model: requestedName });
+
+    if (!isSubscriptionEntry(entry)) {
+      return deny(res, ctx, route, 403, 'subscription_image_required', { model: requestedName });
+    }
+
+    const price = entry.price ?? priceFor(opts.prices, requestedName);
+    if (!price) return deny(res, ctx, route, 403, 'unpriced_model', { model: requestedName });
+
+    const isBuiltin = Boolean(ctx.isBuiltin || BUILTIN_AGENT_IDS.has(ctx.run.agentId));
+    if (!isBuiltin) {
+      const zeroPrice = isZeroPrice(price);
+      if (!zeroPrice && ctx.run.state === 'BLOCKED_BUDGET_EXCEEDED') {
+        return deny(res, ctx, route, 402, budgetError(ctx), { window: 'blocked' });
+      }
+      const standing = checkStanding({
+        limits: ctx.policy.budgetUsd,
+        spend: ctx.spend,
+        pendingUsd: unacked.get(ctx.run.runId) ?? 0,
+        selectedModelIsZeroPrice: zeroPrice,
+      });
+      if (!standing.inGoodStanding) {
+        return deny(res, ctx, route, 402, budgetError(ctx), { window: standing.window });
+      }
+    }
+
+    const skip = await subscriptionSkip(entry, ctx.run.agentId);
+    if (skip) {
+      const skipStatus = skip.reason === 'subscription_needs_reconsent' ? 503 : 429;
+      return deny(res, ctx, route, skipStatus, skip.reason, { model: requestedName, ...(skip.resetAt ? { resetAt: skip.resetAt } : {}) });
+    }
+    if (throttled(ctx)) return deny(res, ctx, route, 429, 'throttled');
+
+    const requestId = randomUUID();
+    const t0 = performance.now();
+    calls.get(res)?.start(requestedName);
+    const imageReq = {
+      prompt: prompt.trim(),
+      ...(typeof parsed.n === 'number' ? { n: parsed.n } : {}),
+      ...(typeof parsed.size === 'string' ? { size: parsed.size } : {}),
+      ...(typeof parsed.quality === 'string' ? { quality: parsed.quality } : {}),
+      ...(typeof parsed.response_format === 'string' ? { response_format: parsed.response_format } : {}),
+      ...(typeof parsed.aspect_ratio === 'string' ? { aspect_ratio: parsed.aspect_ratio } : {}),
+    };
+
+    try {
+      const result = await generateSubscriptionImage(subscriptionOptions, entry, imageReq);
+      m?.requests.add(1, { route: route.id, outcome: '200' });
+      m?.latency.record((performance.now() - t0) / 1000, { route: route.id });
+      const usage: Usage = result.usage
+        ? { model: requestedName, input: result.usage.input, output: result.usage.output, cacheRead: 0, cacheWrite: 0 }
+        : { model: requestedName, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      recordUsage(
+        ctx,
+        route,
+        {
+          usage,
+          model: requestedName,
+          price,
+          request: parsed,
+          requestId,
+          extra: {
+            provider: entry.provider,
+            upstreamModel: entry.id,
+            endpoint: 'images/generations',
+            ...catalogEntryLedgerMeta(entry),
+          },
+        },
+        res,
+      );
+      return send(res, 200, {
+        created: result.created ?? Math.floor(Date.now() / 1000),
+        data: result.data,
+        model: requestedName,
+      });
+    } catch (err) {
+      if (err instanceof SubscriptionNeedsReconsentError) {
+        reconsentUntil.set(entry.connection, nowMs() + RECONSENT_CACHE_MS);
+        markOutcome(res, 'error');
+        m?.requests.add(1, { route: route.id, outcome: 'subscription_needs_reconsent', agent: ctx.run.agentId });
+        return deny(res, ctx, route, 503, 'subscription_needs_reconsent', { model: requestedName });
+      }
+      if (err instanceof SubscriptionLimitError) {
+        const opened = await openWindow(err);
+        markOutcome(res, 'error');
+        const reason = err.kind === 'plan-limit' ? 'subscription_limit_reached' : 'subscription_tier_refused';
+        const status = err.kind === 'plan-limit' ? 429 : 403;
+        m?.requests.add(1, { route: route.id, outcome: reason, agent: ctx.run.agentId });
+        return deny(res, ctx, route, status, reason, { model: requestedName, ...(opened.resetAt ? { resetAt: opened.resetAt } : {}) });
+      }
+      const e = err instanceof ModelUpstreamError ? err : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      const outcome = /timeout|timed out/i.test(`${e?.code ?? ''} ${message}`) ? 'timeout' : 'error';
+      markOutcome(res, outcome);
+      m?.requests.add(1, { route: route.id, outcome: e?.code ?? 'upstream_error', agent: ctx.run.agentId });
+      console.error(`[gatekeeper-egress] images ${requestedName} via ${entry.provider}: ${e?.code ?? 'error'} ${e?.upstreamStatus ?? ''} ${message}`);
+      ledger(ctx, route, { type: 'action', action: 'MODEL_UPSTREAM_ERROR', model: requestedName, provider: entry.provider, upstreamStatus: e?.upstreamStatus, requestId, endpoint: 'images/generations' });
+      return send(res, e?.status ?? 502, {
+        error: e?.code ?? 'upstream_error',
+        message: redactSecrets(message, secretValues),
+        ...(e?.upstreamStatus ? { upstreamStatus: e.upstreamStatus } : {}),
+      });
+    }
+  }
+
+  /**
+   * Factory model API (§6.9 M1): `POST /models/v1/chat/completions` in OpenAI Chat Completions format,
+   * and `POST /models/v1/images/generations` for subscription image models.
    * The catalog maps the neutral model name to a provider adapter; the gatekeeper-egress signs the upstream call
-   * with its own credentials and never forwards the run token.
+   * with its own credentials and never forwards the run token. Image generation uses only the subscription OAuth
+   * token and never an API key.
    */
   async function handleModels(req: http.IncomingMessage, res: http.ServerResponse, ctx: RunContext, route: Route, rest: string, raw: Buffer) {
     // GAP-170/171: wait until a catalog has loaded; afterwards serve the last catalog and refresh in the background (LG1).
@@ -1544,6 +1673,7 @@ export function createGatekeeperEgress(opts: GatekeeperEgressOptions): http.Serv
         }),
       });
     }
+    if (req.method === 'POST' && path === '/v1/images/generations') return handleModelImages(req, res, ctx, route, raw);
     if (req.method !== 'POST' || path !== '/v1/chat/completions') return send(res, 404, { error: 'unknown_endpoint' });
 
     const parsed = tryJson(raw) as Record<string, unknown> | undefined;

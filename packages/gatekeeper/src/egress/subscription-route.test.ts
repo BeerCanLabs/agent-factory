@@ -82,6 +82,8 @@ const catalog = parseModelCatalog(
     'unpriced-sub': { provider: 'xai-subscription', id: 'grok-unpriced', credentialMode: 'subscription', scope: 'factory', connection: 'c-xai', templateId: 'xai-subscription' },
     'api-model': { provider: 'mock', id: 'mock-1', price: { inputPerMTok: 1, outputPerMTok: 2 } },
     'api-bad': { provider: 'mock', id: 'mock-503', price: { inputPerMTok: 1, outputPerMTok: 2 } },
+    'grok-imagine-sub': { provider: 'xai-subscription', id: 'grok-imagine-image-2.0', credentialMode: 'subscription', scope: 'factory', connection: 'c-xai', connectionName: 'Team Grok', templateId: 'xai-subscription', price: { inputPerMTok: 0, outputPerMTok: 0 } },
+    'imagine-api-key': { provider: 'xai', id: 'grok-imagine-image-2.0', credentialMode: 'api-key', price: { inputPerMTok: 2, outputPerMTok: 10 } },
   }),
 );
 
@@ -177,7 +179,7 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       : {}),
   });
 
-  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['models'], models: ['grok-sub', 'gpt-sub', 'grok-sub-2', 'api-model', 'api-bad'], ...p });
+  const policy = (p: Partial<Policy> = {}): Policy => ({ routes: ['models'], models: ['grok-sub', 'gpt-sub', 'grok-sub-2', 'api-model', 'api-bad', 'grok-imagine-sub', 'imagine-api-key'], ...p });
   const chatBody = (extra: Record<string, unknown> = {}) => ({ model: 'whatever', messages: [{ role: 'user', content: 'hello' }], ...extra });
   const ask = (p = port, body: unknown = chatBody()) => call(p, '/models/v1/chat/completions', { token: runToken, body });
   const settle = () => new Promise((r) => setTimeout(r, 30));
@@ -978,6 +980,119 @@ describe('subscription models on the factory model API (TSK-327)', { concurrency
       } finally {
         await new Promise<void>((r) => cachedEgress.close(() => r()));
       }
+    });
+  });
+
+  describe('subscription image generation', () => {
+    const imageOk = (data: unknown[] = [{ b64_json: 'ZmFrZQ==' }]) =>
+      new Response(JSON.stringify({ created: 1_700_000_000, data, usage: { input_tokens: 0, output_tokens: 0 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const imageBody = (extra: Record<string, unknown> = {}) => ({
+      model: 'grok-imagine-sub',
+      prompt: 'an inspirational office poster',
+      response_format: 'b64_json',
+      ...extra,
+    });
+    const imagine = (body: unknown = imageBody()) => call(port, '/models/v1/images/generations', { token: runToken, body });
+
+    it('serves a subscription image model through the OAuth image host only, never an API key', async () => {
+      vendorReply = () => imageOk();
+      const res = await imagine();
+      assert.equal(res.status, 200, res.text);
+      const body = res.json();
+      assert.equal(body.model, 'grok-imagine-sub');
+      assert.deepEqual(body.data, [{ b64_json: 'ZmFrZQ==' }]);
+      assert.equal(vendor.length, 1);
+      assert.equal(vendor[0].url, 'https://cli-chat-proxy.grok.com/v1/images/generations');
+      assert.equal(vendor[0].headers.authorization, `Bearer ${XAI_TOKEN}`);
+      assert.match(vendor[0].headers['user-agent'] ?? '', /BeerCanLabs-AgentFactory\/7\.7\.7/);
+      assert.equal(vendor[0].body.model, 'grok-imagine-image-2.0');
+      assert.equal(vendor[0].body.prompt, 'an inspirational office poster');
+      assert.equal(vendor[0].body.response_format, 'b64_json');
+      assert.equal(apiCalls, 0);
+      assert.deepEqual(tokenCalls, ['c-xai']);
+      await settle();
+      const llm = ledger.filter((e) => e.type === 'llm').at(-1);
+      assert.equal(llm?.model, 'grok-imagine-sub');
+      assert.equal(llm?.costUsd, 0);
+    });
+
+    it('refuses an API-key image model and does not call any vendor or API-key adapter', async () => {
+      vendorReply = () => imageOk();
+      const res = await imagine(imageBody({ model: 'imagine-api-key' }));
+      assert.equal(res.status, 403, res.text);
+      assert.equal(res.json().error, 'subscription_image_required');
+      assert.equal(vendor.length, 0);
+      assert.equal(apiCalls, 0);
+      assert.deepEqual(tokenCalls, []);
+    });
+
+    it('refuses a subscription template with no image host and does not fall back to chat inference or an API key', async () => {
+      vendorReply = () => imageOk();
+      const res = await imagine(imageBody({ model: 'gpt-sub' }));
+      assert.equal(res.status, 403, res.text);
+      assert.equal(res.json().error, 'subscription_image_unsupported');
+      assert.equal(vendor.length, 0);
+      assert.equal(apiCalls, 0);
+    });
+
+    it('does not rewrite an image call onto the current or primary chat model', async () => {
+      vendorReply = () => imageOk();
+      await setRun('donna', policy({ currentModel: 'grok-sub', primaryModel: 'api-model' }));
+      const res = await imagine();
+      assert.equal(res.status, 200, res.text);
+      assert.equal(vendor.length, 1);
+      assert.equal(vendor[0].url, 'https://cli-chat-proxy.grok.com/v1/images/generations');
+      assert.equal(vendor[0].body.model, 'grok-imagine-image-2.0');
+      assert.equal(apiCalls, 0);
+    });
+
+    it('a run pin still binds: a pin to a chat model does not fall back to an API key', async () => {
+      vendorReply = () => imageOk();
+      await setRun('donna', policy({ currentModel: 'grok-sub' }), { model: 'api-model' });
+      const res = await imagine();
+      assert.equal(res.status, 403, res.text);
+      assert.equal(res.json().error, 'model_pinned');
+      assert.equal(vendor.length, 0);
+      assert.equal(apiCalls, 0);
+    });
+
+    it('requires a granted model and a prompt', async () => {
+      vendorReply = () => imageOk();
+      const missingModel = await imagine({ prompt: 'poster' });
+      assert.equal(missingModel.status, 400);
+      assert.equal(missingModel.json().error, 'model_required');
+      const missingPrompt = await imagine({ model: 'grok-imagine-sub' });
+      assert.equal(missingPrompt.status, 400);
+      assert.equal(missingPrompt.json().error, 'missing_prompt');
+      const notAllowed = await imagine(imageBody({ model: 'not-granted' }));
+      assert.equal(notAllowed.status, 403);
+      assert.equal(notAllowed.json().error, 'model_not_allowed');
+      assert.equal(vendor.length, 0);
+    });
+
+    it('reports a vendor refusal and does not fall back to an API-key model', async () => {
+      vendorReply = () =>
+        new Response(JSON.stringify({ error: { message: 'images are not included in this plan' } }), {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        });
+      const res = await imagine();
+      assert.equal(res.status, 502, res.text);
+      assert.equal(res.json().error, 'upstream_error');
+      assert.equal(res.json().upstreamStatus, 403);
+      assert.equal(vendor.length, 1);
+      assert.equal(vendor[0].url, 'https://cli-chat-proxy.grok.com/v1/images/generations');
+      assert.equal(apiCalls, 0);
+    });
+
+    it('still 404s unknown model-API paths', async () => {
+      const res = await call(port, '/models/v1/images/edits', { token: runToken, body: imageBody() });
+      assert.equal(res.status, 404);
+      assert.equal(res.json().error, 'unknown_endpoint');
+      assert.equal(vendor.length, 0);
     });
   });
 });

@@ -152,6 +152,8 @@ export interface SubscriptionTemplate {
   tokenUrl: string;
   scopes: string[];
   inference: { upstream: string; path: string; adapter: 'responses' };
+  /** Optional OpenAI-compatible image generation host. Absent means the plan does not serve images on the subscription. Never the paid API-key host. */
+  imageInference?: { upstream: string; path: string };
   /** What a system created from this template carries as `aiProvider.adapter` and `aiProvider.discoveryPath`. */
   aiProvider: { adapter: 'openAiCompatible'; discoveryPath: string };
   headers: SubscriptionHeader[];
@@ -180,6 +182,10 @@ export const SUBSCRIPTION_TEMPLATES: Record<string, SubscriptionTemplate> = {
     tokenUrl: 'https://auth.x.ai/oauth2/token',
     scopes: ['openid', 'profile', 'email', 'offline_access', 'grok-cli:access', 'api:access'],
     inference: { upstream: 'https://api.x.ai', path: '/v1/responses', adapter: 'responses' },
+    // Subscription images are not served on the Responses host. The Grok CLI chat proxy is the
+    // OpenAI-compatible image path for a SuperGrok / X Premium token. The official api.x.ai
+    // image API is the paid API-key path and is never used here (M4, M5).
+    imageInference: { upstream: 'https://cli-chat-proxy.grok.com', path: '/v1/images/generations' },
     aiProvider: { adapter: 'openAiCompatible', discoveryPath: '/v1/models' },
     headers: [
       { name: 'User-Agent', value: 'BeerCanLabs-AgentFactory/{version}', role: 'factory-identity' },
@@ -252,9 +258,10 @@ function hostOf(url: string): string | undefined {
   }
 }
 
-/** Every sign-in, token and inference host a template names. */
+/** Every sign-in, token, chat-inference and image-inference host a template names. */
 export function subscriptionTemplateHosts(t: SubscriptionTemplate): string[] {
-  return [t.signIn.deviceCodeUrl, t.signIn.verificationUrl, t.tokenUrl, t.inference.upstream]
+  return [t.signIn.deviceCodeUrl, t.signIn.verificationUrl, t.tokenUrl, t.inference.upstream, t.imageInference?.upstream]
+    .filter((u): u is string => typeof u === 'string' && u.length > 0)
     .map(hostOf)
     .filter((h): h is string => h !== undefined);
 }

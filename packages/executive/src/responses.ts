@@ -255,6 +255,27 @@ export function subscriptionInferenceUrl(template: SubscriptionTemplate): string
   return new URL(template.inference.path, template.inference.upstream).toString();
 }
 
+/** The template's image-generation URL, or undefined when the plan does not serve images on the subscription. Never falls back to the chat inference host. */
+export function subscriptionImageUrl(template: SubscriptionTemplate): string | undefined {
+  if (!template.imageInference) return undefined;
+  return new URL(template.imageInference.path, template.imageInference.upstream).toString();
+}
+
+export type ImageGenerationRequest = {
+  prompt: string;
+  n?: number;
+  size?: string;
+  quality?: string;
+  response_format?: string;
+  aspect_ratio?: string;
+};
+
+export type ImageGenerationResult = {
+  created?: number;
+  data: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
+  usage: { input: number; output: number } | null;
+};
+
 async function resolveToken(
   opts: ResponsesAdapterOptions,
   connection: string,
@@ -351,6 +372,107 @@ export function subscriptionResponses(opts: ResponsesAdapterOptions): ModelAdapt
       if (body.error && typeof body.error === 'object') return fail(undefined, body, redact(String((body.error as { message?: unknown }).message ?? 'upstream error').slice(0, 500)), 200);
       return fromResponses(body);
     },
+  };
+}
+
+/**
+ * Generate images on a subscription connection (M1 image path, M4, M5).
+ * The OAuth token is sent only to the template's imageInference host. The paid API-key image API is never used, and
+ * the chat Responses host is never used as a fallback.
+ */
+export async function generateSubscriptionImage(
+  opts: ResponsesAdapterOptions,
+  entry: CatalogEntry,
+  req: ImageGenerationRequest,
+): Promise<ImageGenerationResult> {
+  if (entry.credentialMode !== 'subscription' || !entry.connection) {
+    throw new ModelUpstreamError(403, 'subscription_image_required', 'image generation is served only through a subscription connection');
+  }
+  const connection = entry.connection;
+  const seenTokens: string[] = [];
+  const redact = (s: string): string => {
+    let out = s;
+    for (const t of seenTokens) if (t) out = out.split(t).join('***');
+    return out;
+  };
+  let { tok, template } = await resolveToken(opts, connection);
+  seenTokens.push(tok.accessToken);
+  const url = subscriptionImageUrl(template);
+  if (!url) {
+    throw new ModelUpstreamError(403, 'subscription_image_unsupported', 'this subscription does not serve image generation');
+  }
+  const doFetch = opts.fetch ?? fetch;
+  const now = opts.now ?? Date.now;
+  const upstreamBody: Record<string, unknown> = { model: entry.id, prompt: req.prompt };
+  if (typeof req.n === 'number' && Number.isInteger(req.n) && req.n >= 1 && req.n <= 4) upstreamBody.n = req.n;
+  if (typeof req.size === 'string' && req.size) upstreamBody.size = req.size;
+  if (typeof req.quality === 'string' && req.quality) upstreamBody.quality = req.quality;
+  if (typeof req.response_format === 'string' && req.response_format) upstreamBody.response_format = req.response_format;
+  if (typeof req.aspect_ratio === 'string' && req.aspect_ratio) upstreamBody.aspect_ratio = req.aspect_ratio;
+  const sendOnce = async () => {
+    const headers = { ...subscriptionHeaders(template, tok, opts.version), 'Content-Type': 'application/json' };
+    try {
+      return await doFetch(url, {
+        method: 'POST',
+        // GAP-182: the token is bound to the template's image host; never follow a redirect elsewhere with it.
+        redirect: 'error',
+        headers,
+        body: JSON.stringify(upstreamBody),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 300_000),
+      });
+    } catch (err) {
+      throw new ModelUpstreamError(502, 'upstream_unreachable', redact(err instanceof Error ? err.message : String(err)));
+    }
+  };
+  let res = await sendOnce();
+  let text = await res.text();
+  if (res.status === 401 && !recogniseSubscriptionError(template, 401, (() => { try { return JSON.parse(text); } catch { return undefined; } })(), now())) {
+    ({ tok, template } = await resolveToken(opts, connection, { invalidate: true }));
+    seenTokens.push(tok.accessToken);
+    const retriedUrl = subscriptionImageUrl(template);
+    if (retriedUrl !== url) {
+      throw new ModelUpstreamError(502, 'upstream_error', 'the subscription template image host changed during token refresh');
+    }
+    res = await sendOnce();
+    text = await res.text();
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  const fail = (status: number | undefined, body: unknown, message: string, upstreamStatus: number): never => {
+    const hit = recogniseSubscriptionError(template, status, body, now());
+    if (hit) throw new SubscriptionLimitError(connection, hit.rec.kind, hit.rec.code, hit.resetAt, upstreamStatus);
+    if (status === 429) throw new ModelUpstreamError(429, 'upstream_throttled', message, upstreamStatus);
+    throw new ModelUpstreamError(502, 'upstream_error', message, upstreamStatus);
+  };
+  if (!res.ok) {
+    const parsed = json ?? (() => { try { return JSON.parse(text); } catch { return undefined; } })();
+    const errObj = (parsed as { error?: { message?: unknown } | string; detail?: unknown } | undefined);
+    const msg = typeof errObj?.error === 'object' ? errObj.error?.message : typeof errObj?.error === 'string' ? errObj.error : errObj?.detail;
+    return fail(res.status, parsed, redact(String(msg ?? text).slice(0, 500)), res.status);
+  }
+  const body = (json ?? {}) as { created?: unknown; data?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown; prompt_tokens?: unknown; completion_tokens?: unknown } };
+  const rows = Array.isArray(body.data) ? body.data : [];
+  const data: ImageGenerationResult['data'] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as { url?: unknown; b64_json?: unknown; revised_prompt?: unknown };
+    const item: ImageGenerationResult['data'][number] = {};
+    if (typeof r.url === 'string' && r.url) item.url = r.url;
+    if (typeof r.b64_json === 'string' && r.b64_json) item.b64_json = r.b64_json;
+    if (typeof r.revised_prompt === 'string' && r.revised_prompt) item.revised_prompt = r.revised_prompt;
+    if (item.url || item.b64_json) data.push(item);
+  }
+  if (data.length === 0) {
+    return fail(undefined, body, 'the vendor returned no image', 200);
+  }
+  const inTok = body.usage?.input_tokens ?? body.usage?.prompt_tokens;
+  const outTok = body.usage?.output_tokens ?? body.usage?.completion_tokens;
+  return {
+    ...(typeof body.created === 'number' ? { created: body.created } : {}),
+    data,
+    usage: typeof inTok === 'number' && typeof outTok === 'number' ? { input: inTok, output: outTok } : null,
   };
 }
 
