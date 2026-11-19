@@ -6,7 +6,7 @@
 
 export class UsageError extends Error {}
 
-export type Flags = { json: boolean; yes: boolean; active: boolean; limit?: number; attested?: boolean; noWait?: boolean };
+export type Flags = { json: boolean; yes: boolean; active: boolean; limit?: number; cap?: number; attested?: boolean; noWait?: boolean };
 
 export type CommandSpec = {
   name: string;
@@ -125,12 +125,12 @@ export const COMMANDS: CommandSpec[] = [
   {
     name: 'approve',
     tool: 'decide_approval',
-    usage: '/approve <id> [notes]',
+    usage: '/approve <id> [notes] [--cap usd]',
     summary: 'approve a held tool call',
     group: 'Approvals',
-    parse: (a) => {
+    parse: (a, f) => {
       if (!a[0]) throw new UsageError('give an approval id');
-      return { id: a[0], decision: 'approve', ...(a.length > 1 ? { notes: a.slice(1).join(' ') } : {}) };
+      return { id: a[0], decision: 'approve', ...(a.length > 1 ? { notes: a.slice(1).join(' ') } : {}), ...(f.cap !== undefined ? { capUsd: f.cap } : {}) };
     },
   },
   {
@@ -323,6 +323,10 @@ export function parseFlags(tokens: string[]): { args: string[]; flags: Flags } {
       const n = Number(tokens[++i]);
       if (!Number.isInteger(n) || n < 1) throw new UsageError('--limit needs a whole number of 1 or more');
       flags.limit = n;
+    } else if (t === '--cap') {
+      const raw = tokens[++i];
+      if (raw === undefined) throw new UsageError('--cap needs an amount in dollars, like 17 or $17');
+      flags.cap = money(raw, '--cap');
     } else if (t.startsWith('--')) throw new UsageError(`unknown option ${t}`);
     else args.push(t);
   }

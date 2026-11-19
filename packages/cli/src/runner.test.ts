@@ -138,6 +138,19 @@ describe('§6.17 CL11 running a command', () => {
     assert.deepEqual(f.seen.find((s) => s.method === 'POST')?.body, { decision: 'approve', notes: 'fine with "quotes" and spaces' });
   });
 
+  it('CL4 --cap is sent as capUsd on approve', async () => {
+    const { f } = setup();
+    route(f, 'POST /api/v1/approvals/12', { ok: true });
+    const client = new FactoryClient({ baseUrl: 'https://f.example.com', fetch: f.fetch, credential: async () => 'good-token' });
+    const io = { note: () => {}, confirm: async () => false };
+    const done = await runCommand({ client, roles: ['admin'], actor: 'a', argv: ['approve', '12', '--cap', '17', '--yes'], io });
+    assert.equal(done.ok, true, done.output);
+    assert.deepEqual(f.seen.find((s) => s.method === 'POST')?.body, { decision: 'approve', capUsd: 17 });
+    const dollar = await runCommand({ client, roles: ['admin'], actor: 'a', argv: ['approve', '12', '--cap', '$17', '--yes'], io });
+    assert.equal(dollar.ok, true, dollar.output);
+    assert.deepEqual(f.seen.filter((s) => s.method === 'POST').at(-1)?.body, { decision: 'approve', capUsd: 17 });
+  });
+
   it('CL4 in the conversation, a --yes inside quotes is part of the notes, not the flag', async () => {
     const { f, asked, run } = setup([false]);
     route(f, 'POST /api/v1/approvals/12', { ok: true });
