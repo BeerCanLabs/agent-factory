@@ -116,6 +116,29 @@ class TestSkills(unittest.TestCase):
         self.assertIn("skill-2", problems[0])
         self.assertIn("vendored module 'shared_util' collides with module from skill 'skill-1'", problems[0])
 
+    def test_identical_vendored_files_in_two_skills_do_not_collide(self):
+        # The SDLC story-breaker and DoR checker both vendor the same repo data and sibling package at one version.
+        for i in (1, 2):
+            d = self.skills_dir / f"same-{i}"
+            (d / "vendor" / "repo" / "shared").mkdir(parents=True)
+            (d / "vendor" / "repo" / "shared" / "rules.yaml").write_text("a: 1\n", encoding="utf-8")
+            (d / "vendor" / "sibling").mkdir()
+            (d / "vendor" / "sibling" / "__init__.py").write_text("TAG = 'same'\n", encoding="utf-8")
+            (d / "skill.yaml").write_text("entry: main.py\n", encoding="utf-8")
+            (d / "main.py").write_text(
+                "import sibling\n"
+                "def tools():\n"
+                f"    return [{{'name': 'tool{i}', 'description': 'd', 'parameters': {{}}, 'handler': lambda a, c: sibling.TAG}}]\n",
+                encoding="utf-8",
+            )
+        tools, problems = load_skills([{"id": "same-1"}, {"id": "same-2"}], skills_dir=str(self.skills_dir))
+        self.assertEqual(problems, [])
+        self.assertEqual([t.name for t in tools], ["tool1", "tool2"])
+        self.assertEqual([run_tool(t, "{}", {}) for t in tools], ["same", "same"])
+        (self.skills_dir / "same-2" / "vendor" / "repo" / "shared" / "rules.yaml").write_text("a: 2\n", encoding="utf-8")
+        _, problems = load_skills([{"id": "same-1"}, {"id": "same-2"}], skills_dir=str(self.skills_dir))
+        self.assertIn("vendored module 'repo' collides with module from skill 'same-1'", problems[0])
+
 
 
 class TestToolErrorsAreLogged(unittest.TestCase):

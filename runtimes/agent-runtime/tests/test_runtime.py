@@ -1074,3 +1074,12 @@ class TestHelperRunResult(Base):
         self.assertEqual(loop.text_of({"subagent": "juror", "prompt": task}), task)
         self.assertNotEqual(loop.text_of({"subagent": "juror", "instructions": brief}), "wake")
 
+
+
+
+class TestOutputCap(unittest.TestCase):
+    """A runtime turn's model reply may carry a hand-off's tool arguments (a few KB): 2048 tokens cut them off."""
+
+    def test_turn_reply_cap(self):
+        from runtime import factory as fmod
+        self.assertEqual(fmod.MAX_OUTPUT_TOKENS, 8192)
