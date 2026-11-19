@@ -45,13 +45,19 @@ export function parseCapUsd(v: unknown): number | null {
 }
 
 /**
- * #524: the factory user an actor is, when the principal store names one: `cloudflare:<email>` and `user:<id>` are the
- * same person when the store maps that email to that `user:<id>`. Undefined when there is no store, it is unhealthy, the
- * actor is not a principal actor, or no record exists (a deterministic `user:<email>` fallback is not a person on file).
+ * #524: the factory user an actor is, when the principal store names one. Only the two forms the factory verifies are
+ * resolved: `user:<id>` and `cloudflare:<email>` (the same person when the store has that email on that `user:<id>`).
+ * Undefined for every other form, `oidc:` and unprefixed actors included (an `oidc:<sub>` is never matched to a user by
+ * id), and when there is no store, it is unhealthy, or no record exists (a deterministic `user:<email>` fallback is not a
+ * person on file).
  */
 function factoryUserOf(state: FactoryState, actor: string): string | undefined {
   const store = state.principals;
   if (!store || !store.healthy) return undefined;
+  const lower = actor.trim().toLowerCase();
+  const isUser = lower.startsWith('user:');
+  const isCloudflareEmail = lower.startsWith('cloudflare:') && lower.slice('cloudflare:'.length).includes('@');
+  if (!isUser && !isCloudflareEmail) return undefined;
   try {
     const id = normalizeActorToPrincipal(actor, store);
     return id.startsWith('user:') && store.get(id) ? id : undefined;

@@ -349,6 +349,34 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
       assert.equal(state.approvals.get(h.approvalId)?.state, 'pending', 'refusals leave the hold for the real approver');
     });
 
+    it('B1: an `oidc:` actor is never aliased to a factory user, as decider or as link actor; exact matches still count', async () => {
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      const oidcActors = ['oidc:dale.sackrider', 'oidc:dale.sackrider@gmail.com'];
+      // As the deciding actor: no exact link, so nothing names `dsackr` through the store.
+      for (const actor of oidcActors) {
+        assert.equal(githubLoginOf(state, actor), undefined, actor);
+        const out = await decideApproval(state, h.approvalId, 'reject', admin(actor));
+        assert.equal(out.status, 403, actor);
+        assert.equal((out.body as { error: string }).error, 'not_an_approver', actor);
+        const viaMcp = await mcpDecide(actor, h.approvalId);
+        assert.equal(viaMcp.result?.structuredContent?.error, 'not_an_approver', actor);
+      }
+      assert.equal(state.approvals.get(h.approvalId)?.state, 'pending');
+      // As the link actor: a login linked to an `oidc:` actor is not the factory user's.
+      state.identityLinks!.unlink('github', 'dsackr');
+      state.identityLinks!.link('github', 'oidc-sub-login', 'oidc:dale.sackrider', 'admin');
+      state.identityLinks!.link('github', 'oidc-email-login', 'oidc:dale.sackrider@gmail.com', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined, 'no alias through an oidc: link');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), undefined, 'no alias through an oidc: link');
+      // The exact actor string still finds its own link, as before #524.
+      assert.equal(githubLoginOf(state, 'oidc:dale.sackrider'), 'oidc-sub-login');
+      assert.equal(githubLoginOf(state, 'OIDC:Dale.Sackrider@gmail.com'), 'oidc-email-login');
+      // With `dsackr` back on the Cloudflare actor, the alias names it alone; the oidc: links do not join in.
+      state.identityLinks!.link('github', 'dsackr', 'cloudflare:dale.sackrider@gmail.com', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'dsackr');
+    });
+
     it('more than one distinct GitHub login across the same person\'s actors names none', async () => {
       const { token } = await liveRun();
       const { body: h } = await call(holdPath(), 'PUT', token, ask);
