@@ -6552,13 +6552,17 @@ export function createProbeServer(): http.Server {
 
 /**
  * GAP-255: a deployment setting is never a credential the factory already holds. Checked on every route that writes a
- * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches).
+ * policy's env. Values and secrets shorter than 8 characters are not compared (too many false matches). Every env
+ * value is checked against secretValues, including values already stored. The error names the offending env key,
+ * never its value. Public GitHub App ids and slugs are kept out of secretValues at the source (isPublicSecretName).
  */
 function policyEnvSecretError(state: FactoryState, policy: AgentPolicy): string | undefined {
-  const values = Object.values(policy.env ?? {}).filter((v) => v.length >= 8);
-  if (!values.length) return undefined;
+  const entries = Object.entries(policy.env ?? {}).filter(([, v]) => v.length >= 8);
+  if (!entries.length) return undefined;
   for (const secret of state.secretValues) {
-    if (secret.length >= 8 && values.some((v) => v.includes(secret))) return 'env carries a secret value: set it as the agent\'s secret instead';
+    if (secret.length < 8) continue;
+    const hit = entries.find(([, v]) => v.includes(secret));
+    if (hit) return `env ${hit[0]} carries a secret value: set it as the agent's secret instead`;
   }
   return undefined;
 }

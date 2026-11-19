@@ -51,6 +51,16 @@ export async function readSecret(state: FactoryState, name: string): Promise<str
 }
 
 const SECRET_TTL_MS = 5 * 60_000;
+
+/**
+ * Env secret check: a GitHub App's id and slug are public (the slug is in the app's URL and in its bot
+ * login, `<slug>[bot]`, which fleet config names on purpose). They are stored next to the app's key for convenience but
+ * are not secrets, so reading them never adds them to the redaction / secret-value set. The private key and webhook
+ * secret are not matched (`..._PRIVATE_KEY`, `..._WEBHOOK_SECRET`).
+ */
+export function isPublicSecretName(name: string): boolean {
+  return /^GITHUB_APP_[A-Z0-9_]+_(ID|SLUG)$/.test(name);
+}
 const reading = new WeakMap<FactoryState, Map<string, Promise<string | undefined>>>();
 const generations = new WeakMap<FactoryState, Map<string, number>>();
 
@@ -86,7 +96,7 @@ export async function readSecretCached(state: FactoryState, name: string, ttlMs 
       // A value read before an invalidation is returned to this caller but not cached.
       if (v && (generations.get(state)?.get(name) ?? 0) === gen) {
         cache.set(name, { value: v, at: Date.now() });
-        if (v.length >= 4) state.secretValues.add(v);
+        if (v.length >= 4 && !isPublicSecretName(name)) state.secretValues.add(v);
       }
       return v;
     })

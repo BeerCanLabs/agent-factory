@@ -10,7 +10,7 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { MemoryRunStore } from '@beercanlabs/factory-property-manager';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
-import { invalidateSecret, readSecretCached } from './app-setup-providers.js';
+import { invalidateSecret, isPublicSecretName, readSecretCached } from './app-setup-providers.js';
 
 // #501: a cold installation-key mint must fit inside the gatekeeper-egress's 10 s call. Secret reads (each an AWS
 // CLI spawn in prod) are cached and run together, concurrent mints are shared, installation ids are kept, the route
@@ -220,6 +220,26 @@ describe('GitHub App token latency (#501)', { concurrency: false }, () => {
     } finally {
       restore();
       cleanupSecrets([C], ['old-value-c', 'new-value-c']);
+    }
+  });
+
+  it('an app id and slug are public: reading them never adds them to the secret-value set; the key and webhook secret are', async () => {
+    const n = githubAppSecretNames('pub-check-agent');
+    assert.equal(isPublicSecretName(n.id), true);
+    assert.equal(isPublicSecretName(n.slug), true);
+    assert.equal(isPublicSecretName(n.privateKey), false);
+    assert.equal(isPublicSecretName(n.webhookSecret), false);
+    assert.equal(isPublicSecretName('SOME_OTHER_SLUG'), false, 'only GitHub App names are public');
+    const values: Record<string, string> = { [n.id]: '12345678', [n.slug]: 'pub-check-agent-factory-abcd', [n.privateKey]: 'pem-value-not-public', [n.webhookSecret]: 'webhook-secret-not-public' };
+    for (const [k, v] of Object.entries(values)) stored.set(k, v);
+    try {
+      for (const k of Object.keys(values)) assert.equal(await readSecretCached(state, k), values[k]);
+      assert.equal(state.secretValues.has(values[n.id]), false, 'the app id is not a secret value');
+      assert.equal(state.secretValues.has(values[n.slug]), false, 'the slug is not a secret value');
+      assert.equal(state.secretValues.has(values[n.privateKey]), true, 'the private key is');
+      assert.equal(state.secretValues.has(values[n.webhookSecret]), true, 'the webhook secret is');
+    } finally {
+      cleanupSecrets(Object.keys(values), Object.values(values));
     }
   });
 });
