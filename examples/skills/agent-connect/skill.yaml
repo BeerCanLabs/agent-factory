@@ -1,0 +1,17 @@
+spec: 1
+id: agent-connect
+version: 1.0.0
+name: Agent connect
+description: Let this agent run a one-shot errand to another factory agent, or return a structured live-call intent the robot opens itself.
+language: python
+entry: agent_connect
+# The factory URL and an agent-bound API key are bound as credentials on the adopting agent (Rosie).
+# No egress route is required when the runtime already reaches the control plane.
+requires:
+  routes: []
+smoke:
+  action: call_agent
+  input:
+    agent: donna
+    speaker: dale
+    dryRun: true

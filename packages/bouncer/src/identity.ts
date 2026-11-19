@@ -286,6 +286,16 @@ export type AuthenticatedCaller = {
   /** E12, GAP-131: set on a scheduled run, with the schedule's name; absent on a person's message. */
   source?: 'schedule';
   scheduleName?: string;
+  /** Set when the factory verified a speak-as grant and stamped this person as the speaker. */
+  verified?: boolean;
+  /** Transport, e.g. 'voice' or 'text'. */
+  channel?: string;
+  /** Transport client only, e.g. 'agent:rosie'. Not the speaker. */
+  via?: string;
+  /** How the client identified the speaker, e.g. 'voice-asserted'. */
+  assurance?: string;
+  /** 'call' = live conversation; 'errand' = one-shot task for the via client to relay. */
+  mode?: 'call' | 'errand';
 };
 
 export type IngressPrivilege = 'agents.wake' | 'agents.converse';

@@ -7,7 +7,7 @@ import { actorIsAdmin, identify, json, readJson, type FactoryState } from './app
 /**
  * S5 (R6, D3, D10, D14, D23): issue, rotate, revoke and list factory API keys.
  * - A person manages keys they own. An admin manages anyone's (directly with `owner`, or by acting as them).
- * - `service:<name>` machine keys and their roles are admin-only.
+ * - `service:<name>` machine keys and `agent:<id>` keys, and their roles, are admin-only. An agent key requires the agent to be registered.
  * - A request authenticated by an API key cannot manage keys (no key minting keys).
  * - The plaintext is returned once, on create/rotate, and never logged.
  */
@@ -86,9 +86,20 @@ export async function handleKeysRoutes(
       forbid(res);
       return true;
     }
+    if (owner.startsWith('agent:')) {
+      if (!c.isAdmin) {
+        forbid(res);
+        return true;
+      }
+      const agentId = owner.slice('agent:'.length);
+      if (!state.agents.get(agentId)) {
+        json(res, 400, { error: 'unknown_agent', message: `agent '${agentId}' is not registered` });
+        return true;
+      }
+    }
     const roles = Array.isArray(body.roles) ? (body.roles as unknown[]) : undefined;
     if (roles && (!c.isAdmin || roles.some((r) => typeof r !== 'string' || !(ROLES as readonly string[]).includes(r)))) {
-      json(res, 400, { error: 'invalid_roles', message: 'roles are admin-set on service keys and must be known roles' });
+      json(res, 400, { error: 'invalid_roles', message: 'roles are admin-set on service and agent keys and must be known roles' });
       return true;
     }
     try {

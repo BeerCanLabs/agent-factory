@@ -49,6 +49,7 @@ export class ApiKeyStoreError extends Error {
 
 const USER_OWNER = /^user:[A-Za-z0-9!#$%&'*+/=?^_`{|}~@.-]{1,315}$/;
 const SERVICE_OWNER = /^service:[a-z0-9][a-z0-9-]{0,62}$/;
+const AGENT_OWNER = /^agent:[a-z0-9][a-z0-9-]{0,62}$/;
 const DEVICE_FAMILY = /^(?:[a-z0-9][a-z0-9._-]{0,63}|mcp:[a-z0-9._-]{1,60})$/;
 
 export function publicKeyView(k: ApiKeyRecord): Omit<ApiKeyRecord, 'hash' | 'graceHash'> {
@@ -152,8 +153,9 @@ export class ApiKeyStore {
       this.assertHealthy();
       const owner = String(input.owner ?? '').trim().toLowerCase();
       const isUser = USER_OWNER.test(owner);
-      if (!isUser && !SERVICE_OWNER.test(owner)) {
-        throw new ApiKeyStoreError(400, 'invalid_owner', 'owner must be user:<id> or service:<name>');
+      const isAgent = AGENT_OWNER.test(owner);
+      if (!isUser && !SERVICE_OWNER.test(owner) && !isAgent) {
+        throw new ApiKeyStoreError(400, 'invalid_owner', 'owner must be user:<id>, service:<name>, or agent:<id>');
       }
       let deviceFamily: string | undefined;
       if (isUser) {

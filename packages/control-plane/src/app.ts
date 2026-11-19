@@ -64,6 +64,7 @@ import {
   type GrantStore,
   type PrincipalStore,
   type Privilege,
+  type SpeakAsGrantStore,
 } from '@beercanlabs/factory-bouncer';
 import { validatePolicy, applyModelsRemoval, effectiveAgentModels, type AgentPolicy, type PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
@@ -106,6 +107,8 @@ import { handleSchedules, requesterOfRun, requestersEqual } from './schedules.js
 import { handleIdentityLinks, type IdentityLinkStore } from './identity-links.js';
 import { handleGroupRoutes } from './group-routes.js';
 import { handleKeysRoutes } from './keys-routes.js';
+import { handleSpeakAsRoutes } from './speak-as-routes.js';
+import { applySpeakAs, clientHasSpeakAsGrant, parseSpeakAsFromRequest, type VoiceConversation } from './speak-as-converse.js';
 import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
@@ -150,9 +153,9 @@ import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel
 export const FACTORY_GITHUB_WEBHOOK_SECRET = 'FACTORY_GITHUB_WEBHOOK_SECRET';
 
 /** AM2: a console turn the agent may answer through `POST /runs/:id/reply`. */
-export type ConsoleTurn = { agentId: string; actor: string; at: number };
+export type ConsoleTurn = { agentId: string; actor: string; at: number; via?: string; conversationId?: string };
 /** AM2: a reply to a console turn, readable only by the person who asked. */
-export type ConsoleReply = { seq: number; agentId: string; actor: string; turnId: string; runId: string; content: string; footnote?: string; at: string };
+export type ConsoleReply = { seq: number; agentId: string; actor: string; turnId: string; runId: string; content: string; footnote?: string; at: string; via?: string; conversationId?: string };
 
 /** AM2: how long a console turn can be answered, and how many replies the factory keeps for the console to collect. */
 const CONSOLE_TURN_TTL_MS = 60 * 60 * 1000;
@@ -326,6 +329,10 @@ export type FactoryState = {
   consoleTurns?: Map<string, ConsoleTurn>;
   /** AM2: replies to console turns, kept briefly for the person who asked (never for anyone else). */
   consoleReplies?: ConsoleReply[];
+  /** Standing grants that let a client open conversations as an enrolled person. */
+  speakAs?: SpeakAsGrantStore;
+  /** Live connected-call (and errand) conversations opened under a speak-as grant, by conversation id. */
+  voiceConversations?: Map<string, VoiceConversation>;
   /** Human decision challenges minted over MCP (E9, 10-minute TTL). */
   mcpChallenges?: Map<string, McpChallengeRecord>;
   /** Session-bound secret handoffs minted over MCP (CL6, 10-minute TTL). */
@@ -357,6 +364,12 @@ type Outcome<T> = { status: number; body: T | { error: string; [k: string]: unkn
 export function json(res: http.ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+/** Agent-visible speak-as caller: the enrolled person, with no onBehalfOf or key roles. */
+export function leanDeliveredCaller(caller: AuthenticatedCaller | undefined): { actor: string; verified: true; channel: string; via: string; assurance: string; mode: 'call' | 'errand' } | undefined {
+  if (!caller?.verified || !caller.via || !caller.channel || !caller.assurance || (caller.mode !== 'call' && caller.mode !== 'errand')) return undefined;
+  return { actor: caller.actor, verified: true, channel: caller.channel, via: caller.via, assurance: caller.assurance, mode: caller.mode };
 }
 
 function readBodyBytes(req: http.IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
@@ -2086,11 +2099,11 @@ async function handOff(
 }
 
 /** AM2: a console turn the agent may answer, kept for an hour; the oldest are dropped past the cap. */
-function rememberConsoleTurn(state: FactoryState, turnId: string, agentId: string, actor: string): void {
+function rememberConsoleTurn(state: FactoryState, turnId: string, agentId: string, actor: string, extra?: { via?: string; conversationId?: string }): void {
   if (!state.consoleTurns) state.consoleTurns = new Map();
   const now = Date.now();
   for (const [id, t] of state.consoleTurns) if (now - t.at > CONSOLE_TURN_TTL_MS || state.consoleTurns.size >= CONSOLE_TURNS_KEPT) state.consoleTurns.delete(id);
-  state.consoleTurns.set(turnId, { agentId, actor, at: now });
+  state.consoleTurns.set(turnId, { agentId, actor, at: now, ...(extra?.via ? { via: extra.via } : {}), ...(extra?.conversationId ? { conversationId: extra.conversationId } : {}) });
 }
 
 /**
@@ -3441,6 +3454,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
   if (path.startsWith('/api/v1/setup/') && (await handleSetupRoutes(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keys') && (await handleKeysRoutes(state, req, res, path))) return;
+  if ((path.startsWith('/api/v1/speak-as') || path.startsWith('/api/v1/speak-as-grants')) && (await handleSpeakAsRoutes(state, req, res, path))) return;
   if (path === '/api/v1/submissions/interview' && (await handleInterview(state, req, res, path))) return;
   if ((path.startsWith('/api/v1/submissions') || path.startsWith('/api/v1/budget/submissions/')) && (await handleSubmissions(state, req, res, path))) return;
 
@@ -3996,9 +4010,16 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     if (runSelf[2] === 'input') {
       void markRunReady(state, run.runId);
       const now = new Date();
+      let input: unknown = run.input ?? null;
+      const delivered = leanDeliveredCaller(run.caller);
+      if (typeof input === 'string') {
+        input = { text: input, ...(delivered ? { caller: delivered } : {}) };
+      } else if (input && typeof input === 'object' && !Array.isArray(input) && delivered) {
+        input = { ...(input as Record<string, unknown>), caller: delivered };
+      }
       json(res, 200, {
         runId: run.runId,
-        input: run.input ?? null,
+        input,
         temporal: {
           local: now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'full', timeStyle: 'long' }),
           utc: now.toISOString(),
@@ -4030,7 +4051,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       }
       const content = typeof sanitized === 'string' ? sanitized : JSON.stringify(sanitized);
       const footnote = resultFootnote(content, runRows);
-      const reply: ConsoleReply = { seq: nextReplySeq(), agentId: run.agentId, actor: turn.actor, turnId: body.turnId as string, runId: run.runId, content, ...(footnote ? { footnote } : {}), at: new Date().toISOString() };
+      const reply: ConsoleReply = { seq: nextReplySeq(), agentId: run.agentId, actor: turn.actor, turnId: body.turnId as string, runId: run.runId, content, ...(footnote ? { footnote } : {}), at: new Date().toISOString(), ...(turn.via ? { via: turn.via } : {}), ...(turn.conversationId ? { conversationId: turn.conversationId } : {}) };
       if (!state.consoleReplies) state.consoleReplies = [];
       state.consoleReplies.push(reply);
       const theirs = state.consoleReplies.filter((r) => r.actor === reply.actor);
@@ -4508,30 +4529,58 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       }
       caller = resolved.caller;
     }
+    const fields = parseSpeakAsFromRequest(req, rawBody && typeof rawBody === 'object' ? rawBody : undefined);
+    const clientActor = principal.actor;
+    const wantsSpeakAs = Boolean(fields.speaker || fields.conversationId || clientHasSpeakAsGrant(state, clientActor));
+    let conversationId: string | undefined;
+    let delivered = leanDeliveredCaller(caller);
+    if (wantsSpeakAs) {
+      const applied = applySpeakAs(state, { client: clientActor, targetAgentId: agent.id, fields });
+      if (!applied.ok) {
+        json(res, applied.status, { error: applied.error, message: applied.message });
+        return;
+      }
+      delivered = applied.delivered;
+      conversationId = applied.conversation.id;
+      caller = { actor: applied.delivered.actor, role: 'operator', roles: [], verified: true, channel: applied.delivered.channel, via: applied.delivered.via, assurance: applied.delivered.assurance, mode: applied.delivered.mode };
+    }
     const turnId = randomUUID();
 
     // Input hygiene: unwrap body.input if sent as { input, requestedBy }, strip unverified caller
     let payload = (rawBody && typeof rawBody === 'object' && 'input' in rawBody && rawBody.input !== undefined) ? rawBody.input : rawBody;
+    if (typeof payload === 'string') {
+      payload = { text: payload };
+    }
     if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
       const copy = { ...(payload as Record<string, unknown>) };
       delete copy.caller;
+      delete copy.onBehalfOf;
+      delete copy.speaker;
+      delete copy.asUser;
+      delete copy.assurance;
+      delete copy.channel;
+      delete copy.mode;
+      delete copy.conversationId;
+      delete copy.waitSeconds;
       // AM2: the turn id and reply address are the factory's to set, never the sender's.
       delete copy.turnId;
       delete copy.replyTo;
-      if (caller) {
-        copy.caller = { ...caller };
+      const visibleCaller = delivered ?? (caller ? { ...caller } : undefined);
+      if (visibleCaller) {
+        copy.caller = { ...visibleCaller };
       }
       copy.turnId = turnId;
+      if (conversationId) copy.conversationId = conversationId;
       const replyTo = replyAddress(isIngress, caller, copy);
       if (replyTo) copy.replyTo = replyTo;
       payload = copy;
     } else if (payload === undefined) {
-      payload = { ...(caller ? { caller: { ...caller } } : {}), turnId, ...(isIngress ? {} : { replyTo: { channel: 'console' } }) };
+      payload = { ...(delivered ?? caller ? { caller: { ...(delivered ?? caller)! } } : {}), turnId, ...(conversationId ? { conversationId } : {}), ...(isIngress ? {} : { replyTo: { channel: 'console' } }) };
     }
     const shaped = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as { turnId?: string; replyTo?: { channel?: string } }) : undefined;
     const replyTo = shaped?.replyTo;
-    const answerable = shaped?.turnId === turnId ? { turnId } : {};
-    if (replyTo?.channel === 'console' && caller) rememberConsoleTurn(state, turnId, agent.id, caller.actor);
+    const answerable = shaped?.turnId === turnId ? { turnId, ...(conversationId ? { conversationId } : {}), ...(delivered ? { caller: delivered } : {}) } : {};
+    if (replyTo?.channel === 'console' && caller) rememberConsoleTurn(state, turnId, agent.id, caller.actor, { via: delivered?.via ?? caller.via, conversationId });
 
     const handed = await handOff(state, agent, principal.actor, payload, { requestedBy, caller });
 
@@ -4645,10 +4694,15 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
     const effectivePerson = principal.onBehalfOf ?? principal.actor;
     const url = new URL(req.url ?? '/', 'http://factory.local');
     const after = Number(url.searchParams.get('after') ?? 0) || 0;
+    const conversationId = url.searchParams.get('conversationId') ?? undefined;
     const replies = (state.consoleReplies ?? [])
-      .filter((r) => r.agentId === repliesMatch[1] && r.actor === effectivePerson && r.seq > after)
-      .map(({ seq, turnId, runId, content, footnote, at }) => ({ seq, turnId, runId, content, ...(footnote ? { footnote } : {}), at }));
-    json(res, 200, { replies });
+      .filter((r) => r.agentId === repliesMatch[1] && r.seq > after)
+      .filter((r) => {
+        if (conversationId) return r.conversationId === conversationId && (r.via === principal.actor || r.actor === effectivePerson);
+        return r.actor === effectivePerson || r.via === principal.actor;
+      })
+      .map(({ seq, turnId, runId, content, footnote, at, conversationId: cid }) => ({ seq, turnId, runId, content, ...(footnote ? { footnote } : {}), at, ...(cid ? { conversationId: cid } : {}) }));
+    json(res, 200, { replies, ...(conversationId ? { conversationId } : {}) });
     return;
   }
 

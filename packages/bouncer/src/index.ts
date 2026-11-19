@@ -110,3 +110,27 @@ export {
 } from './grants.js';
 
 export { ApiKeyStore, ApiKeyStoreError, BREAK_GLASS_OWNER, publicKeyView, type ApiKeyRecord, type ApiKeysDoc } from './keys.js';
+
+export type {
+  DeliveredCaller,
+  SpeakAsDoc,
+  SpeakAsGrant,
+  SpeakAsMember,
+  SpeakAsMode,
+  SpeakAsVerifyErr,
+  SpeakAsVerifyInput,
+  SpeakAsVerifyResult,
+} from './speak-as.js';
+export {
+  SpeakAsGrantStore,
+  SpeakAsStoreError,
+  deliveredCaller,
+  isGrantActive,
+  memberAllowsAgent,
+  normalizeClient,
+  normalizeMember,
+  normalizeUserPrincipal,
+  resolveSpeaker,
+  verifySpeakAs,
+  verifySpeakAsRequest,
+} from './speak-as.js';

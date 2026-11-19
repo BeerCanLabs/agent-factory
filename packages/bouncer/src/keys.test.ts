@@ -36,4 +36,16 @@ describe('S5 ApiKeyStore', () => {
     assert.equal(broken.healthy, false);
     assert.equal(broken.verify('fk_anything'), undefined);
   });
+
+  it('accepts agent:<id> owners with admin-set roles, like service keys', async () => {
+    const store = await ApiKeyStore.open(new MemoryDocBackend<ApiKeysDoc>());
+    const a = await store.create({ owner: 'agent:rosie', roles: ['operator'], by: 'user:admin' });
+    assert.equal(a.record.owner, 'agent:rosie');
+    assert.deepEqual(a.record.roles, ['operator']);
+    assert.match(a.plaintext, /^fk_/);
+    assert.equal(store.verify(a.plaintext)?.owner, 'agent:rosie');
+    await assert.rejects(store.create({ owner: 'agent:Rosie!', by: 'user:admin' }), ApiKeyStoreError);
+  });
+
 });
+

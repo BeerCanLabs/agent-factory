@@ -143,3 +143,8 @@ npm test -w @beercanlabs/factory-control-plane # includes cli.e2e.test.ts agains
 ```
 
 Not tested here: the real Keychain, the `cloudflared` browser login, and a real model driving the tools. Try those on a Mac against your factory.
+
+
+## Speak-as grants
+
+Admins manage household speak-as grants with `factory speak-as` (`list`, `show`, `grant`, `enroll`, `unenroll`, `revoke`). See [SPEAK_AS.md](./SPEAK_AS.md).

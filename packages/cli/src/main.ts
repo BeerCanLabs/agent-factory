@@ -184,6 +184,110 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     return 0;
   }
 
+  if (cmd === 'speak-as' || cmd === 'speakas') {
+    // Admin-managed grants: a client may open conversations as enrolled household members.
+    const instance = await instanceInUse();
+    const kind = await knownMethod(instance, (await loadConfig()).auth, store);
+    if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login --url ${instance}`);
+    const session = makeSession(kind, instance, { store });
+    const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh), ...(actAs ? { actAs } : {}) });
+    const sub = arg ?? 'list';
+    const rest = argv.slice(2);
+    const flag = (name: string): string | undefined => {
+      const i = rest.indexOf(name);
+      if (i < 0 || rest[i + 1] === undefined) return undefined;
+      return rest[i + 1];
+    };
+    const flags = (name: string): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < rest.length; i++) if (rest[i] === name && rest[i + 1]) out.push(rest[++i]!);
+      return out;
+    };
+    const fail = (r: { status: number; body: unknown }, usage: string) => {
+      if (r.status >= 300) {
+        const body = r.body as { error?: string; message?: string };
+        throw new Error(body?.message ? `${body.error}: ${body.message}` : `the factory refused (HTTP ${r.status})`);
+      }
+    };
+    if (sub === 'list') {
+      const c = flag('--client');
+      const qs = c ? `?client=${encodeURIComponent(c)}` : '';
+      const r = await client.request('GET', `/api/v1/speak-as-grants${qs}`);
+      fail(r, 'factory speak-as list [--client agent:<id>]');
+      const grants = ((r.body as { grants?: unknown[] }).grants ?? []);
+      await writeAll(streams.stdout, `${grants.length ? JSON.stringify(grants, null, 2) : 'No speak-as grants.'}\n`);
+      return 0;
+    }
+    if (sub === 'show') {
+      const id = rest[0];
+      if (!id) throw new Error('usage: factory speak-as show <grant-id>');
+      const r = await client.request('GET', `/api/v1/speak-as-grants/${encodeURIComponent(id)}`);
+      fail(r, 'factory speak-as show <grant-id>');
+      await writeAll(streams.stdout, `${JSON.stringify((r.body as { grant?: unknown }).grant ?? r.body, null, 2)}\n`);
+      return 0;
+    }
+    if (sub === 'grant' || sub === 'create') {
+      const grantClient = flag('--client');
+      const member = flag('--member') ?? flag('--user');
+      if (!grantClient || !member) throw new Error('usage: factory speak-as grant --client agent:<id> --member user:<id> [--alias dale] [--agents donna,higgins] [--days 90] [--expires <iso>] [--purpose "<text>"]');
+      const aliases = flags('--alias');
+      const agentsRaw = flag('--agents');
+      const days = flag('--days');
+      const expiresFlag = flag('--expires');
+      let expiresAt: string | null = expiresFlag ?? null;
+      if (!expiresAt && days) {
+        const n = Number(days);
+        if (!Number.isFinite(n) || n <= 0) throw new Error('--days must be a positive number');
+        expiresAt = new Date(Date.now() + n * 86400000).toISOString();
+      }
+      const purpose = flag('--purpose');
+      const memberBody: Record<string, unknown> = { principalId: member };
+      if (aliases.length) memberBody.aliases = aliases;
+      if (agentsRaw) memberBody.targetAgents = agentsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+      const r = await client.request('POST', '/api/v1/speak-as-grants', {
+        client: grantClient,
+        members: [memberBody],
+        expiresAt,
+        ...(purpose ? { purpose } : {}),
+      });
+      fail(r, 'factory speak-as grant');
+      await writeAll(streams.stdout, `${JSON.stringify((r.body as { grant?: unknown }).grant ?? r.body, null, 2)}\n`);
+      return 0;
+    }
+    if (sub === 'enroll') {
+      const id = rest[0];
+      const member = flag('--member') ?? flag('--user');
+      if (!id || !member) throw new Error('usage: factory speak-as enroll <grant-id> --member user:<id> [--alias name] [--agents higgins]');
+      const aliases = flags('--alias');
+      const agentsRaw = flag('--agents');
+      const body: Record<string, unknown> = { principalId: member };
+      if (aliases.length) body.aliases = aliases;
+      if (agentsRaw) body.targetAgents = agentsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+      const r = await client.request('POST', `/api/v1/speak-as-grants/${encodeURIComponent(id)}/members`, body);
+      fail(r, 'factory speak-as enroll');
+      await writeAll(streams.stdout, `${JSON.stringify((r.body as { grant?: unknown }).grant ?? r.body, null, 2)}\n`);
+      return 0;
+    }
+    if (sub === 'unenroll') {
+      const id = rest[0];
+      const member = flag('--member') ?? flag('--user') ?? rest[1];
+      if (!id || !member) throw new Error('usage: factory speak-as unenroll <grant-id> --member user:<id>');
+      const r = await client.request('DELETE', `/api/v1/speak-as-grants/${encodeURIComponent(id)}/members/${encodeURIComponent(member)}`);
+      fail(r, 'factory speak-as unenroll');
+      await writeAll(streams.stdout, `${JSON.stringify((r.body as { grant?: unknown }).grant ?? r.body, null, 2)}\n`);
+      return 0;
+    }
+    if (sub === 'revoke') {
+      const id = rest[0];
+      if (!id) throw new Error('usage: factory speak-as revoke <grant-id>');
+      const r = await client.request('DELETE', `/api/v1/speak-as-grants/${encodeURIComponent(id)}`);
+      fail(r, 'factory speak-as revoke');
+      await writeAll(streams.stdout, `Revoked ${id}.\n`);
+      return 0;
+    }
+    throw new Error('usage: factory speak-as list|show|grant|enroll|unenroll|revoke');
+  }
+
   if (cmd === 'logout' || cmd === 'whoami') {
     const instance = await instanceInUse();
     const kind = await knownMethod(instance, (await loadConfig()).auth, store);
