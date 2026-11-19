@@ -1,6 +1,6 @@
 spec: 1
 id: agent-connect
-version: 1.0.0
+version: 1.0.1
 name: Agent connect
 description: Let this agent run a one-shot errand to another factory agent, or return a structured live-call intent the robot opens itself.
 language: python
