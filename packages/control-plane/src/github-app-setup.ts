@@ -60,19 +60,23 @@ export const EVENT_SKILLS = ['sdlc-conductor'];
 export const WORKFLOW_SKILLS = ['sdlc-ops'];
 
 /** What an agent's app is for, beyond the narrow default. */
-export type AppNeeds = { events?: boolean; projects?: boolean; workflows?: boolean };
+export type AppNeeds = { events?: boolean; projects?: boolean; workflows?: boolean; ci?: boolean };
+/** The skills that read CI results without taking events (the PR reviewer checks the head's checks and statuses). */
+export const CI_READ_SKILLS = ['sdlc-reviewer'];
 
 /**
  * GAP-257: an agent's needs, from the skills it adopted, or as the admin declares them when starting the app:
  * app events for the conductor, organization Projects for an agent with a backlog skill (`sdlc-backlog-github`).
  */
-export function appNeeds(agent: { skillIds?: string[]; skillRoutes?: Record<string, unknown> }, declared: { events?: unknown; projects?: unknown; workflows?: unknown } = {}): AppNeeds {
+export function appNeeds(agent: { skillIds?: string[]; skillRoutes?: Record<string, unknown> }, declared: { events?: unknown; projects?: unknown; workflows?: unknown; ci?: unknown } = {}): AppNeeds {
   const skills = new Set([...(agent.skillIds ?? []), ...Object.keys(agent.skillRoutes ?? {})]);
   const workflows = declared.workflows === true || WORKFLOW_SKILLS.some((id) => skills.has(id));
+  const ci = declared.ci === true || CI_READ_SKILLS.some((id) => skills.has(id));
   return {
     events: declared.events === true || EVENT_SKILLS.some((id) => skills.has(id)),
     projects: declared.projects === true || [...skills].some((id) => /(^|-)backlog(-|$)/.test(id)),
     ...(workflows ? { workflows: true } : {}),
+    ...(ci ? { ci: true } : {}),
   };
 }
 
@@ -101,7 +105,8 @@ export function buildManifest(publicBase: string, agentId: string, agentName: st
       issues: 'write',
       metadata: 'read',
       ...(needs.projects ? { organization_projects: 'write' } : {}),
-      ...(needs.events ? { checks: 'read', statuses: 'read' } : {}),
+      // The reviewer (`sdlc-reviewer`, or `"ci": true`) reads CI results too, with no hook or events.
+      ...(needs.events || needs.ci ? { checks: 'read', statuses: 'read' } : {}),
       // Dale (2026-11-18): the ops leader dispatches its deploy and rollback workflows, which GitHub allows only with
       // Actions write (read is not enough for `POST .../actions/workflows/:id/dispatches`).
       ...(needs.workflows ? { actions: 'write' } : {}),

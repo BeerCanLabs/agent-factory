@@ -105,6 +105,12 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
     assert.deepEqual(appNeeds({ skillIds: ['sdlc-coder'] }), { events: false, projects: false }, 'a coder takes no app events');
     assert.deepEqual(appNeeds({}, { events: true, projects: true }), { events: true, projects: true }, 'the admin can declare them');
     assert.deepEqual(appNeeds({}, { events: 'yes' }), { events: false, projects: false });
+    // The reviewer reads checks and statuses with no hook or events.
+    const rev = buildManifest('https://f.example', 'rev', 'Rev', appNeeds({ skillIds: ['sdlc-reviewer'] }));
+    assert.deepEqual(rev.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', checks: 'read', statuses: 'read' });
+    assert.equal('hook_attributes' in rev, false);
+    assert.deepEqual(rev.default_events, []);
+    assert.deepEqual(appNeeds({}, { ci: true }), { events: false, projects: false, ci: true }, 'the admin can declare it');
   });
 
   it('names secrets per agent', () => {
