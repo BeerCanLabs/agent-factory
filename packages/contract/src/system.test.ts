@@ -291,6 +291,11 @@ describe('subscription templates (M5)', () => {
     assert.equal(openai.headers.find((h) => h.name === 'originator')?.role, 'factory-identity');
     assert.equal(openai.inference.upstream + openai.inference.path, 'https://chatgpt.com/backend-api/codex/responses');
     assert.equal(SUBSCRIPTION_TEMPLATES['xai-subscription']!.inference.upstream + SUBSCRIPTION_TEMPLATES['xai-subscription']!.inference.path, 'https://api.x.ai/v1/responses');
+    assert.equal(
+      (SUBSCRIPTION_TEMPLATES['xai-subscription']!.imageInference!.upstream + SUBSCRIPTION_TEMPLATES['xai-subscription']!.imageInference!.path),
+      'https://cli-chat-proxy.grok.com/v1/images/generations',
+    );
+    assert.equal(openai.imageInference, undefined);
   });
 
   it('refuses with subscription_not_permitted any template with an Anthropic or Google host', () => {
@@ -301,6 +306,7 @@ describe('subscription templates (M5)', () => {
       { ...base, tokenUrl: 'https://oauth2.googleapis.com/token' },
       { ...base, inference: { ...base.inference, upstream: 'https://api.anthropic.com' } },
       { ...base, inference: { ...base.inference, upstream: 'https://cloudcode-pa.googleapis.com' } },
+      { ...base, imageInference: { upstream: 'https://generativelanguage.googleapis.com', path: '/v1/images' } },
       { ...base, signIn: { ...base.signIn, verificationUrl: 'https://claude.ai/device' } },
     ];
     for (const t of bad) {
