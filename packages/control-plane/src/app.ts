@@ -3837,7 +3837,11 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         json(res, 200, { ok: true, ignored: true, reason: 'the agent\'s GitHub App slug is not stored' });
         return;
       }
-      const mapped = asOps ? opsEventFor(githubEvent, input) : conductorEventFor(githubEvent, input, `${slug}[bot]`);
+      // Jury #522 G1: every app the agent holds (original and per owner) is "self", so one app's labels and comments,
+      // seen through another app's hook, never wake the agent again (a loop).
+      const otherSlugs = await Promise.all([undefined, ...ownerApps(state, agent.id).map((o) => o.owner)].filter((o) => o !== viaOwner).map((o) => readSecretCached(state, githubAppSecretNames(agent.id, o).slug)));
+      const selves = [slug, ...otherSlugs.filter((x): x is string => typeof x === 'string' && Boolean(x.trim()))].map((x) => `${x}[bot]`);
+      const mapped = asOps ? opsEventFor(githubEvent, input) : conductorEventFor(githubEvent, input, selves);
       if ('ignored' in mapped) {
         json(res, 200, { ok: true, ignored: true, reason: mapped.ignored });
         return;

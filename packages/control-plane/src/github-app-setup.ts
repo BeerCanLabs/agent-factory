@@ -16,7 +16,7 @@ import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { signConsentState, verifyConsentState } from './connections.js';
 import { invalidateCredentials } from './credentials.js';
 import { invalidateSecret, readSecret } from './app-setup-providers.js';
-import { OWNER, readAppRecord, writeAppRecord, type OwnerType } from './github-app-owners.js';
+import { OWNER, legacyOrgs, readAppRecord, writeAppRecord, type OwnerType } from './github-app-owners.js';
 
 const STATE_TTL_MS = 10 * 60_000;
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -165,7 +165,14 @@ export async function handleGitHubAppSetup(state: FactoryState, req: http.Incomi
       if (body.ownerType !== undefined && body.ownerType !== 'org' && body.ownerType !== 'user') return json(res, 400, { error: 'invalid_owner_type', message: 'ownerType is "org" or "user"' }), true;
       ownerType = (body.ownerType as OwnerType | undefined) ?? (await lookupOwnerType(state, owner));
       if (!ownerType) return json(res, 502, { error: 'owner_type_unknown', message: `GitHub did not say whether ${owner} is an org or a user; send ownerType` }), true;
+      // Jury #522 G1: an owner the original app already serves would get two apps, two hooks and two runs per event.
+      // Only an explicit migrate moves it to its own app (the original app should then be uninstalled there). An owner
+      // that already has its own app (a replace) is not served by the original app, even if it is in the chosen list.
+      if (legacyOrgs(state, agentId).some((o) => o.toLowerCase() === owner) && body.migrate !== true) {
+        return json(res, 409, { error: 'owner_served_by_original_app', owner, message: `${owner} is already served by this agent's original GitHub App. Send migrate:true to give it its own app instead, then uninstall the original app from ${owner}.` }), true;
+      }
     }
+    const migrate = Boolean(owner) && body.migrate === true;
     let name: string | undefined;
     if (body.name !== undefined) {
       // GitHub limits an app name to 34 characters; names are global, so a taken one is refused on GitHub's form.
@@ -179,7 +186,7 @@ export async function handleGitHubAppSetup(state: FactoryState, req: http.Incomi
     }
     const org = owner ? (ownerType === 'org' ? owner : undefined) : typeof body.org === 'string' && body.org ? body.org : undefined;
     if (org !== undefined && !ORG.test(org)) return json(res, 400, { error: 'invalid_org' }), true;
-    const signed = signConsentState(key, { agentId, provider: 'github-app', scopes: [], actor: principal.actor, nonce: randomUUID(), exp: Date.now() + STATE_TTL_MS, ...(owner ? { owner, ownerType } : {}) });
+    const signed = signConsentState(key, { agentId, provider: 'github-app', scopes: [], actor: principal.actor, nonce: randomUUID(), exp: Date.now() + STATE_TTL_MS, ...(owner ? { owner, ownerType } : {}), ...(migrate ? { migrate } : {}) });
     // A user-owned app is created under the signed-in GitHub user's own settings (that user must be the owner).
     const where = org ? `/organizations/${encodeURIComponent(org)}/settings/apps/new` : '/settings/apps/new';
     const action = `${webBase(state)}${where}?state=${encodeURIComponent(signed)}`;
@@ -240,9 +247,11 @@ async function callback(state: FactoryState, res: http.ServerResponse, url: URL)
     // Record the owner beside the others (read-modify-write): the legacy `orgs` and every other owner are kept.
     const rec = readAppRecord(state, parsed.agentId);
     rec.owners[owner] = { type: parsed.ownerType === 'user' ? 'user' : 'org', at: new Date().toISOString(), by: parsed.actor };
+    // Jury #522 G1: a migrate moves the owner off the original app's chosen list.
+    if (parsed.migrate === true) rec.orgs = rec.orgs.filter((o) => o.toLowerCase() !== owner);
     if (!writeAppRecord(state, parsed.agentId, rec)) console.error(`[keymaster] ${parsed.agentId}: no registry dir; the ${owner} app is stored but not recorded`);
   }
   invalidateCredentials(state);
-  state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'GITHUB_APP_CREATED', actor: parsed.actor, appSlug: app.slug, ...(owner ? { owner } : {}) });
+  state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'GITHUB_APP_CREATED', actor: parsed.actor, appSlug: app.slug, ...(owner ? { owner } : {}), ...(owner && parsed.migrate === true ? { migrated: true } : {}) });
   page(res, 200, `GitHub App ready for ${state.agents.get(parsed.agentId)?.name ?? parsed.agentId}`, 'The app key is stored with the Keymaster. You can close this window.');
 }

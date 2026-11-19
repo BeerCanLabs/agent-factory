@@ -42,17 +42,19 @@ const labelsOf = (v: unknown): string[] => (Array.isArray(v) ? v.map((l) => str(
 
 /**
  * The conductor event for one GitHub delivery, or a reason it maps to nothing. `self` is the agent's own app login
- * (`<slug>[bot]`): its own labels and comments never wake it again (they would only loop), but its merges and the
+ * (`<slug>[bot]`), or every one of them when it has an app per owner: its own labels and comments never wake it again (they would only loop), but its merges and the
  * PRs it opens still do, because the next step hangs on them.
  */
-export function conductorEventFor(event: string, payload: unknown, self?: string): { event: ConductorEvent } | { ignored: string } {
+export function conductorEventFor(event: string, payload: unknown, self?: string | readonly string[]): { event: ConductorEvent } | { ignored: string } {
   const p = obj(payload);
   const action = str(p.action);
   const repo = str(obj(p.repository).full_name);
   if (event === 'ping') return { ignored: 'ping' };
   if (!REPO.test(repo)) return { ignored: 'no repository' };
   const sender = str(obj(p.sender).login).toLowerCase();
-  const bySelf = Boolean(self) && sender === self!.toLowerCase();
+  // Jury #522 G1: an agent with several apps (one per owner) is "self" as any of them.
+  const selves = (typeof self === 'string' ? [self] : self ?? []).map((x) => x.toLowerCase()).filter(Boolean);
+  const bySelf = Boolean(sender) && selves.includes(sender);
   const added = str(obj(p.label).name);
 
   if (event === 'issues') {

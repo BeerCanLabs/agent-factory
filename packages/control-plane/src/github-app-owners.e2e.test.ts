@@ -192,11 +192,22 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     const ownSelf = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000001', labeled('flow-getdraft[bot]', 1), OWNER_SECRET);
     assert.equal(ownSelf.status, 200);
     assert.equal(ownSelf.body.ignored, true, 'the getdraft app\'s own label does not wake the agent');
-    const fromOther = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000002', labeled('flow-bcl[bot]', 2), OWNER_SECRET);
+    const fromOther = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000002', labeled('dale', 2), OWNER_SECRET);
     assert.equal(fromOther.status, 202, 'a label by someone else, delivered by the getdraft app, wakes it');
     const legacySelf = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000003', labeled('flow-bcl[bot]', 3), LEGACY_SECRET);
     assert.equal(legacySelf.body.ignored, true, 'the original app still knows its own slug');
     assert.equal((await hook('issues', '55555555-aaaa-bbbb-cccc-000000000004', labeled('x', 4), 'example-wrong-secret-0000000000000')).status, 401); // secret-scan:allow
+  });
+
+  it('jury #522 G1: every one of the agent\'s apps is its self, whichever app delivered the event (no loop)', async () => {
+    const legacyViaOwner = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000011', labeled('flow-bcl[bot]', 11), OWNER_SECRET);
+    assert.equal(legacyViaOwner.body.ignored, true, 'the original app\'s label, delivered by the getdraft app, is the agent\'s own');
+    const userViaOwner = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000012', labeled('Flow-Dsackr[bot]', 12), OWNER_SECRET);
+    assert.equal(userViaOwner.body.ignored, true, 'so is the dsackr app\'s (case-insensitive)');
+    const ownerViaLegacy = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000013', labeled('flow-getdraft[bot]', 13), LEGACY_SECRET);
+    assert.equal(ownerViaLegacy.body.ignored, true, 'and the getdraft app\'s label, delivered by the original app');
+    const stranger = await hook('issues', '55555555-aaaa-bbbb-cccc-000000000014', labeled('flow-other[bot]', 14), LEGACY_SECRET);
+    assert.equal(stranger.status, 202, 'another bot is not self');
   });
 
   it('jury #522 B1: with the original app on BeerCanLabs plus getdraft and dsackr apps, a call with no org still gets BeerCanLabs', async () => {
@@ -221,4 +232,17 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     }
   });
 
+  it('jury #522 G1: an owner the original app already serves gets its own app only with migrate, which moves it off the chosen list', async () => {
+    assert.ok(record().orgs.includes('BeerCanLabs'));
+    const refused = await start({ owner: 'BeerCanLabs', ownerType: 'org' });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error, 'owner_served_by_original_app');
+    nextApp = { id: 7200, slug: 'flow-bcl-own', webhook_secret: 'example-migrate-webhook-secret-000000', owner: { login: 'BeerCanLabs', type: 'Organization' } }; // secret-scan:allow
+    const s = await start({ owner: 'BeerCanLabs', ownerType: 'org', migrate: true });
+    assert.equal(s.status, 200, JSON.stringify(s.body));
+    assert.equal((await cb(s.body.state, 'migrate')).status, 200);
+    assert.equal(record().orgs.some((o: string) => o.toLowerCase() === 'beercanlabs'), false, 'moved off the original app');
+    assert.equal(record().owners.beercanlabs.type, 'org');
+    assert.equal((await token('BeerCanLabs')).body.accessToken, 'ghs_inst1_app7200', 'now minted from its own app');
+  });
 });
