@@ -8,6 +8,10 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+# One model reply in a runtime turn. 2048 cut off tool calls whose arguments are a few KB (an SDLC hand-off re-emits the
+# story and the review findings), so the call never ran.
+MAX_OUTPUT_TOKENS = 8192
+
 
 # The factory, the factory model API and the Discord route are the agent network's own services, reached directly. The
 # container's HTTP(S)_PROXY points at the gatekeeper-egress for third-party hosts, which would refuse these.
@@ -79,7 +83,7 @@ class Factory:
 
     def complete(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """One model call through the factory model API (M1). The factory decides which model answers (M2)."""
-        body: dict[str, Any] = {"messages": messages, "max_tokens": 2048}
+        body: dict[str, Any] = {"messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
         if self.model:
             body["model"] = self.model
         if tools:

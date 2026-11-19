@@ -9,6 +9,7 @@ A skill reaches only the routes the agent's policy grants: the gatekeeper-egress
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -31,13 +32,24 @@ class Tool:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
 
 
+def _tree_digest(item: Path) -> str:
+    """sha256 over a vendored file, or a folder's relative paths and bytes (caches skipped), for the A2 collision check."""
+    h = hashlib.sha256()
+    if item.is_file():
+        h.update(item.read_bytes())
+        return h.hexdigest()
+    for f in sorted(p for p in item.rglob("*") if p.is_file() and "__pycache__" not in p.parts):  # bounded-loop: one vendored tree
+        h.update(f.relative_to(item).as_posix().encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: set[str] | None = None) -> tuple[list[Tool], list[str]]:
     """The tools of the skills the factory says this agent has adopted, and what could not be loaded (never fatal)."""
     root = Path(skills_dir or os.environ.get("SKILLS_DIR", "/opt/factory/skills"))
     tools: list[Tool] = []
     problems: list[str] = []
     seen: set[str] = set(reserved or ())  # a skill cannot shadow the archetype's own tools
-    loaded_vendored: dict[str, str] = {}  # top-level vendored module -> skill id (A2)
+    loaded_vendored: dict[str, tuple[str, str]] = {}  # top-level vendored module -> (skill id, content digest) (A2)
     for item in adopted or []:
         sid = str(item.get("id", ""))
         if not SAFE_ID.match(sid):
@@ -66,7 +78,7 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
             vendor_folder = root_folder / "vendor"
 
             # Check A2 collision for vendored top-level modules
-            current_vendored: list[str] = []
+            current_vendored: list[tuple[str, str]] = []
             if vendor_folder.is_dir():
                 for v_item in sorted(vendor_folder.iterdir()):
                     if v_item.name.startswith(".") or v_item.name == "__pycache__":
@@ -77,11 +89,14 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                     elif v_item.is_dir():
                         mod_name = v_item.name
                     if mod_name:
-                        if mod_name in loaded_vendored:
+                        digest = _tree_digest(v_item)
+                        # Two skills that vendor the very same files (a shared sibling skill or the same repo data at one
+                        # version) do not collide: either copy answers alike. Different contents under one name still do.
+                        if mod_name in loaded_vendored and loaded_vendored[mod_name][1] != digest:
                             raise ValueError(
-                                f"vendored module {mod_name!r} collides with module from skill {loaded_vendored[mod_name]!r}"
+                                f"vendored module {mod_name!r} collides with module from skill {loaded_vendored[mod_name][0]!r}"
                             )
-                        current_vendored.append(mod_name)
+                        current_vendored.append((mod_name, digest))
 
             name = f"skill_{sid.replace('-', '_')}"
             spec = importlib.util.spec_from_file_location(name, target, submodule_search_locations=[str(target.parent)] if target.name == "__init__.py" else None)
@@ -128,8 +143,8 @@ def load_skills(adopted: list[dict], skills_dir: str | None = None, reserved: se
                 seen.add(name)
                 tools.append(Tool(sid, name, str(t.get("description", "")), t.get("parameters") or {"type": "object", "properties": {}}, t["handler"]))
 
-            for mod_name in current_vendored:
-                loaded_vendored[mod_name] = sid
+            for mod_name, digest in current_vendored:
+                loaded_vendored.setdefault(mod_name, (sid, digest))
         except (Exception, SystemExit) as err:  # a broken skill (even one that exits at import) must not stop the agent answering
             problems.append(f"skill {sid}: {err}")
     return tools, problems
