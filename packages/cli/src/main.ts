@@ -229,7 +229,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     if (sub === 'grant' || sub === 'create') {
       const grantClient = flag('--client');
       const member = flag('--member') ?? flag('--user');
-      if (!grantClient || !member) throw new Error('usage: factory speak-as grant --client agent:<id> --member user:<id> [--alias dale] [--agents donna,higgins] [--days 90] [--expires <iso>] [--purpose "<text>"]');
+      if (!grantClient || !member) throw new Error('usage: factory speak-as grant --client agent:<id> --member user:<id> [--alias dale] [--agents donna,higgins] [--relationship owner|family] [--days 90] [--expires <iso>] [--purpose "<text>"]');
       const aliases = flags('--alias');
       const agentsRaw = flag('--agents');
       const days = flag('--days');
@@ -244,6 +244,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const memberBody: Record<string, unknown> = { principalId: member };
       if (aliases.length) memberBody.aliases = aliases;
       if (agentsRaw) memberBody.targetAgents = agentsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+      const relationship = flag('--relationship');
+      if (relationship) memberBody.relationship = relationship;
       const r = await client.request('POST', '/api/v1/speak-as-grants', {
         client: grantClient,
         members: [memberBody],
@@ -257,12 +259,14 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     if (sub === 'enroll') {
       const id = rest[0];
       const member = flag('--member') ?? flag('--user');
-      if (!id || !member) throw new Error('usage: factory speak-as enroll <grant-id> --member user:<id> [--alias name] [--agents higgins]');
+      if (!id || !member) throw new Error('usage: factory speak-as enroll <grant-id> --member user:<id> [--alias name] [--agents higgins] [--relationship owner|family]');
       const aliases = flags('--alias');
       const agentsRaw = flag('--agents');
       const body: Record<string, unknown> = { principalId: member };
       if (aliases.length) body.aliases = aliases;
       if (agentsRaw) body.targetAgents = agentsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+      const relationship = flag('--relationship');
+      if (relationship) body.relationship = relationship;
       const r = await client.request('POST', `/api/v1/speak-as-grants/${encodeURIComponent(id)}/members`, body);
       fail(r, 'factory speak-as enroll');
       await writeAll(streams.stdout, `${JSON.stringify((r.body as { grant?: unknown }).grant ?? r.body, null, 2)}\n`);

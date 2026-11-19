@@ -4,6 +4,7 @@ import {
   deliveredCaller,
   type DeliveredCaller,
   type SpeakAsMode,
+  type SpeakAsRelationship,
   type SpeakAsVerifyErr,
 } from '@beercanlabs/factory-bouncer';
 import type { FactoryState } from './app.js';
@@ -17,6 +18,8 @@ export type VoiceConversation = {
   channel: string;
   assurance: string;
   mode: SpeakAsMode;
+  name?: string;
+  relationship?: SpeakAsRelationship;
   createdAt: number;
 };
 
@@ -90,6 +93,8 @@ export function applySpeakAs(
       channel: existing.channel,
       assurance: existing.assurance,
       mode: existing.mode,
+      ...(existing.name ? { name: existing.name } : {}),
+      ...(existing.relationship ? { relationship: existing.relationship } : {}),
     });
     return { ok: true, delivered, grantId: existing.grantId, conversation: existing };
   }
@@ -103,12 +108,15 @@ export function applySpeakAs(
     targetAgentId: opts.targetAgentId,
   });
   if (!verified.ok) return verified;
+  const displayName = state.principals?.get(verified.actor)?.displayName?.trim();
   const delivered = deliveredCaller({
     actor: verified.actor,
     via: client,
     channel: opts.fields.channel,
     assurance: opts.fields.assurance,
     mode: opts.fields.mode,
+    ...(displayName ? { name: displayName } : {}),
+    ...(verified.member.relationship ? { relationship: verified.member.relationship } : {}),
   });
   const conversation: VoiceConversation = {
     id: 'convo_' + randomUUID(),
@@ -119,6 +127,8 @@ export function applySpeakAs(
     channel: opts.fields.channel,
     assurance: opts.fields.assurance,
     mode: opts.fields.mode,
+    ...(delivered.name ? { name: delivered.name } : {}),
+    ...(delivered.relationship ? { relationship: delivered.relationship } : {}),
     createdAt: Date.now(),
   };
   if (!state.voiceConversations) state.voiceConversations = new Map();

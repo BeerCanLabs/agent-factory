@@ -63,13 +63,15 @@ The factory strips any client-supplied `caller` / `onBehalfOf` and writes this b
   "channel": "voice",
   "via": "agent:rosie",
   "assurance": "voice-asserted",
-  "mode": "call"
+  "mode": "call",
+  "name": "Dale",
+  "relationship": "owner"
 }
 ```
 
-or `"mode": "errand"`.
+or `"mode": "errand"`. `name` is the principal's display name when the factory has one. `relationship` is present only when it was set on the grant member (`owner` or `family`).
 
-`via` is transport metadata only (which client connected the call). Treat `actor` as the person speaking. Reply in the first person, to them.
+`via` is transport metadata only (which client connected the call). Treat `actor` as the person speaking. Reply in the first person, to them. When `relationship` is `family`, they are a household family member of the owner, not the owner; help them as themselves and do not treat them as the owner.
 
 - **`mode: "call"`** — a live, multi-turn conversation. Talk with the person directly.
 - **`mode: "errand"`** — a one-shot task sent by Rosie. Act on the requester’s authority (for example their calendar) and return a **result** Rosie can relay, not a chat opening.
@@ -173,13 +175,15 @@ Create body:
 
 A member may include `"targetAgents": ["higgins"]` to limit where they may be connected. Omit it (or pass an empty list) for every agent.
 
+A member may include `"relationship": "owner"` or `"relationship": "family"`. The factory copies that value onto the delivered caller. It is optional; omitting it does not change who may be connected.
+
 CLI (signed in as an admin):
 
 ```
-factory speak-as grant --client agent:rosie --member user:dale.sackrider --alias dale --days 90 --purpose "household voice and errands"
+factory speak-as grant --client agent:rosie --member user:dale.sackrider --alias dale --relationship owner --days 90 --purpose "household voice and errands"
 factory speak-as list --client agent:rosie
 factory speak-as show sag_...
-factory speak-as enroll sag_... --member user:<id> --alias <shortname> --agents higgins
+factory speak-as enroll sag_... --member user:<id> --alias <shortname> --agents higgins --relationship family
 factory speak-as unenroll sag_... --member user:<id>
 factory speak-as revoke sag_...
 ```

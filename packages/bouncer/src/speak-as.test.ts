@@ -60,8 +60,10 @@ describe('speak-as grants', () => {
       expiresAt: '2026-12-01T00:00:00Z',
       by: 'user:admin',
     });
-    const enrolled = await store.enroll(grant.id, { principalId: 'user:spouse', targetAgents: ['higgins'] }, 'user:admin');
+    const enrolled = await store.enroll(grant.id, { principalId: 'user:spouse', targetAgents: ['higgins'], relationship: 'family' }, 'user:admin');
     assert.equal(enrolled.members.length, 2);
+    assert.equal(enrolled.members.find((m) => m.principalId === 'user:spouse')?.relationship, 'family');
+    await assert.rejects(store.enroll(grant.id, { principalId: 'user:spouse', relationship: 'cousin' }, 'user:admin'), SpeakAsStoreError);
     const dropped = await store.unenroll(grant.id, 'user:spouse', 'user:admin');
     assert.deepEqual(dropped.members.map((m) => m.principalId), ['user:dale.sackrider']);
 
@@ -90,6 +92,8 @@ describe('speak-as grants', () => {
       channel: 'voice',
       assurance: 'voice-asserted',
       mode: 'errand',
+      name: 'Dale',
+      relationship: 'owner',
     });
     assert.deepEqual(caller, {
       actor: 'user:dale.sackrider',
@@ -98,8 +102,19 @@ describe('speak-as grants', () => {
       via: 'agent:rosie',
       assurance: 'voice-asserted',
       mode: 'errand',
+      name: 'Dale',
+      relationship: 'owner',
     });
     assert.equal('onBehalfOf' in caller, false);
+    const bare = deliveredCaller({
+      actor: 'user:dale.sackrider',
+      via: 'agent:rosie',
+      channel: 'voice',
+      assurance: 'voice-asserted',
+      mode: 'call',
+    });
+    assert.equal('relationship' in bare, false);
+    assert.equal('name' in bare, false);
     assert.equal(verifySpeakAs([], { client: 'agent:rosie', asUser: 'not-a-user', targetAgentId: 'donna' }).ok, false);
   });
 });

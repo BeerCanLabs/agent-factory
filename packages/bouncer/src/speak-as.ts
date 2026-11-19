@@ -9,7 +9,12 @@ export type SpeakAsMember = {
   aliases?: string[];
   /** If omitted or empty, every target agent is allowed. Otherwise only these agent ids. */
   targetAgents?: string[];
+  /** Optional household relationship stamped onto the delivered caller. */
+  relationship?: SpeakAsRelationship;
 };
+
+/** Household relationship of a speak-as member, when set. */
+export type SpeakAsRelationship = 'owner' | 'family';
 
 /** Standing grant: this client may open conversations as any enrolled member. */
 export type SpeakAsGrant = {
@@ -37,6 +42,10 @@ export type DeliveredCaller = {
   via: string;
   assurance: string;
   mode: SpeakAsMode;
+  /** Principal display name, when the factory knows one. */
+  name?: string;
+  /** From the grant member, when set. */
+  relationship?: SpeakAsRelationship;
 };
 
 export type SpeakAsVerifyInput = {
@@ -168,7 +177,13 @@ export function normalizeMember(raw: unknown): SpeakAsMember {
   const principalId = normalizeUserPrincipal(o.principalId ?? o.user ?? o.actor);
   const targetAgents = normalizeTargetAgents(o.targetAgents ?? o.agents);
   const aliases = normalizeAliases(o.aliases);
-  return { principalId, ...(targetAgents ? { targetAgents } : {}), ...(aliases ? { aliases } : {}) };
+  const relationship = normalizeRelationship(o.relationship);
+  return {
+    principalId,
+    ...(targetAgents ? { targetAgents } : {}),
+    ...(aliases ? { aliases } : {}),
+    ...(relationship ? { relationship } : {}),
+  };
 }
 
 export function isGrantActive(g: SpeakAsGrant, at: Date): boolean {
@@ -245,7 +260,10 @@ export function deliveredCaller(opts: {
   channel: string;
   assurance: string;
   mode: SpeakAsMode;
+  name?: string;
+  relationship?: SpeakAsRelationship;
 }): DeliveredCaller {
+  const name = typeof opts.name === 'string' ? opts.name.trim() : '';
   return {
     actor: opts.actor,
     verified: true,
@@ -253,7 +271,23 @@ export function deliveredCaller(opts: {
     via: opts.via,
     assurance: opts.assurance,
     mode: opts.mode,
+    ...(name ? { name: name.slice(0, 60) } : {}),
+    ...(opts.relationship ? { relationship: opts.relationship } : {}),
   };
+}
+
+const RELATIONSHIPS = new Set<SpeakAsRelationship>(['owner', 'family']);
+
+export function normalizeRelationship(raw: unknown): SpeakAsRelationship | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string') {
+    throw new SpeakAsStoreError(400, 'invalid_relationship', "relationship must be 'owner' or 'family'");
+  }
+  const value = raw.trim().toLowerCase();
+  if (!RELATIONSHIPS.has(value as SpeakAsRelationship)) {
+    throw new SpeakAsStoreError(400, 'invalid_relationship', "relationship must be 'owner' or 'family'");
+  }
+  return value as SpeakAsRelationship;
 }
 
 function normalizeExpiry(raw: unknown, now: Date): string | null {
