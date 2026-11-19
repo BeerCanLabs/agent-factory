@@ -5,7 +5,8 @@
  * returns the same approval. Nothing waits: the run goes on, and the decision reaches the agent through the existing
  * decision path when a person makes it (REST `POST /api/v1/approvals/:id` or MCP `decide_approval`, optionally with a cap).
  * The hold names its `approvers` (GitHub logins) and whether approving needs a cap (`requiresCap`); both are fixed when
- * it is asked. Only a person whose single linked, non-bot GitHub login is on the list may decide it (403 otherwise), and a
+ * it is asked. Only a person whose single linked, non-bot GitHub login is on the list may decide it (403 otherwise; a login
+ * linked to another actor of the same factory user counts, #524), and a
  * hold that needs a cap is never approved without one (400). The agent can read it back at any time with `GET` on the same
  * path, shaped `{state, cap_usd, by, comment}`: `by` is the GitHub login recorded when the decision was made, else null.
  * The console, channels and anything else that lists approvals show it because it is one; nothing is specific to a UI.
@@ -15,6 +16,7 @@ import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
 import type { Approval, DecisionHold } from '@beercanlabs/factory-bouncer';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
+import { normalizeActorToPrincipal } from '@beercanlabs/factory-bouncer';
 import { bearerOf, json, readJson, requirePrivilege, visibleApprovals, type FactoryState } from './app.js';
 
 /** The agent's own key: identifier characters plus what a GitHub reference needs (`plan-budget:owner/repo#12@sha`). */
@@ -42,11 +44,45 @@ export function parseCapUsd(v: unknown): number | null {
   return Number.isFinite(n) && n <= 1e9 ? n : null;
 }
 
-/** The GitHub login a person linked (`github:<login>`), when exactly one is; a fleet checks approvers by login. */
+/**
+ * #524: the factory user an actor is, when the principal store names one: `cloudflare:<email>` and `user:<id>` are the
+ * same person when the store maps that email to that `user:<id>`. Undefined when there is no store, it is unhealthy, the
+ * actor is not a principal actor, or no record exists (a deterministic `user:<email>` fallback is not a person on file).
+ */
+function factoryUserOf(state: FactoryState, actor: string): string | undefined {
+  const store = state.principals;
+  if (!store || !store.healthy) return undefined;
+  try {
+    const id = normalizeActorToPrincipal(actor, store);
+    return id.startsWith('user:') && store.get(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The GitHub login a person linked (`github:<login>`), when exactly one is; a fleet checks approvers by login.
+ *
+ * #524: a link counts as the person's when its actor is the same actor string (case-insensitive), or when both the link's
+ * actor and the deciding actor resolve to the same factory user in the principal store (for example the console's
+ * `user:dale.sackrider` and the link's `cloudflare:dale.sackrider@gmail.com`, an email on that user). Nothing else
+ * makes two actors one person. More than one distinct login across those links is ambiguous and names none.
+ */
 export function githubLoginOf(state: FactoryState, actor: string | undefined): string | undefined {
   if (!actor) return undefined;
-  const mine = (state.identityLinks?.list() ?? []).filter((l) => l.provider === 'github' && l.actor.toLowerCase() === actor.toLowerCase());
-  return mine.length === 1 ? mine[0].id : undefined;
+  const lower = actor.toLowerCase();
+  let me: string | null | undefined = null; // resolved lazily: only when a link's actor is not the same string
+  const logins = new Map<string, string>();
+  for (const l of state.identityLinks?.list() ?? []) {
+    if (l.provider !== 'github') continue;
+    let mine = l.actor.toLowerCase() === lower;
+    if (!mine) {
+      if (me === null) me = factoryUserOf(state, actor);
+      mine = me !== undefined && factoryUserOf(state, l.actor) === me;
+    }
+    if (mine) logins.set(l.id.toLowerCase(), l.id);
+  }
+  return logins.size === 1 ? [...logins.values()][0] : undefined;
 }
 
 /**
