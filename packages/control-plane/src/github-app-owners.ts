@@ -67,3 +67,19 @@ export function ownerApp(state: FactoryState, agentId: string, owner: string): {
 export function ownerApps(state: FactoryState, agentId: string): Array<{ owner: string; type: OwnerType }> {
   return Object.entries(readAppRecord(state, agentId).owners).map(([owner, o]) => ({ owner, type: o.type }));
 }
+
+/**
+ * Jury #522 B1: the owners the agent's original app serves: the chosen `orgs` minus any owner with its own app (an owner
+ * app owner can also land in `orgs`, e.g. through the installations route). A call with no owner (GraphQL with no hint)
+ * defaults only to these, so adding owner apps never makes the original app's default ambiguous.
+ */
+export function legacyOrgs(state: FactoryState, agentId: string): string[] {
+  const rec = readAppRecord(state, agentId);
+  const out: string[] = [];
+  for (const o of rec.orgs) {
+    const lower = o.toLowerCase();
+    if (rec.owners[lower] || out.some((x) => x.toLowerCase() === lower)) continue;
+    out.push(o);
+  }
+  return out;
+}

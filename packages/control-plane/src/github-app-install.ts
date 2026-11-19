@@ -4,7 +4,8 @@
  *   POST /api/v1/keymaster/agents/:agentId/github-app/installations   credentials.agent.set: { orgs, replace? } → install links
  *                                                                        (orgs are added to the chosen list unless replace)
  *   POST /api/v1/gatekeeper-egress/github-app/token                      gatekeeper-egress only: { runId, agentId, org? }
- *                                                                        (no org: the app's only chosen org, GAP-256)
+ *                                                                        (no org: the original app's only chosen org, GAP-256;
+ *                                                                        owners with their own app never count, #522 B1)
  *
  * The chosen orgs are recorded (not secret) beside the registry. A key is minted only for a chosen org and a live run
  * of that agent, from the app key the manifest flow stored (E5.1a); it is returned to the gatekeeper-egress only,
@@ -16,7 +17,7 @@ import { isTerminal } from '@beercanlabs/factory-property-manager';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
 import { agentPath, readSecret, readSecretCached, registerAppSetupProvider } from './app-setup-providers.js';
-import { ownerApp, ownerApps, readAppRecord, writeAppRecord } from './github-app-owners.js';
+import { legacyOrgs, ownerApp, ownerApps, readAppRecord, writeAppRecord } from './github-app-owners.js';
 
 const ORG = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const MAX_ORGS = 50;
@@ -188,10 +189,13 @@ export async function handleGitHubAppInstall(state: FactoryState, req: http.Inco
     const b = await readJson(req);
     const runId = typeof b.runId === 'string' ? b.runId : undefined;
     const agentId = typeof b.agentId === 'string' ? b.agentId : undefined;
-    // GAP-256: a GraphQL call has no owner in its path. Without an org, the app's only chosen org is used; with two or
-    // more chosen there is no safe guess, so the call keeps the route's own credential.
-    const chosen = typeof agentId === 'string' ? chosenOrgs(state, agentId) : [];
-    const org = b.org === undefined ? (chosen.length === 1 ? chosen[0] : undefined) : typeof b.org === 'string' && ORG.test(b.org) ? b.org : undefined;
+    // GAP-256: a GraphQL call has no owner in its path. Without an org, the original app's only chosen org is used; with
+    // two or more there is no safe guess, so the call keeps the route's own credential. Jury #522 B1: owners with their
+    // own app never count here (even when also in the chosen list), so adding them keeps the original default.
+    // An agent with no original-app org and exactly one owner app still defaults to that one owner (no ambiguity).
+    const legacy = typeof agentId === 'string' ? legacyOrgs(state, agentId) : [];
+    const fallback = legacy.length || typeof agentId !== 'string' ? legacy : chosenOrgs(state, agentId);
+    const org = b.org === undefined ? (fallback.length === 1 ? fallback[0] : undefined) : typeof b.org === 'string' && ORG.test(b.org) ? b.org : undefined;
     if (!runId || !agentId) return json(res, 400, { error: 'runId, agentId, org required' }), true;
     if (!org) return json(res, b.org === undefined ? 409 : 400, { error: b.org === undefined ? 'org_ambiguous' : 'runId, agentId, org required' }), true;
     const run = state.runs.get(runId);

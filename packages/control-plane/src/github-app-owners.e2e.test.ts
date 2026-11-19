@@ -6,7 +6,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHmac, generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
@@ -35,7 +35,7 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
   const stored = new Map<string, string>();
   const ghCalls: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), 'gh-app-owners-'));
-  let nextApp = { id: 7001, slug: 'flow-getdraft', webhook_secret: OWNER_SECRET };
+  let nextApp: Record<string, unknown> = { id: 7001, slug: 'flow-getdraft', webhook_secret: OWNER_SECRET };
 
   before(async () => {
     gh = http.createServer((req, res) => {
@@ -198,4 +198,27 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     assert.equal(legacySelf.body.ignored, true, 'the original app still knows its own slug');
     assert.equal((await hook('issues', '55555555-aaaa-bbbb-cccc-000000000004', labeled('x', 4), 'example-wrong-secret-0000000000000')).status, 401); // secret-scan:allow
   });
+
+  it('jury #522 B1: with the original app on BeerCanLabs plus getdraft and dsackr apps, a call with no org still gets BeerCanLabs', async () => {
+    const write = (rec: unknown) => writeFileSync(join(dir, 'github-apps', 'flow.json'), JSON.stringify(rec));
+    const saved = record();
+    const owners = { getdraft: { type: 'org' }, dsackr: { type: 'user' } };
+    try {
+      // getdraft is also in the chosen list, as the installations route puts it there: it still does not count.
+      for (const orgs of [['BeerCanLabs'], ['BeerCanLabs', 'getdraft'], ['BeerCanLabs', 'GetDraft', 'dsackr']]) {
+        write({ orgs, owners });
+        const r = await post('/api/v1/gatekeeper-egress/github-app/token', EGRESS, { runId, agentId: 'flow' });
+        assert.equal(r.status, 200, `${orgs.join(',')}: ${JSON.stringify(r.body)}`);
+        assert.equal(r.body.org, 'BeerCanLabs');
+        assert.equal(r.body.accessToken, 'ghs_inst1_app5001', 'minted from the original app');
+      }
+      write({ orgs: ['BeerCanLabs', 'other-org'], owners });
+      assert.equal((await post('/api/v1/gatekeeper-egress/github-app/token', EGRESS, { runId, agentId: 'flow' })).body.error, 'org_ambiguous', 'two original-app orgs are still never guessed');
+      write({ orgs: [], owners: { getdraft: { type: 'org' } } });
+      assert.equal((await post('/api/v1/gatekeeper-egress/github-app/token', EGRESS, { runId, agentId: 'flow' })).body.org, 'getdraft', 'one owner app and no original-app org: that owner');
+    } finally {
+      write(saved);
+    }
+  });
+
 });
