@@ -344,8 +344,11 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
       // Without a principal store, only the exact actor counts.
       const saved = state.principals;
       delete (state as { principals?: unknown }).principals;
-      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined);
-      state.principals = saved;
+      try {
+        assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined);
+      } finally {
+        state.principals = saved;
+      }
       assert.equal(state.approvals.get(h.approvalId)?.state, 'pending', 'refusals leave the hold for the real approver');
     });
 

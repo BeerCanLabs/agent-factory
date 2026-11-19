@@ -13,10 +13,9 @@
  */
 import type http from 'node:http';
 import { payloadHash, redactSecrets } from '@beercanlabs/factory-ledger';
-import type { Approval, DecisionHold } from '@beercanlabs/factory-bouncer';
+import { normalizeActorToPrincipal, type Approval, type DecisionHold } from '@beercanlabs/factory-bouncer';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
 import { isTerminal } from '@beercanlabs/factory-property-manager';
-import { normalizeActorToPrincipal } from '@beercanlabs/factory-bouncer';
 import { bearerOf, json, readJson, requirePrivilege, visibleApprovals, type FactoryState } from './app.js';
 
 /** The agent's own key: identifier characters plus what a GitHub reference needs (`plan-budget:owner/repo#12@sha`). */
@@ -49,7 +48,8 @@ export function parseCapUsd(v: unknown): number | null {
  * resolved: `user:<id>` and `cloudflare:<email>` (the same person when the store has that email on that `user:<id>`).
  * Undefined for every other form, `oidc:` and unprefixed actors included (an `oidc:<sub>` is never matched to a user by
  * id), and when there is no store, it is unhealthy, or no record exists (a deterministic `user:<email>` fallback is not a
- * person on file).
+ * person on file). Note: whoever holds `grants.manage` can put an email on a user record, and so can make a
+ * `cloudflare:<email>` actor that user for this purpose; both privileges sit in the admin role today.
  */
 function factoryUserOf(state: FactoryState, actor: string): string | undefined {
   const store = state.principals;
