@@ -377,12 +377,38 @@ describe('GAP-259 decision holds', { concurrency: false }, () => {
       assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'dsackr');
     });
 
-    it('more than one distinct GitHub login across the same person\'s actors names none', async () => {
+    it('B2: links on the deciding actor itself decide first; the alias is used only when there are none', async () => {
       const { token } = await liveRun();
       const { body: h } = await call(holdPath(), 'PUT', token, ask);
-      state.identityLinks!.link('github', 'dsackr-alt', 'user:dale.sackrider', 'admin');
+      // A second login linked directly to `user:dale.sackrider`: each actor keeps its own exact link, as before #524,
+      // so linking a login to one alias does not lock the other actor out.
+      state.identityLinks!.link('github', 'second-approver', 'user:dale.sackrider', 'admin');
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'second-approver', 'exact link wins over the alias');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), 'dsackr', 'exact link wins over the alias');
+      const who = holdDecider(state, state.approvals.get(h.approvalId)!, 'user:dale.sackrider');
+      assert.equal(who.ok, true);
+      const out = await decideApproval(state, h.approvalId, 'reject', admin('user:dale.sackrider'));
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.equal((await call(holdPath(), 'GET', token)).body.by, 'second-approver', 'decided by the exact-actor login');
+      // An exact link that is not an approver is not rescued by an approver reached through the alias.
+      state.identityLinks!.unlink('github', 'second-approver');
+      state.identityLinks!.link('github', 'not-on-the-list', 'user:dale.sackrider', 'admin');
+      const { token: t2 } = await liveRun();
+      const { body: h2 } = await call(holdPath('conductor', 'k-b2'), 'PUT', t2, { ...ask, id: 'k-b2' });
+      assert.equal(githubLoginOf(state, 'user:dale.sackrider'), 'not-on-the-list');
+      const refused = await decideApproval(state, h2.approvalId, 'reject', admin('user:dale.sackrider'));
+      assert.equal(refused.status, 403);
+      assert.equal((refused.body as { error: string }).error, 'not_an_approver');
+    });
+
+    it('more than one distinct GitHub login reached through the alias names none', async () => {
+      const { token } = await liveRun();
+      const { body: h } = await call(holdPath(), 'PUT', token, ask);
+      // Two logins on two of Dale's Cloudflare actors, none on `user:dale.sackrider` itself: the alias is ambiguous.
+      state.identityLinks!.link('github', 'dsackr-alt', 'cloudflare:dale@beercanlabs.com', 'admin');
       assert.equal(githubLoginOf(state, 'user:dale.sackrider'), undefined);
-      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), undefined, 'ambiguous from either actor');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale.sackrider@gmail.com'), 'dsackr', 'each Cloudflare actor keeps its exact link');
+      assert.equal(githubLoginOf(state, 'cloudflare:dale@beercanlabs.com'), 'dsackr-alt', 'each Cloudflare actor keeps its exact link');
       const who = holdDecider(state, state.approvals.get(h.approvalId)!, 'user:dale.sackrider');
       assert.equal(who.ok, false);
       const out = await decideApproval(state, h.approvalId, 'reject', admin('user:dale.sackrider'));

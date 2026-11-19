@@ -66,29 +66,32 @@ function factoryUserOf(state: FactoryState, actor: string): string | undefined {
   }
 }
 
+/** The one login among these links, else undefined (none, or more than one distinct login: ambiguous names none). */
+function soleLogin(links: ReadonlyArray<{ id: string }>): string | undefined {
+  const logins = new Map<string, string>();
+  for (const l of links) logins.set(l.id.toLowerCase(), l.id);
+  return logins.size === 1 ? [...logins.values()][0] : undefined;
+}
+
 /**
  * The GitHub login a person linked (`github:<login>`), when exactly one is; a fleet checks approvers by login.
  *
- * #524: a link counts as the person's when its actor is the same actor string (case-insensitive), or when both the link's
- * actor and the deciding actor resolve to the same factory user in the principal store (for example the console's
- * `user:dale.sackrider` and the link's `cloudflare:dale.sackrider@gmail.com`, an email on that user). Nothing else
- * makes two actors one person. More than one distinct login across those links is ambiguous and names none.
+ * Links on the deciding actor's own actor string (case-insensitive) decide first, exactly as before #524: if any exist,
+ * the answer comes from those alone. #524: only when the actor has no such link does a link on another actor of the same
+ * factory user count, where both resolve to one `user:<id>` in the principal store through `user:` or
+ * `cloudflare:<email>` (for example the console's `user:dale.sackrider` and the link's
+ * `cloudflare:dale.sackrider@gmail.com`, an email on that user). Nothing else makes two actors one person. More than one
+ * distinct login among the links considered is ambiguous and names none.
  */
 export function githubLoginOf(state: FactoryState, actor: string | undefined): string | undefined {
   if (!actor) return undefined;
   const lower = actor.toLowerCase();
-  let me: string | null | undefined = null; // resolved lazily: only when a link's actor is not the same string
-  const logins = new Map<string, string>();
-  for (const l of state.identityLinks?.list() ?? []) {
-    if (l.provider !== 'github') continue;
-    let mine = l.actor.toLowerCase() === lower;
-    if (!mine) {
-      if (me === null) me = factoryUserOf(state, actor);
-      mine = me !== undefined && factoryUserOf(state, l.actor) === me;
-    }
-    if (mine) logins.set(l.id.toLowerCase(), l.id);
-  }
-  return logins.size === 1 ? [...logins.values()][0] : undefined;
+  const github = (state.identityLinks?.list() ?? []).filter((l) => l.provider === 'github');
+  const exact = github.filter((l) => l.actor.toLowerCase() === lower);
+  if (exact.length > 0) return soleLogin(exact);
+  const me = factoryUserOf(state, actor);
+  if (me === undefined) return undefined;
+  return soleLogin(github.filter((l) => factoryUserOf(state, l.actor) === me));
 }
 
 /**
