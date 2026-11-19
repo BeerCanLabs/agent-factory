@@ -295,6 +295,14 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin' },
   { method: 'PUT', path: '/api/v1/setup/idp', privilege: 'grants.manage', role: 'admin', body: {} },
   { method: 'POST', path: `/api/v1/skills/${SKILL}/retire`, privilege: 'skills.retire.force', role: 'admin', body: { force: true } },
+  // Speak-as grants (household voice / errands)
+  { method: 'GET', path: '/api/v1/speak-as/callable-agents', privilege: 'agents.converse', role: 'operator' },
+  { method: 'GET', path: '/api/v1/speak-as-grants', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/speak-as-grants', privilege: 'grants.manage', role: 'admin', body: { client: 'agent:rosie' } },
+  { method: 'GET', path: '/api/v1/speak-as-grants/sag_nope', privilege: 'grants.manage', role: 'admin' },
+  { method: 'DELETE', path: '/api/v1/speak-as-grants/sag_nope', privilege: 'grants.manage', role: 'admin' },
+  { method: 'POST', path: '/api/v1/speak-as-grants/sag_nope/members', privilege: 'grants.manage', role: 'admin', body: { principalId: 'user:dale.sackrider' } },
+  { method: 'DELETE', path: '/api/v1/speak-as-grants/sag_nope/members/user:dale.sackrider', privilege: 'grants.manage', role: 'admin' },
 ];
 
 async function listen(server: http.Server): Promise<number> {

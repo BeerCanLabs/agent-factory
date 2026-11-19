@@ -365,11 +365,18 @@ export async function createRun(state: PropertyManagerState, agentId: string, op
       copy.factoryKind = opts.factoryKind;
     }
     if (opts.caller && !isSmoke) {
-      copy.caller = { ...opts.caller };
+      const c = opts.caller as { actor: string; verified?: boolean; channel?: string; via?: string; assurance?: string; mode?: string };
+      if (c.verified && c.via && (c.mode === 'call' || c.mode === 'errand')) {
+        copy.caller = { actor: c.actor, verified: true, channel: c.channel, via: c.via, assurance: c.assurance, mode: c.mode };
+      } else {
+        copy.caller = { ...opts.caller };
+      }
     }
     sanitizedInput = copy;
   } else if (opts.caller && opts.input === undefined && !isSmoke) {
     sanitizedInput = { caller: { ...opts.caller } };
+  } else if (opts.caller && typeof opts.input === 'string' && !isSmoke) {
+    sanitizedInput = { text: opts.input, caller: { ...opts.caller } };
   } else if (isSmoke && (opts.input === undefined || typeof opts.input !== 'object')) {
     sanitizedInput = { factoryKind: 'smoke' };
   }

@@ -335,7 +335,7 @@ describe('MCP Protocol Compliance & Conformance (TSK-337, GAP-248, CL3, CL6, CL1
 
     assert.equal(agentToolsRes.jsonrpc, '2.0');
     const toolNames = agentToolsRes.result.tools.map((t: any) => t.name).sort();
-    assert.deepEqual(toolNames, ['ask', 'get_agent_info', 'get_replies']);
+    assert.deepEqual(toolNames, ['ask', 'get_agent_info', 'get_replies', 'list_callable_agents']);
 
     // Root TOOLS includes agents_converse
     const converseTool = TOOLS.find((t) => t.name === 'agents_converse');

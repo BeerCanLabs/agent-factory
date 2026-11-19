@@ -25,7 +25,7 @@ import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { McpOAuthStore, type McpOAuthDoc } from './mcp-oauth.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
-import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, type GrantsDoc, type PrincipalsDoc } from '@beercanlabs/factory-bouncer';
+import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, SpeakAsGrantStore, type GrantsDoc, type PrincipalsDoc, type SpeakAsDoc } from '@beercanlabs/factory-bouncer';
 import { FleetStateStore, auditFleetStateLoad } from './fleet-state.js';
 import { ScheduleStore, createTimekeeper } from '@beercanlabs/factory-timekeeper';
 import { IdentityLinkStore } from './identity-links.js';
@@ -220,6 +220,9 @@ const grants = await GrantStore.open(
 const keys = await ApiKeyStore.open(
   docBackendFromUri<ApiKeysDoc>(process.env.FACTORY_KEYS_STORE_URI, join(DATA_DIR, 'auth', 'keys')),
 );
+const speakAs = await SpeakAsGrantStore.open(
+  docBackendFromUri<SpeakAsDoc>(process.env.FACTORY_SPEAK_AS_STORE_URI, join(DATA_DIR, 'auth', 'speak-as')),
+);
 
 const idpConfig = await IdpConfigStore.open(
   docBackendFromUri<IdpConfigDoc>(process.env.FACTORY_IDP_CONFIG_STORE_URI, join(DATA_DIR, 'auth', 'idp-config')),
@@ -234,6 +237,7 @@ const state: FactoryState = {
   groups,
   principals,
   grants,
+  speakAs,
   modelStore,
   // §6.9 M3: the dynamic catalog gatekeeper-egress serves, so the admin chooses from what is actually offered.
   modelCatalog: modelStore.toEgressCatalog(),

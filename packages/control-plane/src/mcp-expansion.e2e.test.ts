@@ -157,8 +157,8 @@ describe('Headless MCP Neck Expansion (TSK-338, GAP-250, GAP-251, E9, CL6, CL11)
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('1. Core toolset default on POST /mcp is <= 40 tools, matches inCore, and 191 total tools in catalog', async () => {
-    assert.equal(TOOLS.length, 191);
+  it('1. Core toolset default on POST /mcp is <= 40 tools, matches inCore, and 192 total tools in catalog', async () => {
+    assert.equal(TOOLS.length, 192);
     const coreCount = TOOLS.filter((t) => (t as any)._meta?.inCore).length;
     assert.ok(coreCount <= 40, `Core tools count must be <= 40, found ${coreCount}`);
     assert.equal(coreCount, 39);
@@ -518,7 +518,7 @@ describe('Headless MCP Neck Expansion (TSK-338, GAP-250, GAP-251, E9, CL6, CL11)
   });
 
   it('10. Conversational agent surface: POST /mcp/agents/:id', async () => {
-    // 1. tools/list on /mcp/agents/:id returns exactly the 3 conversational tools
+    // 1. tools/list on /mcp/agents/:id returns the conversational tools plus list_callable_agents
     const listRes = await mcpCall('/mcp/agents/castle', {
       jsonrpc: '2.0',
       id: 1,
@@ -526,7 +526,7 @@ describe('Headless MCP Neck Expansion (TSK-338, GAP-250, GAP-251, E9, CL6, CL11)
     }, ADMIN);
     assert.equal(listRes.status, 200);
     const tools = listRes.body.result?.tools?.map((t: any) => t.name).sort() ?? [];
-    assert.deepEqual(tools, ['ask', 'get_agent_info', 'get_replies']);
+    assert.deepEqual(tools, ['ask', 'get_agent_info', 'get_replies', 'list_callable_agents']);
 
     // 2. Calling get_agent_info returns agent status
     const infoRes = await mcpCall('/mcp/agents/castle', {

@@ -1072,6 +1072,11 @@ export async function handleAgentMcp(
           properties: {
             message: { type: 'string', description: 'The message or prompt to send to the agent' },
             waitSeconds: { type: 'number', description: 'Optional wait seconds (0..25) to poll for immediate reply' },
+            speaker: { type: 'string', description: "Enrolled person speaking: a user:<id> or an enrolled alias (e.g. 'dale')" },
+            conversationId: { type: 'string', description: 'Existing conversation id to continue a live call' },
+            mode: { type: 'string', enum: ['call', 'errand'], description: "call = live multi-turn; errand = one-shot task (default call)" },
+            channel: { type: 'string', description: "How the person is reaching the agent (default 'voice')" },
+            assurance: { type: 'string', description: "How the client identified the speaker (default 'voice-asserted')" },
           },
           required: ['message'],
         },
@@ -1085,6 +1090,7 @@ export async function handleAgentMcp(
           type: 'object',
           properties: {
             after: { type: 'number', description: 'Sequence number to fetch replies after (defaults to 0)' },
+            conversationId: { type: 'string', description: 'Only replies for this live conversation' },
           },
         },
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -1096,6 +1102,19 @@ export async function handleAgentMcp(
         inputSchema: {
           type: 'object',
           properties: {},
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      {
+        name: 'list_callable_agents',
+        title: 'List Callable Agents',
+        description: 'List agents this client may connect the enrolled speaker to (id, display name, short description). The per-agent voice map stays on the client.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            speaker: { type: 'string', description: "Enrolled person: a user:<id> or an enrolled alias (e.g. 'dale')" },
+          },
+          required: ['speaker'],
         },
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
@@ -1114,10 +1133,16 @@ export async function handleAgentMcp(
         return { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: 'message is required' }] } };
       }
       const waitSeconds = typeof args.waitSeconds === 'number' && Number.isFinite(args.waitSeconds) ? Math.max(0, Math.min(25, args.waitSeconds)) : 0;
+      const speakAs: Record<string, unknown> = {};
+      if (typeof args.speaker === 'string' && args.speaker.trim()) speakAs.speaker = args.speaker.trim();
+      if (typeof args.conversationId === 'string' && args.conversationId.trim()) speakAs.conversationId = args.conversationId.trim();
+      if (args.mode === 'call' || args.mode === 'errand') speakAs.mode = args.mode;
+      if (typeof args.channel === 'string' && args.channel.trim()) speakAs.channel = args.channel.trim();
+      if (typeof args.assurance === 'string' && args.assurance.trim()) speakAs.assurance = args.assurance.trim();
       const inReq = createInProcessRequest({
         method: 'POST',
         url: `/api/v1/agents/${encodeURIComponent(agentId)}/conversation`,
-        body: JSON.stringify({ input: message, waitSeconds }),
+        body: JSON.stringify({ input: message, waitSeconds, ...speakAs }),
       });
       const out = await dispatchInProcess(state, inReq, principal, clientId);
       let parsed: unknown = out.body;
@@ -1137,9 +1162,36 @@ export async function handleAgentMcp(
 
     if (toolName === 'get_replies') {
       const after = typeof args.after === 'number' && Number.isFinite(args.after) ? args.after : 0;
+      const conversationId = typeof args.conversationId === 'string' ? args.conversationId.trim() : '';
+      const qs = new URLSearchParams({ after: String(after) });
+      if (conversationId) qs.set('conversationId', conversationId);
       const inReq = createInProcessRequest({
         method: 'GET',
-        url: `/api/v1/agents/${encodeURIComponent(agentId)}/replies?after=${after}`,
+        url: `/api/v1/agents/${encodeURIComponent(agentId)}/replies?${qs.toString()}`,
+      });
+      const out = await dispatchInProcess(state, inReq, principal, clientId);
+      let parsed: unknown = out.body;
+      try { parsed = JSON.parse(out.body); } catch {}
+      const redacted = redactBody(parsed, state.secretValues);
+      const isErr = out.statusCode >= 400;
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: typeof redacted === 'string' ? redacted : JSON.stringify(redacted) }],
+          structuredContent: (typeof redacted === 'object' && redacted !== null) ? redacted : { value: redacted },
+          ...(isErr ? { isError: true } : {}),
+        },
+      };
+    }
+
+    if (toolName === 'list_callable_agents') {
+      const speaker = typeof args.speaker === 'string' ? args.speaker.trim() : '';
+      const qs = new URLSearchParams();
+      if (speaker) qs.set('speaker', speaker);
+      const inReq = createInProcessRequest({
+        method: 'GET',
+        url: `/api/v1/speak-as/callable-agents?${qs.toString()}`,
       });
       const out = await dispatchInProcess(state, inReq, principal, clientId);
       let parsed: unknown = out.body;
