@@ -367,9 +367,20 @@ export function json(res: http.ServerResponse, status: number, body: unknown) {
 }
 
 /** Agent-visible speak-as caller: the enrolled person, with no onBehalfOf or key roles. */
-export function leanDeliveredCaller(caller: AuthenticatedCaller | undefined): { actor: string; verified: true; channel: string; via: string; assurance: string; mode: 'call' | 'errand' } | undefined {
+export function leanDeliveredCaller(caller: AuthenticatedCaller | undefined): { actor: string; verified: true; channel: string; via: string; assurance: string; mode: 'call' | 'errand'; name?: string; relationship?: 'owner' | 'family' } | undefined {
   if (!caller?.verified || !caller.via || !caller.channel || !caller.assurance || (caller.mode !== 'call' && caller.mode !== 'errand')) return undefined;
-  return { actor: caller.actor, verified: true, channel: caller.channel, via: caller.via, assurance: caller.assurance, mode: caller.mode };
+  const name = typeof caller.name === 'string' ? caller.name.trim() : '';
+  const relationship = caller.relationship === 'owner' || caller.relationship === 'family' ? caller.relationship : undefined;
+  return {
+    actor: caller.actor,
+    verified: true,
+    channel: caller.channel,
+    via: caller.via,
+    assurance: caller.assurance,
+    mode: caller.mode,
+    ...(name ? { name: name.slice(0, 60) } : {}),
+    ...(relationship ? { relationship } : {}),
+  };
 }
 
 function readBodyBytes(req: http.IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
@@ -4542,7 +4553,18 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       }
       delivered = applied.delivered;
       conversationId = applied.conversation.id;
-      caller = { actor: applied.delivered.actor, role: 'operator', roles: [], verified: true, channel: applied.delivered.channel, via: applied.delivered.via, assurance: applied.delivered.assurance, mode: applied.delivered.mode };
+      caller = {
+        actor: applied.delivered.actor,
+        role: 'operator',
+        roles: [],
+        verified: true,
+        channel: applied.delivered.channel,
+        via: applied.delivered.via,
+        assurance: applied.delivered.assurance,
+        mode: applied.delivered.mode,
+        ...(applied.delivered.name ? { name: applied.delivered.name } : {}),
+        ...(applied.delivered.relationship ? { relationship: applied.delivered.relationship } : {}),
+      };
     }
     const turnId = randomUUID();
 

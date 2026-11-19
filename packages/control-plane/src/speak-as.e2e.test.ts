@@ -220,7 +220,7 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
         client: 'agent:rosie',
         purpose: 'household voice and errands',
         expiresAt: new Date(Date.now() + 90 * 86400000).toISOString(),
-        members: [{ principalId: 'user:dale.sackrider', aliases: ['dale'] }],
+        members: [{ principalId: 'user:dale.sackrider', aliases: ['dale'], relationship: 'owner' }],
       },
     });
     assert.equal(grant.status, 201, JSON.stringify(grant.body));
@@ -265,6 +265,7 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(started.body.caller.via, 'agent:rosie');
     assert.equal(started.body.caller.mode, 'call');
     assert.equal(started.body.caller.assurance, 'voice-asserted');
+    assert.equal(started.body.caller.relationship, 'owner');
     assert.equal(started.body.caller.onBehalfOf, undefined);
     assert.match(started.body.conversationId, /^convo_/);
     const run = state.runs.get(started.body.runId);
@@ -274,7 +275,7 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
 
     const enrolled = await call('POST', `/api/v1/speak-as-grants/${grantId}/members`, {
       token: TOKENS.admin,
-      body: { principalId: 'user:partner', aliases: ['partner'], targetAgents: ['higgins'] },
+      body: { principalId: 'user:partner', aliases: ['partner'], targetAgents: ['higgins'], relationship: 'family' },
     });
     assert.equal(enrolled.status, 200, JSON.stringify(enrolled.body));
 
@@ -291,6 +292,7 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     });
     assert.ok(allowed.status < 300, JSON.stringify(allowed.body));
     assert.equal(allowed.body.caller.actor, 'user:partner');
+    assert.equal(allowed.body.caller.relationship, 'family');
   });
 
   it('stamps an errand with mode=errand and lists callable agents per speaker', async () => {
