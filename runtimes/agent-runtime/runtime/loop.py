@@ -27,6 +27,15 @@ MAX_HELPER_REPLY_CHARS = 20000
 HELPER_REPLY_TRUNCATION = "\n… [truncated]"
 DEFAULT_SOUL = "You are a helpful assistant."
 
+# Injected on every turn, every channel. There is no separate "correct prior mistakes first"
+# rule in the runtime; this stops volunteered corrections and false action claims.
+TURN_GUIDANCE = (
+    "Answer this turn naturally. Do not bring up corrections, retractions, or meta-commentary "
+    "about earlier replies or conversations unless the person explicitly asks you to correct or "
+    "revisit them. Never claim you took an action, retried, or used a tool unless you actually "
+    "did so in this turn."
+)
+
 
 def write_result(result: dict) -> None:
     path = Path(os.environ.get("FACTORY_RESULT_FILE", "/tmp/factory-result.json"))
@@ -121,7 +130,7 @@ def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | No
     pending_note_text = f"\n\n{pending}" if pending else ""
     now = clock_line(tz_name)
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
-    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\nIt is {now}.{history_note}"
+    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\n{TURN_GUIDANCE}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:

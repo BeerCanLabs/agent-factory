@@ -922,7 +922,21 @@ class TestSkills(Base):
             "and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp.",
             prompt,
         )
+        self.assertIn(loop.TURN_GUIDANCE, prompt)
 
+    def test_every_turn_gets_no_unsolicited_correction_guidance(self):
+        """Factory-level: every channel gets the same no-unsolicited-correction / no-false-claims guidance."""
+        voice = {"message": "what time is it", "caller": {"actor": "user:dale.sackrider", "channel": "voice", "via": "agent:rosie", "verified": True, "relationship": "owner"}}
+        discord = {"message": "thanks", "caller": {"actor": "user:dale.sackrider", "channel": "discord"}, "replyTo": {"channel": "discord", "channelId": "1"}}
+        console = {"message": "hello"}
+        for payload in (voice, discord, console):
+            prompt = loop.system_prompt("Be helpful.", payload)
+            self.assertIn(loop.TURN_GUIDANCE, prompt)
+            self.assertIn("Do not bring up corrections, retractions, or meta-commentary", prompt)
+            self.assertIn("Never claim you took an action, retried, or used a tool unless you actually did so in this turn.", prompt)
+
+    def test_whiteboard_temporal_storage_is_unprefixed(self):
+        """Historical user whiteboard turns have UTC timestamps; assistant turns and raw storage stay unprefixed."""
         self.mind.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.mind / "agent_state.db"))
         episodic.init_episodic_tables(conn)
