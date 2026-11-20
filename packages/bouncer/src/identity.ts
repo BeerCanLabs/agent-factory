@@ -296,8 +296,8 @@ export type AuthenticatedCaller = {
   assurance?: string;
   /** 'call' = live conversation; 'errand' = one-shot task for the via client to relay. */
   mode?: 'call' | 'errand';
-  /** From a speak-as grant member, when set: 'owner' or 'family'. */
-  relationship?: 'owner' | 'family';
+  /** From a speak-as grant member, when set: 'owner', 'family', or 'child'. */
+  relationship?: 'owner' | 'family' | 'child';
 };
 
 export type IngressPrivilege = 'agents.wake' | 'agents.converse';

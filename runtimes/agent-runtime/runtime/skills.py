@@ -217,8 +217,23 @@ def _reported_error(out: str) -> str | None:
     return None
 
 
+# Ask/call another factory agent. A child speaker must not trigger these, even if the model names a different speaker.
+_AGENT_TO_AGENT_TOOLS = frozenset({"ask_agent", "call_agent"})
+
+
+def _child_speaker(context: dict) -> bool:
+    caller = context.get("caller") if isinstance(context, dict) else None
+    return isinstance(caller, dict) and caller.get("relationship") == "child"
+
+
 def run_tool(tool: Tool, raw_arguments: str, context: dict) -> str:
     label = f"{tool.skill}/{tool.name}"
+    if tool.name in _AGENT_TO_AGENT_TOOLS and _child_speaker(context):
+        log_tool_error(label, "reported: child_restricted")
+        return json.dumps({
+            "error": "child_restricted",
+            "message": "a child speaker cannot start an agent-to-agent call or errand",
+        })
     if len(raw_arguments or "") > MAX_ARGUMENT_CHARS:
         log_tool_error(label, f"arguments too large ({len(raw_arguments)} characters)")
         return "error: arguments too large"

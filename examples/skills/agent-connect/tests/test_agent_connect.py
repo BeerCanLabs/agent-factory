@@ -36,6 +36,13 @@ class AgentConnectTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["mode"], "errand")
 
+    def test_child_speaker_is_refused(self):
+        ctx = {"caller": {"actor": "user:kid", "relationship": "child"}}
+        call = json.loads(self.tools()["call_agent"]({"agent": "donna", "speaker": "dale"}, ctx))
+        self.assertEqual(call["error"], "child_restricted")
+        ask = json.loads(self.tools()["ask_agent"]({"agent": "donna", "message": "hi", "speaker": "dale", "dryRun": True}, ctx))
+        self.assertEqual(ask["error"], "child_restricted")
+
 
 if __name__ == "__main__":
     unittest.main()

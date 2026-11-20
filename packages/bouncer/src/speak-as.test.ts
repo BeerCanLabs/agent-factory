@@ -117,4 +117,42 @@ describe('speak-as grants', () => {
     assert.equal('name' in bare, false);
     assert.equal(verifySpeakAs([], { client: 'agent:rosie', asUser: 'not-a-user', targetAgentId: 'donna' }).ok, false);
   });
+
+  it('refuses a child member without an allowlist, and stamps child_restricted off-allowlist', async () => {
+    const store = await SpeakAsGrantStore.open(new MemoryDocBackend<SpeakAsDoc>());
+    const grant = await store.create({
+      client: 'agent:rosie',
+      members: [{ principalId: 'user:dale.sackrider', aliases: ['dale'], relationship: 'owner' }],
+      expiresAt: '2028-01-01T00:00:00Z',
+      by: 'user:admin',
+    });
+    await assert.rejects(
+      store.enroll(grant.id, { principalId: 'user:kid', aliases: ['kid'], relationship: 'child' }, 'user:admin'),
+      (err: unknown) => err instanceof SpeakAsStoreError && err.code === 'child_requires_allowlist',
+    );
+    const enrolled = await store.enroll(
+      grant.id,
+      { principalId: 'user:kid', aliases: ['kid'], targetAgents: ['rosie'], relationship: 'child' },
+      'user:admin',
+    );
+    assert.equal(enrolled.members.find((m) => m.principalId === 'user:kid')?.relationship, 'child');
+    const allowed = store.verifyRequest({ client: 'agent:rosie', speaker: 'kid', targetAgentId: 'rosie' });
+    assert.equal(allowed.ok, true);
+    const denied = store.verifyRequest({ client: 'agent:rosie', speaker: 'kid', targetAgentId: 'donna' });
+    assert.equal(denied.ok, false);
+    if (!denied.ok) {
+      assert.equal(denied.status, 403);
+      assert.equal(denied.error, 'child_restricted');
+    }
+    const caller = deliveredCaller({
+      actor: 'user:kid',
+      via: 'agent:rosie',
+      channel: 'voice',
+      assurance: 'voice-asserted',
+      mode: 'call',
+      name: 'Kid',
+      relationship: 'child',
+    });
+    assert.equal(caller.relationship, 'child');
+  });
 });
