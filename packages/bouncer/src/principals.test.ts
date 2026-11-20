@@ -673,5 +673,16 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
     assert.equal(created.displayName, 'Kid');
     assert.deepEqual(created.emails, []);
     assert.equal(store.get('user:kid')?.id, 'user:kid');
+
+    const dir = mkdtempSync(join(tmpdir(), 'principals-no-email-'));
+    try {
+      const persisted = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir));
+      await persisted.create({ id: 'user:alyssa.sackrider', displayName: 'Alyssa', emails: [], by: 'user:admin' });
+      const reopened = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(dir));
+      assert.equal(reopened.get('user:alyssa.sackrider')?.displayName, 'Alyssa');
+      assert.deepEqual(reopened.get('user:alyssa.sackrider')?.emails, []);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
