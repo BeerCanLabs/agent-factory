@@ -729,8 +729,10 @@ export class PrincipalStore {
         if (typeof raw.displayName !== 'string' || !raw.displayName.trim()) {
           throw new Error(`invalid displayName on ${raw.id}`);
         }
-        if (!Array.isArray(raw.emails) || raw.emails.length === 0) {
-          throw new Error(`principal ${raw.id} has no emails`);
+        // Create already allows an explicit id with no email (a child speaker, for
+        // example). Reload must accept the same records or a restart crashes closed.
+        if (raw.emails !== undefined && !Array.isArray(raw.emails)) {
+          throw new Error(`principal ${raw.id} has invalid emails`);
         }
         const emails: string[] = [];
         for (const e of raw.emails) {
