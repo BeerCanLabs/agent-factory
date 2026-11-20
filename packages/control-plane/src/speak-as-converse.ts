@@ -81,7 +81,37 @@ export function applySpeakAs(
       const resolved = state.speakAs.resolveSpeaker(client, opts.fields.speaker);
       if (!resolved.ok) return resolved;
       if (resolved.principalId !== existing.actor) {
-        return { ok: false, status: 409, error: 'speaker_mismatch', message: 'speaker does not match the person this conversation was opened as' };
+        // A newly verified enrolled speaker may take over the same conversation
+        // (for example a child then a parent on the robot). The delivered caller
+        // for this turn becomes the new speaker; earlier speakers are not kept
+        // on the conversation record.
+        const verified = state.speakAs.verifyRequest({
+          client,
+          speaker: opts.fields.speaker,
+          targetAgentId: opts.targetAgentId,
+        });
+        if (!verified.ok) return verified;
+        const nextMode = opts.fields.mode !== existing.mode && opts.fields.mode === 'errand' ? 'errand' : existing.mode;
+        if (verified.member.relationship === 'child' && nextMode === 'errand') {
+          return {
+            ok: false,
+            status: 403,
+            error: 'child_restricted',
+            message: 'a child speaker cannot start an agent-to-agent call or errand',
+          };
+        }
+        if (opts.fields.mode !== existing.mode && opts.fields.mode === 'errand') {
+          return { ok: false, status: 409, error: 'mode_mismatch', message: 'cannot switch a live call to an errand' };
+        }
+        const displayName = state.principals?.get(verified.actor)?.displayName?.trim();
+        existing.actor = verified.actor;
+        existing.grantId = verified.grant.id;
+        existing.channel = opts.fields.channel || existing.channel;
+        existing.assurance = opts.fields.assurance || existing.assurance;
+        if (displayName) existing.name = displayName.slice(0, 60);
+        else delete existing.name;
+        if (verified.member.relationship) existing.relationship = verified.member.relationship;
+        else delete existing.relationship;
       }
     }
     if (opts.fields.mode !== existing.mode && opts.fields.mode === 'errand') {

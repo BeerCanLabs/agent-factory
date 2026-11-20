@@ -2088,9 +2088,21 @@ async function handOff(
   await state.runtime.deliver(agent, payload);
   deliverToMailbox(state, agent.id, payload);
   const liveCandidate = activeRun(state, agent.id);
-  const currentRun = liveCandidate && !isBackgroundRun(liveCandidate.trigger) ? liveCandidate : handoffTargets[0];
+  let currentRun = liveCandidate && !isBackgroundRun(liveCandidate.trigger) ? liveCandidate : handoffTargets[0];
   if (currentRun) {
     if (currentRun.input === undefined) currentRun.input = payload;
+    // A verified speaker change on a warm run: this turn's caller is authoritative for
+    // the run record too, so later access and tools do not keep the previous speaker.
+    if (opts.caller?.actor && currentRun.caller?.actor !== opts.caller.actor) {
+      const nextInput =
+        currentRun.input && typeof currentRun.input === 'object' && !Array.isArray(currentRun.input)
+          ? { ...(currentRun.input as Record<string, unknown>), caller: { ...opts.caller } }
+          : currentRun.input;
+      currentRun = state.runs.update(currentRun.runId, {
+        caller: opts.caller,
+        ...(nextInput !== undefined ? { input: nextInput } : {}),
+      });
+    }
     if (currentRun.state !== 'QUEUED') scheduleTimeout(state, currentRun);
     // Warm-run taint protection (§6.9 M2, GAP-210): if a warm run receives a turn from a non-manager, taint it against model changes.
     if (!isSenderManager(state, agent.id, { requestedBy: opts.requestedBy, caller: opts.caller, actor })) {
