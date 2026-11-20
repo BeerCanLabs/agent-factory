@@ -73,6 +73,24 @@ describe('ownerContactsFor', () => {
     assert.deepEqual(ownerContactsFor(state({ owners: [] }), 'donna'), []);
   });
 
+  it('falls back to configuration owners when the grant store has no content-owner', () => {
+    const contacts = ownerContactsFor(
+      {
+        ...state({
+          owners: [],
+          principals: [{ id: 'user:dale.sackrider', displayName: 'Dale', emails: ['dale.sackrider@gmail.com'] }],
+          links: [{ provider: 'discord', id: '470400107028938752', actor: 'cloudflare:dale.sackrider@gmail.com', name: 'Dale' }],
+        }),
+        grants: { healthy: true, setAgentKindLookup() {}, activeContentOwnerOf: () => undefined },
+        configs: { current: () => ({ owners: ['cloudflare:dale.sackrider@gmail.com'] }) },
+      } as unknown as FactoryState,
+      'donna',
+    );
+    assert.equal(contacts[0]?.actor, 'cloudflare:dale.sackrider@gmail.com');
+    assert.deepEqual(contacts[0]?.discordUserIds, ['470400107028938752']);
+    assert.equal(contacts[0]?.name, 'Dale');
+  });
+
   it('ignores a non-numeric discord id', () => {
     const contacts = ownerContactsFor(
       state({

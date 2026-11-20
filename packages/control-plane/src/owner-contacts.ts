@@ -50,7 +50,13 @@ function nameFor(
 
 /** The agent's owners, each with Discord user ids from identity links that belong to that person. */
 export function ownerContactsFor(state: FactoryState, agentId: string): OwnerContact[] {
-  const owners = ownersOf(state, agentId);
+  let owners = ownersOf(state, agentId);
+  // Grants are authoritative when a content-owner exists, but some personal agents only
+  // record the owner on the configuration (Donna: cloudflare:dale.sackrider@gmail.com).
+  if (!owners.length) {
+    const fromConfig = state.configs?.current(agentId)?.owners ?? [];
+    owners = fromConfig.filter((o): o is string => typeof o === 'string' && o.trim().length > 0).map((o) => o.trim());
+  }
   if (!owners.length) return [];
   const links = state.identityLinks?.list() ?? [];
   const contacts: OwnerContact[] = [];
