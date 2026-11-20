@@ -261,5 +261,27 @@ class TestToolErrorsAreLogged(unittest.TestCase):
         key = "sk" + "-" + "proj" + "A1b2C3d4E5f6G7h8"
         self.assertNotIn(key, self.run_logged(lambda a, c: f"error: bad key {key}")[1])
 
+class ChildSpeakerToolGuard(unittest.TestCase):
+    def test_child_speaker_cannot_call_or_ask_agents(self):
+        called = {"n": 0}
+
+        def handler(args, ctx):
+            called["n"] += 1
+            return "should-not-run"
+
+        ctx = {"caller": {"actor": "user:kid", "relationship": "child"}}
+        for name in ("ask_agent", "call_agent"):
+            out = json.loads(run_tool(Tool("agent-connect", name, "", {}, handler), '{"agent": "donna"}', ctx))
+            self.assertEqual(out["error"], "child_restricted")
+        self.assertEqual(called["n"], 0)
+        # Adults still reach the tool. A family caller is not restricted here.
+        out = run_tool(
+            Tool("agent-connect", "ask_agent", "", {}, handler),
+            '{"agent": "donna"}',
+            {"caller": {"actor": "user:parent", "relationship": "family"}},
+        )
+        self.assertEqual(out, "should-not-run")
+        self.assertEqual(called["n"], 1)
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,11 +11,13 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from memory import episodic
 from runtime.factory import Factory, FactoryError
 from runtime.mind import Mind, is_scheduled_payload, open_mind
+from runtime.relay import mark_unseen_delivered, pending_note, relay_tools
 from runtime.skills import Tool, load_skills, log_tool_error, run_tool
 
 MAX_ROUNDS = 6
@@ -24,6 +26,15 @@ MAX_USER_CHARS = 20000
 MAX_HELPER_REPLY_CHARS = 20000
 HELPER_REPLY_TRUNCATION = "\n… [truncated]"
 DEFAULT_SOUL = "You are a helpful assistant."
+
+# Injected on every turn, every channel. There is no separate "correct prior mistakes first"
+# rule in the runtime; this stops volunteered corrections and false action claims.
+TURN_GUIDANCE = (
+    "Answer this turn naturally. Do not bring up corrections, retractions, or meta-commentary "
+    "about earlier replies or conversations unless the person explicitly asks you to correct or "
+    "revisit them. Never claim you took an action, retried, or used a tool unless you actually "
+    "did so in this turn."
+)
 
 
 def write_result(result: dict) -> None:
@@ -95,7 +106,18 @@ def helper_system_soul(soul: str, payload: dict) -> str:
     return brief or configured or DEFAULT_SOUL
 
 
-def system_prompt(soul: str, payload: dict) -> str:
+def clock_line(tz_name: str | None = None) -> str:
+    """The current time in the agent's configured IANA zone, else UTC."""
+    if isinstance(tz_name, str) and tz_name.strip():
+        try:
+            zone = ZoneInfo(tz_name.strip())
+            return datetime.now(zone).strftime(f"%A %Y-%m-%d %H:%M {tz_name.strip()}")
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
+
+
+def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | None = None) -> str:
     caller = caller_of(payload)
     speaking = ""
     if caller.get("actor"):
@@ -105,19 +127,24 @@ def system_prompt(soul: str, payload: dict) -> str:
     scheduled_note = ""
     if is_scheduled_payload(payload):
         scheduled_note = "\n\nThis is a scheduled background check. If nothing needs to be reported or said, respond with NO_REPLY."
-    now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
+    pending_note_text = f"\n\n{pending}" if pending else ""
+    now = clock_line(tz_name)
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
-    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}\n\nIt is {now}.{history_note}"
+    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\n{TURN_GUIDANCE}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:
     who = who_of(payload)
     user_text = text_of(payload)
+    owners = getattr(factory, "owners", None) or []
+    memory_dir = getattr(factory, "memory_dir", None)
+    pending = pending_note(who, memory_dir, owners) if memory_dir else ""
     fast = None if is_scheduled_payload(payload) else mind.fast_path(who, user_text)
     if fast is not None:
         return fast
     history, banner = mind.history(who, payload)
-    system = system_prompt(soul, payload) + (f"\n\n{banner}" if banner else "")
+    tz_name = getattr(factory, "timezone", None)
+    system = system_prompt(soul, payload, pending, tz_name if isinstance(tz_name, str) else None) + (f"\n\n{banner}" if banner else "")
     messages: list[dict] = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_text}]
     specs = [t.spec() for t in tools.values()]
     for spec, _ in mind.tools():
@@ -149,6 +176,8 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
     else:
         reply = "I could not finish that within the steps I am allowed."
     mind.remember(who, payload, user_text, reply, surface=(payload.get("replyTo") or {}).get("channel", "factory"), channel_id=(payload.get("replyTo") or {}).get("channelId"))
+    if pending and reply and not episodic.is_silent_reply(reply) and memory_dir:
+        mark_unseen_delivered(who, memory_dir, owners)
     return reply
 
 
@@ -232,8 +261,14 @@ def main(factory: Factory | None = None) -> int:
         print(f"[runtime] {err}", file=sys.stderr)
         write_result({"status": "failed", "output": {"error": str(err)}})
         return 1
-    loaded, problems = load_skills(config.get("skills") or [], reserved={spec["function"]["name"] for spec, _ in mind.tools()})
-    tools = {t.name: t for t in loaded}
+    memory_dir = Path(os.environ.get("MEMORY_DIR", "/tmp/mind"))
+    factory.memory_dir = memory_dir
+    factory.owners = config.get("owners") if isinstance(config.get("owners"), list) else []
+    factory.timezone = config.get("timezone") if isinstance(config.get("timezone"), str) else None
+    relayed = relay_tools(factory, memory_dir, factory.owners)
+    reserved = {spec["function"]["name"] for spec, _ in mind.tools()} | {t.name for t in relayed}
+    loaded, problems = load_skills(config.get("skills") or [], reserved=reserved)
+    tools = {t.name: t for t in [*loaded, *relayed]}
     for p in problems:
         print(f"[runtime] {p}", file=sys.stderr)
     turns = 0

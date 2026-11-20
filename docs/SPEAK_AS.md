@@ -69,9 +69,9 @@ The factory strips any client-supplied `caller` / `onBehalfOf` and writes this b
 }
 ```
 
-or `"mode": "errand"`. `name` is the principal's display name when the factory has one. `relationship` is present only when it was set on the grant member (`owner` or `family`).
+or `"mode": "errand"`. `name` is the principal's display name when the factory has one. `relationship` is present only when it was set on the grant member (`owner`, `family`, or `child`). When `relationship` is `owner`, the caller also has `isOwner: true` and `agentRoles: ["Owner"]`; when it is `family`, `agentRoles: ["Family"]` (not owner); a `child` has neither. Tools and egress must use these, never `via` (the client that connected the call).
 
-`via` is transport metadata only (which client connected the call). Treat `actor` as the person speaking. Reply in the first person, to them. When `relationship` is `family`, they are a household family member of the owner, not the owner; help them as themselves and do not treat them as the owner.
+`via` is transport metadata only (which client connected the call). Treat `actor` as the person speaking. Reply in the first person, to them. When `relationship` is `family`, they are a household family member of the owner, not the owner; help them as themselves and do not treat them as the owner. When `relationship` is `child`, they are a child in the household: use a kid-safe tone, and do not start agent-to-agent calls or errands on their behalf.
 
 - **`mode: "call"`** — a live, multi-turn conversation. Talk with the person directly.
 - **`mode: "errand"`** — a one-shot task sent by Rosie. Act on the requester’s authority (for example their calendar) and return a **result** Rosie can relay, not a chat opening.
@@ -175,7 +175,7 @@ Create body:
 
 A member may include `"targetAgents": ["higgins"]` to limit where they may be connected. Omit it (or pass an empty list) for every agent.
 
-A member may include `"relationship": "owner"` or `"relationship": "family"`. The factory copies that value onto the delivered caller. It is optional; omitting it does not change who may be connected.
+A member may include `"relationship": "owner"`, `"relationship": "family"`, or `"relationship": "child"`. The factory copies that value onto the delivered caller. It is optional; omitting it does not change who may be connected, except that a `child` member must have a non-empty `targetAgents` allowlist and cannot open errands or be connected to any agent outside that list (`403 child_restricted`).
 
 CLI (signed in as an admin):
 
@@ -184,6 +184,7 @@ factory speak-as grant --client agent:rosie --member user:dale.sackrider --alias
 factory speak-as list --client agent:rosie
 factory speak-as show sag_...
 factory speak-as enroll sag_... --member user:<id> --alias <shortname> --agents higgins --relationship family
+factory speak-as enroll sag_... --member user:<id> --alias <shortname> --agents rosie --relationship child
 factory speak-as unenroll sag_... --member user:<id>
 factory speak-as revoke sag_...
 ```

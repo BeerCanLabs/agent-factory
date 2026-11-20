@@ -661,4 +661,17 @@ describe('PrincipalStore & multi-email canonical principals (S1 #350)', () => {
       /sha256 mismatch/,
     );
   });
+
+  it('creates a principal with an explicit id and no email, and refuses email-less create without an id', async () => {
+    const store = await PrincipalStore.open();
+    await assert.rejects(
+      () => store.create({ displayName: 'Kid', emails: [], by: 'user:admin' }),
+      /at least one email is required when no explicit id is provided/,
+    );
+    const created = await store.create({ id: 'user:kid', displayName: 'Kid', emails: [], by: 'user:admin' });
+    assert.equal(created.id, 'user:kid');
+    assert.equal(created.displayName, 'Kid');
+    assert.deepEqual(created.emails, []);
+    assert.equal(store.get('user:kid')?.id, 'user:kid');
+  });
 });

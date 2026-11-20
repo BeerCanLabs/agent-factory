@@ -367,10 +367,18 @@ export function json(res: http.ServerResponse, status: number, body: unknown) {
 }
 
 /** Agent-visible speak-as caller: the enrolled person, with no onBehalfOf or key roles. */
-export function leanDeliveredCaller(caller: AuthenticatedCaller | undefined): { actor: string; verified: true; channel: string; via: string; assurance: string; mode: 'call' | 'errand'; name?: string; relationship?: 'owner' | 'family' } | undefined {
+export function leanDeliveredCaller(caller: AuthenticatedCaller | undefined): { actor: string; verified: true; channel: string; via: string; assurance: string; mode: 'call' | 'errand'; name?: string; relationship?: 'owner' | 'family' | 'child'; isOwner?: boolean; agentRoles?: string[] } | undefined {
   if (!caller?.verified || !caller.via || !caller.channel || !caller.assurance || (caller.mode !== 'call' && caller.mode !== 'errand')) return undefined;
   const name = typeof caller.name === 'string' ? caller.name.trim() : '';
-  const relationship = caller.relationship === 'owner' || caller.relationship === 'family' ? caller.relationship : undefined;
+  const relationship = caller.relationship === 'owner' || caller.relationship === 'family' || caller.relationship === 'child' ? caller.relationship : undefined;
+  const isOwner = caller.isOwner === true || relationship === 'owner';
+  const agentRoles = Array.isArray(caller.agentRoles)
+    ? caller.agentRoles.filter((r): r is string => typeof r === 'string' && r.trim() !== '')
+    : relationship === 'owner'
+      ? ['Owner']
+      : relationship === 'family'
+        ? ['Family']
+        : [];
   return {
     actor: caller.actor,
     verified: true,
@@ -380,6 +388,8 @@ export function leanDeliveredCaller(caller: AuthenticatedCaller | undefined): { 
     mode: caller.mode,
     ...(name ? { name: name.slice(0, 60) } : {}),
     ...(relationship ? { relationship } : {}),
+    ...(isOwner ? { isOwner: true } : {}),
+    ...(agentRoles.length ? { agentRoles } : {}),
   };
 }
 
@@ -4028,14 +4038,24 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       } else if (input && typeof input === 'object' && !Array.isArray(input) && delivered) {
         input = { ...(input as Record<string, unknown>), caller: delivered };
       }
+      const tzRaw = state.configs?.current(run.agentId)?.agent?.timezone;
+      let timeZone = 'America/Los_Angeles';
+      if (typeof tzRaw === 'string' && tzRaw.trim()) {
+        try {
+          Intl.DateTimeFormat('en-US', { timeZone: tzRaw.trim() });
+          timeZone = tzRaw.trim();
+        } catch {
+          // keep default
+        }
+      }
       json(res, 200, {
         runId: run.runId,
         input,
         temporal: {
-          local: now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'full', timeStyle: 'long' }),
+          local: now.toLocaleString('en-US', { timeZone, dateStyle: 'full', timeStyle: 'long' }),
           utc: now.toISOString(),
-          dayOfWeek: now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long' }),
-          timezone: 'America/Los_Angeles',
+          dayOfWeek: now.toLocaleDateString('en-US', { timeZone, weekday: 'long' }),
+          timezone: timeZone,
         },
       });
       return;
@@ -4553,9 +4573,10 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       }
       delivered = applied.delivered;
       conversationId = applied.conversation.id;
+      // Role mapping is from the speak-as actor (and their relationship), never the via client (agent:rosie).
       caller = {
         actor: applied.delivered.actor,
-        role: 'operator',
+        role: applied.delivered.isOwner ? 'agent-owner' : 'agent-member',
         roles: [],
         verified: true,
         channel: applied.delivered.channel,
@@ -4564,7 +4585,10 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         mode: applied.delivered.mode,
         ...(applied.delivered.name ? { name: applied.delivered.name } : {}),
         ...(applied.delivered.relationship ? { relationship: applied.delivered.relationship } : {}),
+        ...(applied.delivered.isOwner ? { isOwner: true } : {}),
+        ...(applied.delivered.agentRoles?.length ? { agentRoles: applied.delivered.agentRoles } : {}),
       };
+      delivered = leanDeliveredCaller(caller) ?? applied.delivered;
     }
     const turnId = randomUUID();
 

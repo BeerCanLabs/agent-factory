@@ -111,3 +111,21 @@ class Factory:
             self._call("POST", f"{self.url}/api/v1/runs/{self.run_id}/heartbeat", {}, timeout=10)
         except Exception:
             pass
+
+    def open_discord_dm(self, user_id: str) -> str:
+        """Open (or reuse) a DM channel with this Discord user, only through gatekeeper-egress."""
+        if not self.discord_base:
+            raise FactoryError(0, "DISCORD_BASE_URL is not set: no Discord DM")
+        if not user_id.isdigit() or not (15 <= len(user_id) <= 32):
+            raise FactoryError(0, "user id is not a Discord id")
+        out = self._call("POST", f"{self.discord_base}/users/@me/channels", {"recipient_id": user_id}, timeout=30)
+        channel_id = str((out or {}).get("id") or "")
+        if not channel_id.isdigit():
+            raise FactoryError(0, "discord did not return a DM channel id")
+        return channel_id
+
+    def send_discord_dm(self, user_id: str, content: str) -> dict:
+        """Send a proactive DM to a Discord user through gatekeeper-egress. Returns channel and message ids."""
+        channel_id = self.open_discord_dm(user_id)
+        body = self._call("POST", f"{self.discord_base}/channels/{channel_id}/messages", {"content": content[:1900]}, timeout=30)
+        return {"channelId": channel_id, "messageId": str((body or {}).get("id") or "")}

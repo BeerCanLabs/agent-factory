@@ -266,6 +266,8 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(started.body.caller.mode, 'call');
     assert.equal(started.body.caller.assurance, 'voice-asserted');
     assert.equal(started.body.caller.relationship, 'owner');
+    assert.equal(started.body.caller.isOwner, true);
+    assert.deepEqual(started.body.caller.agentRoles, ['Owner']);
     assert.equal(started.body.caller.onBehalfOf, undefined);
     assert.match(started.body.conversationId, /^convo_/);
     const run = state.runs.get(started.body.runId);
@@ -293,6 +295,8 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.ok(allowed.status < 300, JSON.stringify(allowed.body));
     assert.equal(allowed.body.caller.actor, 'user:partner');
     assert.equal(allowed.body.caller.relationship, 'family');
+    assert.equal(allowed.body.caller.isOwner, undefined);
+    assert.deepEqual(allowed.body.caller.agentRoles, ['Family']);
   });
 
   it('stamps an errand with mode=errand and lists callable agents per speaker', async () => {
@@ -353,5 +357,53 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(discovered.status, 200, JSON.stringify(discovered.rpc));
     assert.equal(discovered.rpc.result?.structuredContent?.speaker, 'user:dale.sackrider');
     assert.ok((discovered.rpc.result?.structuredContent?.agents ?? []).some((a: { id: string }) => a.id === 'donna'));
+  });
+
+  it('enrolls a child on an allowlist, lists only those agents, and refuses other agents and errands', async () => {
+    const created = await call('POST', `/api/v1/speak-as-grants/${grantId}/members`, {
+      token: TOKENS.admin,
+      body: { principalId: 'user:kid', aliases: ['kid'], relationship: 'child' },
+    });
+    assert.equal(created.status, 400, JSON.stringify(created.body));
+    assert.equal(created.body.error, 'child_requires_allowlist');
+
+    const enrolled = await call('POST', `/api/v1/speak-as-grants/${grantId}/members`, {
+      token: TOKENS.admin,
+      body: { principalId: 'user:kid', aliases: ['kid'], targetAgents: ['rosie'], relationship: 'child' },
+    });
+    assert.equal(enrolled.status, 200, JSON.stringify(enrolled.body));
+
+    const listed = await call('GET', '/api/v1/speak-as/callable-agents?speaker=kid', { token: rosieKey });
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    assert.equal(listed.body.speaker, 'user:kid');
+    assert.deepEqual(
+      (listed.body.agents as { id: string }[]).map((a) => a.id),
+      ['rosie'],
+    );
+
+    const denied = await call('POST', '/api/v1/agents/donna/conversation', {
+      token: rosieKey,
+      body: { input: 'hi', speaker: 'kid' },
+    });
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(denied.body.error, 'child_restricted');
+
+    const errand = await call('POST', '/api/v1/agents/rosie/conversation', {
+      token: rosieKey,
+      body: { input: 'call Donna', speaker: 'kid', mode: 'errand' },
+    });
+    assert.equal(errand.status, 403, JSON.stringify(errand.body));
+    assert.equal(errand.body.error, 'child_restricted');
+
+    const allowed = await call('POST', '/api/v1/agents/rosie/conversation', {
+      token: rosieKey,
+      body: { input: 'hello', speaker: 'kid', mode: 'call' },
+    });
+    assert.ok(allowed.status < 300, JSON.stringify(allowed.body));
+    assert.equal(allowed.body.caller.actor, 'user:kid');
+    assert.equal(allowed.body.caller.relationship, 'child');
+    assert.equal(allowed.body.caller.mode, 'call');
+    assert.equal(allowed.body.caller.isOwner, undefined);
+    assert.equal(allowed.body.caller.agentRoles, undefined);
   });
 });

@@ -229,7 +229,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     if (sub === 'grant' || sub === 'create') {
       const grantClient = flag('--client');
       const member = flag('--member') ?? flag('--user');
-      if (!grantClient || !member) throw new Error('usage: factory speak-as grant --client agent:<id> --member user:<id> [--alias dale] [--agents donna,higgins] [--relationship owner|family] [--days 90] [--expires <iso>] [--purpose "<text>"]');
+      if (!grantClient || !member) throw new Error('usage: factory speak-as grant --client agent:<id> --member user:<id> [--alias dale] [--agents donna,higgins] [--relationship owner|family|child] [--days 90] [--expires <iso>] [--purpose "<text>"]');
       const aliases = flags('--alias');
       const agentsRaw = flag('--agents');
       const days = flag('--days');
@@ -259,7 +259,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     if (sub === 'enroll') {
       const id = rest[0];
       const member = flag('--member') ?? flag('--user');
-      if (!id || !member) throw new Error('usage: factory speak-as enroll <grant-id> --member user:<id> [--alias name] [--agents higgins] [--relationship owner|family]');
+      if (!id || !member) throw new Error('usage: factory speak-as enroll <grant-id> --member user:<id> [--alias name] [--agents higgins] [--relationship owner|family|child]');
       const aliases = flags('--alias');
       const agentsRaw = flag('--agents');
       const body: Record<string, unknown> = { principalId: member };

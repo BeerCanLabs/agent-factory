@@ -169,6 +169,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/config-store.ts',
       'packages/control-plane/src/agent-settings.ts',
       'packages/control-plane/src/agent-creation.ts',
+      'packages/control-plane/src/owner-contacts.ts',
       'packages/control-plane/src/subagents.ts',
       'packages/control-plane/src/helper-wakes.ts',
       'packages/control-plane/src/agent-bundle.ts',

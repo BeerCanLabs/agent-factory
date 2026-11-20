@@ -14,7 +14,7 @@ export type SpeakAsMember = {
 };
 
 /** Household relationship of a speak-as member, when set. */
-export type SpeakAsRelationship = 'owner' | 'family';
+export type SpeakAsRelationship = 'owner' | 'family' | 'child';
 
 /** Standing grant: this client may open conversations as any enrolled member. */
 export type SpeakAsGrant = {
@@ -46,6 +46,10 @@ export type DeliveredCaller = {
   name?: string;
   /** From the grant member, when set. */
   relationship?: SpeakAsRelationship;
+  /** True when this speaker is the agent's owner (relationship=owner). Tools use this, not `via`. */
+  isOwner?: boolean;
+  /** Agent-declared roles for this speaker, e.g. Owner or Family. Never taken from the via client. */
+  agentRoles?: string[];
 };
 
 export type SpeakAsVerifyInput = {
@@ -178,6 +182,9 @@ export function normalizeMember(raw: unknown): SpeakAsMember {
   const targetAgents = normalizeTargetAgents(o.targetAgents ?? o.agents);
   const aliases = normalizeAliases(o.aliases);
   const relationship = normalizeRelationship(o.relationship);
+  if (relationship === 'child' && (!targetAgents || targetAgents.length === 0)) {
+    throw new SpeakAsStoreError(400, 'child_requires_allowlist', 'a child member must have a non-empty targetAgents allowlist');
+  }
   return {
     principalId,
     ...(targetAgents ? { targetAgents } : {}),
@@ -236,6 +243,14 @@ export function verifySpeakAs(grants: readonly SpeakAsGrant[], input: SpeakAsVer
   for (const grant of matches) {
     const member = grant.members.find((m) => m.principalId === asUser);
     if (!member) continue;
+    if (member.relationship === 'child' && (!member.targetAgents || member.targetAgents.length === 0 || !memberAllowsAgent(member, target))) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'child_restricted',
+        message: `a child speaker cannot be connected to agent '${target}'`,
+      };
+    }
     if (!memberAllowsAgent(member, target)) {
       return {
         ok: false,
@@ -254,6 +269,14 @@ export function verifySpeakAs(grants: readonly SpeakAsGrant[], input: SpeakAsVer
   };
 }
 
+
+/** Map a speak-as relationship to the agent roles tools and egress must honor (never the via client). */
+export function privilegesForSpeakAsRelationship(relationship?: SpeakAsRelationship): { isOwner: boolean; agentRoles: string[] } {
+  if (relationship === 'owner') return { isOwner: true, agentRoles: ['Owner'] };
+  if (relationship === 'family') return { isOwner: false, agentRoles: ['Family'] };
+  return { isOwner: false, agentRoles: [] };
+}
+
 export function deliveredCaller(opts: {
   actor: string;
   via: string;
@@ -262,8 +285,13 @@ export function deliveredCaller(opts: {
   mode: SpeakAsMode;
   name?: string;
   relationship?: SpeakAsRelationship;
+  isOwner?: boolean;
+  agentRoles?: string[];
 }): DeliveredCaller {
   const name = typeof opts.name === 'string' ? opts.name.trim() : '';
+  const priv = privilegesForSpeakAsRelationship(opts.relationship);
+  const isOwner = opts.isOwner === true || priv.isOwner;
+  const agentRoles = opts.agentRoles && opts.agentRoles.length ? opts.agentRoles : priv.agentRoles;
   return {
     actor: opts.actor,
     verified: true,
@@ -273,19 +301,21 @@ export function deliveredCaller(opts: {
     mode: opts.mode,
     ...(name ? { name: name.slice(0, 60) } : {}),
     ...(opts.relationship ? { relationship: opts.relationship } : {}),
+    ...(isOwner ? { isOwner: true } : {}),
+    ...(agentRoles.length ? { agentRoles } : {}),
   };
 }
 
-const RELATIONSHIPS = new Set<SpeakAsRelationship>(['owner', 'family']);
+const RELATIONSHIPS = new Set<SpeakAsRelationship>(['owner', 'family', 'child']);
 
 export function normalizeRelationship(raw: unknown): SpeakAsRelationship | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined;
   if (typeof raw !== 'string') {
-    throw new SpeakAsStoreError(400, 'invalid_relationship', "relationship must be 'owner' or 'family'");
+    throw new SpeakAsStoreError(400, 'invalid_relationship', "relationship must be 'owner', 'family', or 'child'");
   }
   const value = raw.trim().toLowerCase();
   if (!RELATIONSHIPS.has(value as SpeakAsRelationship)) {
-    throw new SpeakAsStoreError(400, 'invalid_relationship', "relationship must be 'owner' or 'family'");
+    throw new SpeakAsStoreError(400, 'invalid_relationship', "relationship must be 'owner', 'family', or 'child'");
   }
   return value as SpeakAsRelationship;
 }

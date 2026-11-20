@@ -103,7 +103,18 @@ def _post_conversation(factory_url: str, key: str, agent: str, message: str, spe
         return {"ok": False, "status": exc.code, "body": parsed}
 
 
+
+def _child_restricted(context: dict) -> str | None:
+    caller = context.get("caller") if isinstance(context, dict) else None
+    if isinstance(caller, dict) and caller.get("relationship") == "child":
+        return json.dumps({"error": "child_restricted", "message": "a child speaker cannot start an agent-to-agent call or errand"})
+    return None
+
+
 def _call_agent(arguments: dict, context: dict) -> str:
+    blocked = _child_restricted(context)
+    if blocked:
+        return blocked
     agent = str(arguments.get("agent") or "").strip()
     speaker = _speaker_from_context(context, arguments.get("speaker") if isinstance(arguments.get("speaker"), str) else None)
     if not agent:
@@ -118,6 +129,9 @@ def _call_agent(arguments: dict, context: dict) -> str:
 
 
 def _ask_agent(arguments: dict, context: dict) -> str:
+    blocked = _child_restricted(context)
+    if blocked:
+        return blocked
     agent = str(arguments.get("agent") or "").strip()
     message = str(arguments.get("message") or arguments.get("task") or "").strip()
     speaker = _speaker_from_context(context, arguments.get("speaker") if isinstance(arguments.get("speaker"), str) else None)

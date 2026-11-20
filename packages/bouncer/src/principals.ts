@@ -629,7 +629,8 @@ export function isValidUserPrincipalId(id: string): boolean {
 export type CreatePrincipalInput = {
   id?: string;
   displayName: string;
-  emails: string[];
+  /** Optional when `id` is set. A principal with no email cannot sign in until one is added. */
+  emails?: string[];
   by: string;
 };
 
@@ -785,15 +786,16 @@ export class PrincipalStore {
       if (!displayName || displayName.length > 256) throw new Error('displayName must be 1..256 characters');
       const by = typeof input.by === 'string' ? input.by.trim() : '';
       if (!by) throw new Error('by actor is required');
-      if (!Array.isArray(input.emails) || input.emails.length === 0) {
-        throw new Error('at least one email is required');
-      }
+      const rawEmails = Array.isArray(input.emails) ? input.emails : [];
       const emails: string[] = [];
-      for (const raw of input.emails) {
+      for (const raw of rawEmails) {
         const norm = normalizeEmail(raw);
         const existingId = this.byEmail.get(norm);
         if (existingId) throw new DuplicatePrincipalEmailError(norm, existingId);
         if (!emails.includes(norm)) emails.push(norm);
+      }
+      if (emails.length === 0 && (input.id === undefined || String(input.id).trim() === '')) {
+        throw new Error('at least one email is required when no explicit id is provided');
       }
       const id = input.id !== undefined ? input.id.trim().toLowerCase() : deriveSlugFromEmail(emails[0], this.byId);
       if (!isValidUserPrincipalId(id)) throw new Error(`invalid principal id '${id}': expected user:<slug> or user:<email>`);

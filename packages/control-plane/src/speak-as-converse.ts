@@ -108,6 +108,9 @@ export function applySpeakAs(
     targetAgentId: opts.targetAgentId,
   });
   if (!verified.ok) return verified;
+  if (verified.member.relationship === 'child' && opts.fields.mode === 'errand') {
+    return { ok: false, status: 403, error: 'child_restricted', message: 'a child speaker cannot start an agent-to-agent call or errand' };
+  }
   const displayName = state.principals?.get(verified.actor)?.displayName?.trim();
   const delivered = deliveredCaller({
     actor: verified.actor,

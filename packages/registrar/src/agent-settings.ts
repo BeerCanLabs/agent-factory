@@ -21,6 +21,8 @@ export type AgentSettings = {
   soul?: string;
   roles?: DeclaredRole[];
   memory?: AgentMemorySettings;
+  /** IANA time zone used for the agent's local clock (e.g. America/Phoenix). */
+  timezone?: string;
 };
 
 export const MAX_SOUL_CHARS = 65_536;
@@ -88,6 +90,18 @@ export function parseMemory(input: unknown): { ok: true; memory: AgentMemorySett
   return { ok: true, memory: out };
 }
 
+
+export function parseTimezone(input: unknown): { ok: true; timezone: string } | { ok: false; error: string } {
+  if (typeof input !== 'string' || !input.trim()) return { ok: false, error: 'timezone must be an IANA time zone name' };
+  const timezone = input.trim();
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: timezone });
+  } catch {
+    return { ok: false, error: `unknown timezone "${timezone}"` };
+  }
+  return { ok: true, timezone };
+}
+
 export function parseSoul(input: unknown): { ok: true; soul: string } | { ok: false; error: string } {
   if (typeof input !== 'string' || !input.trim()) return { ok: false, error: 'soul must be non-empty text' };
   if (input.length > MAX_SOUL_CHARS) return { ok: false, error: `soul is at most ${MAX_SOUL_CHARS} characters` };
@@ -100,9 +114,9 @@ export function parseSoul(input: unknown): { ok: true; soul: string } | { ok: fa
  * is the new section (`{}` when nothing is left, which means "back to the repository").
  */
 export function applySettingsChange(current: AgentSettings | undefined, change: unknown): SettingsResult {
-  if (!isObject(change)) return { ok: false, error: 'the change must be an object with soul, roles and/or memory' };
-  for (const k of Object.keys(change)) if (k !== 'soul' && k !== 'roles' && k !== 'memory') return { ok: false, error: `unknown setting "${k}"` };
-  if (!Object.keys(change).length) return { ok: false, error: 'nothing to change: send soul, roles and/or memory' };
+  if (!isObject(change)) return { ok: false, error: 'the change must be an object with soul, roles, memory and/or timezone' };
+  for (const k of Object.keys(change)) if (k !== 'soul' && k !== 'roles' && k !== 'memory' && k !== 'timezone') return { ok: false, error: `unknown setting "${k}"` };
+  if (!Object.keys(change).length) return { ok: false, error: 'nothing to change: send soul, roles, memory and/or timezone' };
   const next: AgentSettings = { ...(current ?? {}) };
   if ('soul' in change) {
     if (change.soul === null) delete next.soul;
@@ -128,11 +142,19 @@ export function applySettingsChange(current: AgentSettings | undefined, change: 
       next.memory = r.memory;
     }
   }
+  if ('timezone' in change) {
+    if (change.timezone === null) delete next.timezone;
+    else {
+      const r = parseTimezone(change.timezone);
+      if (!r.ok) return r;
+      next.timezone = r.timezone;
+    }
+  }
   return { ok: true, settings: next };
 }
 
 /** Which parts differ, by name only (a ledger row and a message never carry the soul). */
-export function changedParts(before: AgentSettings | undefined, after: AgentSettings | undefined): Array<'soul' | 'roles' | 'memory'> {
+export function changedParts(before: AgentSettings | undefined, after: AgentSettings | undefined): Array<'soul' | 'roles' | 'memory' | 'timezone'> {
   const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-  return (['soul', 'roles', 'memory'] as const).filter((k) => !same(before?.[k], after?.[k]));
+  return (['soul', 'roles', 'memory', 'timezone'] as const).filter((k) => !same(before?.[k], after?.[k]));
 }

@@ -27,6 +27,11 @@ function skillIdsOf(agent: Pick<AgentRecord, 'skillIds' | 'skillRoutes' | 'roles
 
 /** Everything that fails here fails closed: a person the factory cannot place is restricted to nothing. */
 export function accessForRun(state: FactoryState, run: Run, agent: AgentRecord): RunAccess {
+  // Speak-as (and any factory-stamped speaker): authorize the person speaking, not the via/client identity.
+  const rel = run.caller?.relationship;
+  if (rel === 'child') return restrictedTo(agent, []);
+  if (run.caller?.isOwner === true || rel === 'owner') return NOT_RESTRICTED;
+  if (rel === 'family') return restrictedTo(agent, ['Family']);
   return accessForRequester(state, agent, requesterOfRun(state, run), run.trigger === 'schedule', run.caller?.roles);
 }
 

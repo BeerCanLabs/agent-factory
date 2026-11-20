@@ -104,4 +104,14 @@ describe('CF1 a change replaces what it names, null removes it, and anything els
     assert.deepEqual(changedParts(undefined, undefined), []);
     assert.deepEqual(changedParts({ soul: 'a' }, { soul: 'a' }), []);
   });
+  it('accepts an IANA timezone and refuses an unknown one', () => {
+    const a = applySettingsChange(undefined, { timezone: 'America/Phoenix' });
+    assert.ok(a.ok);
+    assert.equal(a.settings.timezone, 'America/Phoenix');
+    assert.equal(applySettingsChange(undefined, { timezone: 'Not/AZone' }).ok, false);
+    const b = applySettingsChange(a.settings, { timezone: null });
+    assert.ok(b.ok);
+    assert.equal('timezone' in b.settings, false);
+    assert.deepEqual(changedParts({ timezone: 'America/Los_Angeles' }, { timezone: 'America/Phoenix' }), ['timezone']);
+  });
 });
