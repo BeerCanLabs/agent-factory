@@ -132,6 +132,7 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
     skills: current.skills ?? [],
     version: current.version ?? 1,
     ...(agent.warmDownSeconds ? { warmDownSeconds: agent.warmDownSeconds } : {}),
+    ...(typeof current.agent.timezone === 'string' && current.agent.timezone ? { timezone: current.agent.timezone } : {}),
     owners,
   });
 }

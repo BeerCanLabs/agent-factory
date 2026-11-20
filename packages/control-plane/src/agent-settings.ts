@@ -3,7 +3,7 @@
  * an optional `agent` section of the versioned configuration record (SK3).
  *
  *   GET /api/v1/agents/:id/settings   the section and whether the factory holds one (admin, or the agent's owner)
- *   PUT /api/v1/agents/:id/settings   `{ soul?, roles?, memory? }`: each key present replaces that part, `null` removes it
+ *   PUT /api/v1/agents/:id/settings   `{ soul?, roles?, memory?, timezone? }`: each key present replaces that part, `null` removes it
  *                                     (admin, or the agent's owner; a new configuration version, ledgered).
  *                                     `name` may be sent too: it renames the agent as PUT .../name does.
  *   PUT /api/v1/agents/:id/name       `{ name }`: the agent's display name, for a config or a repository agent (#65)

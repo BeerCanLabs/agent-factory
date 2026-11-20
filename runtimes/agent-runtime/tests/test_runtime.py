@@ -912,6 +912,11 @@ class TestSkills(Base):
         """Verify historical user whiteboard turns have UTC timestamps while assistant turns and raw storage stay unprefixed."""
         prompt = loop.system_prompt("Be helpful.", turn("hello"))
         self.assertIn("It is ", prompt)
+        self.assertIn(" UTC", prompt)
+        prompt_phx = loop.system_prompt("Be helpful.", turn("hello"), tz_name="America/Phoenix")
+        clock = prompt_phx.split("It is ", 1)[1].split(".", 1)[0]
+        self.assertIn("America/Phoenix", clock)
+        self.assertNotIn("UTC", clock)
         self.assertIn(
             "Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, "
             "and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp.",

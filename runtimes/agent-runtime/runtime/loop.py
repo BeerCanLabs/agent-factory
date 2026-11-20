@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from memory import episodic
@@ -96,7 +97,18 @@ def helper_system_soul(soul: str, payload: dict) -> str:
     return brief or configured or DEFAULT_SOUL
 
 
-def system_prompt(soul: str, payload: dict, pending: str = "") -> str:
+def clock_line(tz_name: str | None = None) -> str:
+    """The current time in the agent's configured IANA zone, else UTC."""
+    if isinstance(tz_name, str) and tz_name.strip():
+        try:
+            zone = ZoneInfo(tz_name.strip())
+            return datetime.now(zone).strftime(f"%A %Y-%m-%d %H:%M {tz_name.strip()}")
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
+
+
+def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | None = None) -> str:
     caller = caller_of(payload)
     speaking = ""
     if caller.get("actor"):
@@ -107,7 +119,7 @@ def system_prompt(soul: str, payload: dict, pending: str = "") -> str:
     if is_scheduled_payload(payload):
         scheduled_note = "\n\nThis is a scheduled background check. If nothing needs to be reported or said, respond with NO_REPLY."
     pending_note_text = f"\n\n{pending}" if pending else ""
-    now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
+    now = clock_line(tz_name)
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
     return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\nIt is {now}.{history_note}"
 
@@ -122,7 +134,8 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
     if fast is not None:
         return fast
     history, banner = mind.history(who, payload)
-    system = system_prompt(soul, payload, pending) + (f"\n\n{banner}" if banner else "")
+    tz_name = getattr(factory, "timezone", None)
+    system = system_prompt(soul, payload, pending, tz_name if isinstance(tz_name, str) else None) + (f"\n\n{banner}" if banner else "")
     messages: list[dict] = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_text}]
     specs = [t.spec() for t in tools.values()]
     for spec, _ in mind.tools():
@@ -242,6 +255,7 @@ def main(factory: Factory | None = None) -> int:
     memory_dir = Path(os.environ.get("MEMORY_DIR", "/tmp/mind"))
     factory.memory_dir = memory_dir
     factory.owners = config.get("owners") if isinstance(config.get("owners"), list) else []
+    factory.timezone = config.get("timezone") if isinstance(config.get("timezone"), str) else None
     relayed = relay_tools(factory, memory_dir, factory.owners)
     reserved = {spec["function"]["name"] for spec, _ in mind.tools()} | {t.name for t in relayed}
     loaded, problems = load_skills(config.get("skills") or [], reserved=reserved)

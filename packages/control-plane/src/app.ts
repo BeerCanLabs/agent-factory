@@ -4038,14 +4038,24 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
       } else if (input && typeof input === 'object' && !Array.isArray(input) && delivered) {
         input = { ...(input as Record<string, unknown>), caller: delivered };
       }
+      const tzRaw = state.configs?.current(run.agentId)?.agent?.timezone;
+      let timeZone = 'America/Los_Angeles';
+      if (typeof tzRaw === 'string' && tzRaw.trim()) {
+        try {
+          Intl.DateTimeFormat('en-US', { timeZone: tzRaw.trim() });
+          timeZone = tzRaw.trim();
+        } catch {
+          // keep default
+        }
+      }
       json(res, 200, {
         runId: run.runId,
         input,
         temporal: {
-          local: now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'full', timeStyle: 'long' }),
+          local: now.toLocaleString('en-US', { timeZone, dateStyle: 'full', timeStyle: 'long' }),
           utc: now.toISOString(),
-          dayOfWeek: now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long' }),
-          timezone: 'America/Los_Angeles',
+          dayOfWeek: now.toLocaleDateString('en-US', { timeZone, weekday: 'long' }),
+          timezone: timeZone,
         },
       });
       return;
