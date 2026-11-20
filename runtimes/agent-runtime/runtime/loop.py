@@ -32,8 +32,17 @@ DEFAULT_SOUL = "You are a helpful assistant."
 TURN_GUIDANCE = (
     "Answer this turn naturally. Do not bring up corrections, retractions, or meta-commentary "
     "about earlier replies or conversations unless the person explicitly asks you to correct or "
-    "revisit them. Never claim you took an action, retried, or used a tool unless you actually "
-    "did so in this turn."
+    "revisit them. Never volunteer lines such as \"I owe you a correction\" or \"from my last "
+    "message.\" Never claim you checked, did, tried, retried, or used a tool unless that tool "
+    "actually ran in this turn. Call the tool first, then report only the result."
+)
+
+# Injected when the verified caller is on a voice channel.
+VOICE_GUIDANCE = (
+    "This turn is on a voice channel. Keep replies short. If the person's input is unclear, "
+    "not speech (for example a transcribed *sniff*), a fragment, or too vague to know what they "
+    "asked, reply with one short question like \"Sorry, what was that?\" Do not guess a topic "
+    "or launch into a long answer."
 )
 
 # Injected whenever the factory verified a caller. Soul wording and memory are not enough:
@@ -185,7 +194,9 @@ def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | No
     pending_note_text = f"\n\n{pending}" if pending else ""
     now = clock_line(tz_name)
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
-    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\n{TURN_GUIDANCE}\n\nIt is {now}.{history_note}"
+    channel = _plain_token(caller.get("channel"), 32)
+    voice_note = f"\n\n{VOICE_GUIDANCE}" if channel and channel.lower() == "voice" else ""
+    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\n{TURN_GUIDANCE}{voice_note}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:
