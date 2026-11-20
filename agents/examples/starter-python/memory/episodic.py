@@ -371,13 +371,23 @@ def load_whiteboard(
 
     Returns (history_messages, optional_awareness_banner).
     """
+    # Sessions are per person; still require this user_id so another speaker's turns
+    # cannot leak into the prompt if a session id is reused or a row is mis-attributed.
+    owned = conn.execute(
+        "SELECT 1 FROM conversation_sessions WHERE id = ? AND user_id = ? LIMIT 1",
+        (session_id, user_id),
+    ).fetchone()
+    if not owned:
+        return [], None
+
     total_turns = conn.execute(
-        "SELECT COUNT(*) FROM conversation_turns WHERE session_id = ?", (session_id,)
+        "SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
     ).fetchone()[0]
 
     rows = conn.execute(
-        "SELECT role, content, timestamp FROM conversation_turns WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-        (session_id, max_messages),
+        "SELECT role, content, timestamp FROM conversation_turns WHERE session_id = ? AND user_id = ? ORDER BY id DESC LIMIT ?",
+        (session_id, user_id, max_messages),
     ).fetchall()
 
     kept: list[dict] = []

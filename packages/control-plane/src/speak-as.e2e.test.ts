@@ -406,4 +406,60 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(allowed.body.caller.isOwner, undefined);
     assert.equal(allowed.body.caller.agentRoles, undefined);
   });
+
+  it('lets a verified owner take over the same conversation after a child, and refuses a disallowed speaker', async () => {
+    const child = await call('POST', '/api/v1/agents/rosie/conversation', {
+      token: rosieKey,
+      body: { input: { message: 'hello from the kid' }, speaker: 'kid', channel: 'voice', mode: 'call' },
+    });
+    assert.ok(child.status < 300, JSON.stringify(child.body));
+    assert.equal(child.body.caller.actor, 'user:kid');
+    assert.equal(child.body.caller.relationship, 'child');
+    const conversationId = child.body.conversationId as string;
+    assert.match(conversationId, /^convo_/);
+
+    const denied = await call('POST', '/api/v1/agents/rosie/conversation', {
+      token: rosieKey,
+      body: {
+        input: { message: 'hi' },
+        speaker: 'partner',
+        conversationId,
+        channel: 'voice',
+        mode: 'call',
+      },
+    });
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(denied.body.error, 'agent_not_allowed');
+
+    const stillChild = await call('POST', '/api/v1/agents/rosie/conversation', {
+      token: rosieKey,
+      body: { input: { message: 'still me' }, conversationId, channel: 'voice', mode: 'call' },
+    });
+    assert.ok(stillChild.status < 300, JSON.stringify(stillChild.body));
+    assert.equal(stillChild.body.caller.actor, 'user:kid');
+    assert.equal(stillChild.body.conversationId, conversationId);
+
+    const owner = await call('POST', '/api/v1/agents/rosie/conversation', {
+      token: rosieKey,
+      body: {
+        input: { message: 'Turn off only light.bar.' },
+        speaker: 'dale',
+        conversationId,
+        channel: 'voice',
+        mode: 'call',
+      },
+    });
+    assert.ok(owner.status < 300, JSON.stringify(owner.body));
+    assert.equal(owner.body.conversationId, conversationId);
+    assert.equal(owner.body.caller.actor, 'user:dale.sackrider', 'body.caller');
+    assert.equal(owner.body.caller.name, 'Dale');
+    assert.equal(owner.body.caller.relationship, 'owner');
+    assert.equal(owner.body.caller.isOwner, true);
+    assert.deepEqual(owner.body.caller.agentRoles, ['Owner']);
+    assert.equal(owner.body.caller.channel, 'voice');
+    assert.equal(owner.body.caller.verified, true);
+    const run = state.runs.get(owner.body.runId);
+    assert.equal(run?.caller?.actor, 'user:dale.sackrider', 'run.caller');
+    assert.equal((run?.input as { caller?: { actor?: string } })?.caller?.actor, 'user:dale.sackrider', 'run.input.caller');
+  });
 });
