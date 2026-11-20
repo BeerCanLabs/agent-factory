@@ -933,7 +933,24 @@ class TestSkills(Base):
             prompt = loop.system_prompt("Be helpful.", payload)
             self.assertIn(loop.TURN_GUIDANCE, prompt)
             self.assertIn("Do not bring up corrections, retractions, or meta-commentary", prompt)
-            self.assertIn("Never claim you took an action, retried, or used a tool unless you actually did so in this turn.", prompt)
+            self.assertIn("Never volunteer lines such as \"I owe you a correction\"", prompt)
+            self.assertIn("Never claim you checked, did, tried, retried, or used a tool unless that tool actually ran in this turn.", prompt)
+            self.assertIn("Call the tool first, then report only the result.", prompt)
+
+    def test_voice_channel_gets_short_unclear_input_guidance(self):
+        """Voice turns get VOICE_GUIDANCE; Discord and console turns do not."""
+        voice = {"message": "*sniff*", "caller": {"actor": "user:dale.sackrider", "channel": "voice", "via": "agent:rosie", "verified": True, "relationship": "owner"}}
+        discord = {"message": "thanks", "caller": {"actor": "user:dale.sackrider", "channel": "discord"}, "replyTo": {"channel": "discord", "channelId": "1"}}
+        console = {"message": "hello"}
+        voice_prompt = loop.system_prompt("Be helpful.", voice)
+        self.assertIn(loop.VOICE_GUIDANCE, voice_prompt)
+        self.assertIn("Sorry, what was that?", voice_prompt)
+        self.assertIn("Keep replies short.", voice_prompt)
+        self.assertIn("Do not guess a topic", voice_prompt)
+        for payload in (discord, console):
+            prompt = loop.system_prompt("Be helpful.", payload)
+            self.assertIn(loop.TURN_GUIDANCE, prompt)
+            self.assertNotIn(loop.VOICE_GUIDANCE, prompt)
 
     def test_verified_caller_is_authoritative_in_the_system_prompt(self):
         """Each turn's factory-verified caller block is authoritative; a verified caller is never asked to re-verify."""
