@@ -266,6 +266,8 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(started.body.caller.mode, 'call');
     assert.equal(started.body.caller.assurance, 'voice-asserted');
     assert.equal(started.body.caller.relationship, 'owner');
+    assert.equal(started.body.caller.isOwner, true);
+    assert.deepEqual(started.body.caller.agentRoles, ['Owner']);
     assert.equal(started.body.caller.onBehalfOf, undefined);
     assert.match(started.body.conversationId, /^convo_/);
     const run = state.runs.get(started.body.runId);
@@ -293,6 +295,8 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.ok(allowed.status < 300, JSON.stringify(allowed.body));
     assert.equal(allowed.body.caller.actor, 'user:partner');
     assert.equal(allowed.body.caller.relationship, 'family');
+    assert.equal(allowed.body.caller.isOwner, undefined);
+    assert.deepEqual(allowed.body.caller.agentRoles, ['Family']);
   });
 
   it('stamps an errand with mode=errand and lists callable agents per speaker', async () => {
@@ -399,5 +403,7 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(allowed.body.caller.actor, 'user:kid');
     assert.equal(allowed.body.caller.relationship, 'child');
     assert.equal(allowed.body.caller.mode, 'call');
+    assert.equal(allowed.body.caller.isOwner, undefined);
+    assert.equal(allowed.body.caller.agentRoles, undefined);
   });
 });

@@ -46,6 +46,10 @@ export type DeliveredCaller = {
   name?: string;
   /** From the grant member, when set. */
   relationship?: SpeakAsRelationship;
+  /** True when this speaker is the agent's owner (relationship=owner). Tools use this, not `via`. */
+  isOwner?: boolean;
+  /** Agent-declared roles for this speaker, e.g. Owner or Family. Never taken from the via client. */
+  agentRoles?: string[];
 };
 
 export type SpeakAsVerifyInput = {
@@ -265,6 +269,14 @@ export function verifySpeakAs(grants: readonly SpeakAsGrant[], input: SpeakAsVer
   };
 }
 
+
+/** Map a speak-as relationship to the agent roles tools and egress must honor (never the via client). */
+export function privilegesForSpeakAsRelationship(relationship?: SpeakAsRelationship): { isOwner: boolean; agentRoles: string[] } {
+  if (relationship === 'owner') return { isOwner: true, agentRoles: ['Owner'] };
+  if (relationship === 'family') return { isOwner: false, agentRoles: ['Family'] };
+  return { isOwner: false, agentRoles: [] };
+}
+
 export function deliveredCaller(opts: {
   actor: string;
   via: string;
@@ -273,8 +285,13 @@ export function deliveredCaller(opts: {
   mode: SpeakAsMode;
   name?: string;
   relationship?: SpeakAsRelationship;
+  isOwner?: boolean;
+  agentRoles?: string[];
 }): DeliveredCaller {
   const name = typeof opts.name === 'string' ? opts.name.trim() : '';
+  const priv = privilegesForSpeakAsRelationship(opts.relationship);
+  const isOwner = opts.isOwner === true || priv.isOwner;
+  const agentRoles = opts.agentRoles && opts.agentRoles.length ? opts.agentRoles : priv.agentRoles;
   return {
     actor: opts.actor,
     verified: true,
@@ -284,6 +301,8 @@ export function deliveredCaller(opts: {
     mode: opts.mode,
     ...(name ? { name: name.slice(0, 60) } : {}),
     ...(opts.relationship ? { relationship: opts.relationship } : {}),
+    ...(isOwner ? { isOwner: true } : {}),
+    ...(agentRoles.length ? { agentRoles } : {}),
   };
 }
 

@@ -104,6 +104,8 @@ describe('speak-as grants', () => {
       mode: 'errand',
       name: 'Dale',
       relationship: 'owner',
+      isOwner: true,
+      agentRoles: ['Owner'],
     });
     assert.equal('onBehalfOf' in caller, false);
     const bare = deliveredCaller({
@@ -154,5 +156,17 @@ describe('speak-as grants', () => {
       relationship: 'child',
     });
     assert.equal(caller.relationship, 'child');
+    assert.equal('isOwner' in caller, false);
+    assert.equal('agentRoles' in caller, false);
+    const family = deliveredCaller({
+      actor: 'user:spouse',
+      via: 'agent:rosie',
+      channel: 'voice',
+      assurance: 'voice-asserted',
+      mode: 'call',
+      relationship: 'family',
+    });
+    assert.equal(family.isOwner, undefined);
+    assert.deepEqual(family.agentRoles, ['Family']);
   });
 });

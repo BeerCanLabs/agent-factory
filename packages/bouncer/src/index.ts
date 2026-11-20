@@ -126,6 +126,7 @@ export {
   SpeakAsGrantStore,
   SpeakAsStoreError,
   deliveredCaller,
+  privilegesForSpeakAsRelationship,
   isGrantActive,
   memberAllowsAgent,
   normalizeClient,

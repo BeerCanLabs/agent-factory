@@ -449,4 +449,56 @@ describe('the gatekeeper-egress enforces a person’s roles (E12 item 4, TSK-174
     assert.deepEqual((await ok.json()).access, { restricted: true, routes: { 'google-calendar': 'allowed', 'google-gmail': 'denied', print: 'allowed' } });
     assert.equal((await read('nonsense')).status, 401);
   });
+
+  it('speak-as access follows the speaker relationship, not the via client', () => {
+    const donna = state.agents.get('donna')!;
+    const base = { agentId: 'donna', state: 'WORKING' as const, actor: 'agent:rosie', trigger: 'api' as const };
+    const ownerRun = state.runs.create({
+      ...base,
+      caller: {
+        actor: 'user:dale.sackrider',
+        relationship: 'owner',
+        isOwner: true,
+        agentRoles: ['Owner'],
+        verified: true,
+        via: 'agent:rosie',
+        role: 'agent-owner',
+        roles: [],
+      },
+    } as never);
+    assert.equal(accessForRun(state, ownerRun, donna).restricted, false);
+
+    const familyRun = state.runs.create({
+      ...base,
+      caller: {
+        actor: 'user:stephanie',
+        relationship: 'family',
+        agentRoles: ['Family'],
+        verified: true,
+        via: 'agent:rosie',
+        role: 'agent-member',
+        roles: [],
+      },
+    } as never);
+    assert.deepEqual(accessForRun(state, familyRun, donna), {
+      restricted: true,
+      routes: { 'google-calendar': 'allowed', 'google-gmail': 'denied', print: 'allowed' },
+    });
+
+    const childRun = state.runs.create({
+      ...base,
+      caller: {
+        actor: 'user:kid',
+        relationship: 'child',
+        verified: true,
+        via: 'agent:rosie',
+        role: 'agent-member',
+        roles: [],
+      },
+    } as never);
+    assert.deepEqual(accessForRun(state, childRun, donna), {
+      restricted: true,
+      routes: { 'google-calendar': 'denied', 'google-gmail': 'denied', print: 'denied' },
+    });
+  });
 });
