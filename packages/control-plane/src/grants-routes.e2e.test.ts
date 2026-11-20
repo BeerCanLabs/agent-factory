@@ -1045,4 +1045,26 @@ describe('S3: Principals & Grants API, admin act-as, private skill assignment, a
       state.sessions = savedSessions;
     }
   });
+
+  it('creates a principal with an explicit id and no email', async () => {
+    const missing = await call('POST', '/api/v1/principals', {
+      token: TOKENS.admin,
+      body: { displayName: 'Kid' },
+    });
+    assert.equal(missing.status, 400, JSON.stringify(missing.body));
+    assert.equal(missing.body.error, 'invalid_principal');
+
+    const created = await call('POST', '/api/v1/principals', {
+      token: TOKENS.admin,
+      body: { id: 'user:kid', displayName: 'Kid' },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.equal(created.body.principal.id, 'user:kid');
+    assert.equal(created.body.principal.displayName, 'Kid');
+    assert.deepEqual(created.body.principal.emails, []);
+
+    const got = await call('GET', '/api/v1/principals/user:kid', { token: TOKENS.admin });
+    assert.equal(got.status, 200, JSON.stringify(got.body));
+    assert.deepEqual(got.body.principal.emails, []);
+  });
 });

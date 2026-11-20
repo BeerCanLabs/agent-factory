@@ -520,15 +520,6 @@ export async function createPrincipal(
     return { status: 400, body: { error: 'invalid_principal', message: 'displayName must be 1..256 characters' } };
   }
 
-  const rawEmails = Array.isArray(body.emails)
-    ? body.emails
-    : typeof body.email === 'string'
-      ? [body.email]
-      : undefined;
-  if (!rawEmails || rawEmails.length === 0 || !rawEmails.every((e) => typeof e === 'string')) {
-    return { status: 400, body: { error: 'invalid_principal', message: 'emails must be a non-empty array of strings' } };
-  }
-
   let requestedId: string | undefined;
   if (body.id !== undefined && body.id !== null) {
     if (typeof body.id !== 'string' || !isValidUserPrincipalId(body.id.trim().toLowerCase())) {
@@ -538,6 +529,18 @@ export async function createPrincipal(
       };
     }
     requestedId = body.id.trim().toLowerCase();
+  }
+
+  const rawEmails = Array.isArray(body.emails)
+    ? body.emails
+    : typeof body.email === 'string'
+      ? [body.email]
+      : [];
+  if (!rawEmails.every((e) => typeof e === 'string')) {
+    return { status: 400, body: { error: 'invalid_principal', message: 'emails must be an array of strings' } };
+  }
+  if (rawEmails.length === 0 && !requestedId) {
+    return { status: 400, body: { error: 'invalid_principal', message: 'emails must be a non-empty array of strings, or omitted when an explicit id is provided' } };
   }
 
   try {
