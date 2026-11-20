@@ -16,6 +16,7 @@ from pathlib import Path
 from memory import episodic
 from runtime.factory import Factory, FactoryError
 from runtime.mind import Mind, is_scheduled_payload, open_mind
+from runtime.relay import mark_unseen_delivered, pending_note, relay_tools
 from runtime.skills import Tool, load_skills, log_tool_error, run_tool
 
 MAX_ROUNDS = 6
@@ -95,7 +96,7 @@ def helper_system_soul(soul: str, payload: dict) -> str:
     return brief or configured or DEFAULT_SOUL
 
 
-def system_prompt(soul: str, payload: dict) -> str:
+def system_prompt(soul: str, payload: dict, pending: str = "") -> str:
     caller = caller_of(payload)
     speaking = ""
     if caller.get("actor"):
@@ -105,19 +106,23 @@ def system_prompt(soul: str, payload: dict) -> str:
     scheduled_note = ""
     if is_scheduled_payload(payload):
         scheduled_note = "\n\nThis is a scheduled background check. If nothing needs to be reported or said, respond with NO_REPLY."
+    pending_note_text = f"\n\n{pending}" if pending else ""
     now = datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
-    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}\n\nIt is {now}.{history_note}"
+    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:
     who = who_of(payload)
     user_text = text_of(payload)
+    owners = getattr(factory, "owners", None) or []
+    memory_dir = getattr(factory, "memory_dir", None)
+    pending = pending_note(who, memory_dir, owners) if memory_dir else ""
     fast = None if is_scheduled_payload(payload) else mind.fast_path(who, user_text)
     if fast is not None:
         return fast
     history, banner = mind.history(who, payload)
-    system = system_prompt(soul, payload) + (f"\n\n{banner}" if banner else "")
+    system = system_prompt(soul, payload, pending) + (f"\n\n{banner}" if banner else "")
     messages: list[dict] = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_text}]
     specs = [t.spec() for t in tools.values()]
     for spec, _ in mind.tools():
@@ -149,6 +154,8 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
     else:
         reply = "I could not finish that within the steps I am allowed."
     mind.remember(who, payload, user_text, reply, surface=(payload.get("replyTo") or {}).get("channel", "factory"), channel_id=(payload.get("replyTo") or {}).get("channelId"))
+    if pending and reply and not episodic.is_silent_reply(reply) and memory_dir:
+        mark_unseen_delivered(who, memory_dir, owners)
     return reply
 
 
@@ -232,8 +239,13 @@ def main(factory: Factory | None = None) -> int:
         print(f"[runtime] {err}", file=sys.stderr)
         write_result({"status": "failed", "output": {"error": str(err)}})
         return 1
-    loaded, problems = load_skills(config.get("skills") or [], reserved={spec["function"]["name"] for spec, _ in mind.tools()})
-    tools = {t.name: t for t in loaded}
+    memory_dir = Path(os.environ.get("MEMORY_DIR", "/tmp/mind"))
+    factory.memory_dir = memory_dir
+    factory.owners = config.get("owners") if isinstance(config.get("owners"), list) else []
+    relayed = relay_tools(factory, memory_dir, factory.owners)
+    reserved = {spec["function"]["name"] for spec, _ in mind.tools()} | {t.name for t in relayed}
+    loaded, problems = load_skills(config.get("skills") or [], reserved=reserved)
+    tools = {t.name: t for t in [*loaded, *relayed]}
     for p in problems:
         print(f"[runtime] {p}", file=sys.stderr)
     turns = 0

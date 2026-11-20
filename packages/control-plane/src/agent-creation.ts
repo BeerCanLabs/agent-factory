@@ -59,6 +59,7 @@ import {
 } from './app.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, parseOwners, recordConfig, removeConfig } from './config-store.js';
+import { ownerContactsFor } from './owner-contacts.js';
 import { ownMindPrefix, SKILLS_MANIFEST_ENV, SKILLS_MANIFEST_PATH, type BuildSkill, type Run } from '@beercanlabs/factory-property-manager';
 import { runActivationSmoke } from './smoke.js';
 import { adoptContextForAgent, agentAuthorityActors, skillRegistry, activeDefaultSkills } from './skills.js';
@@ -124,12 +125,14 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
     json(res, 404, { error: 'no_agent_configuration' });
     return;
   }
+  const owners = ownerContactsFor(state, run.agentId);
   json(res, 200, {
     soul: current.agent.soul ?? '',
     memory: current.agent.memory ?? {},
     skills: current.skills ?? [],
     version: current.version ?? 1,
     ...(agent.warmDownSeconds ? { warmDownSeconds: agent.warmDownSeconds } : {}),
+    owners,
   });
 }
 

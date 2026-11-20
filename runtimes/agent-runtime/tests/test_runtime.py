@@ -64,6 +64,9 @@ class FakeFactory:
                     return self._send(200, {"choices": [{"message": outer.model(body["messages"], body.get("tools"))}]})
                 if path == f"/api/v1/runs/{RUN}/reply":
                     return self._send(200, {"ok": True})
+                if path == "/discord/users/@me/channels":
+                    recipient = (body or {}).get("recipient_id") or "0"
+                    return self._send(200, {"id": f"10{recipient[-16:]}" if str(recipient).isdigit() else "101"})
                 if path.startswith("/discord/channels/") and path.endswith("/messages"):
                     return self._send(200, {"id": "m1"})
                 if path == f"/api/v1/runs/{RUN}/mailbox":
