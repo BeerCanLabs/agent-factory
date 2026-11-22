@@ -145,6 +145,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/auth-migration.ts',
       'packages/control-plane/src/idp-config.ts',
       'packages/control-plane/src/login.ts',
+      'packages/control-plane/src/auth-method.ts',
       'packages/control-plane/src/recover.ts',
       'packages/control-plane/src/submissions.ts',
       'packages/control-plane/src/interview-draft.ts',
