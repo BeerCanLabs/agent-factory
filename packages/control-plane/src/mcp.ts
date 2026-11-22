@@ -32,6 +32,7 @@ import { ownersOf } from './config-store.js';
 import { holdDecider } from './decision-holds.js';
 import { callerMayUseScopedGrantTools, rolesForSubjectActor } from './grants-routes.js';
 import { verifySession } from './login.js';
+import { principalAuthMethod, requestAuthMethod } from './auth-method.js';
 
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'] as const;
 export type McpProtocolVersion = (typeof SUPPORTED_MCP_PROTOCOL_VERSIONS)[number];
@@ -358,6 +359,9 @@ async function dispatchInProcess(
   clientId: string,
 ): Promise<InProcessResult> {
   requestBasePrincipal.set(req, principal);
+  // Front-door Phase 0: the in-process request has no Authorization header; it inherits the outer caller's method.
+  const method = principalAuthMethod.get(principal);
+  if (method) requestAuthMethod.set(req, method);
   delete req.headers['x-factory-act-as'];
   return mcpContextStorage.run({ via: `mcp:${clientId}` }, () =>
     runInProcess(req, (r, s) => dispatchControlPlaneHttp(state, r, s)),

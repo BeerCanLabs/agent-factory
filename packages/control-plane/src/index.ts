@@ -42,6 +42,7 @@ import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
 import { startTransferSweeper } from './transfers.js';
+import { stdoutAuthRequestLog } from './auth-method.js';
 
 export {
   convertLegacyOwners,
@@ -288,6 +289,8 @@ const state: FactoryState = {
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   loginBaseUrl: process.env.FACTORY_LOGIN_BASE_URL || undefined,
+  // Front-door Phase 0: one JSON line per request naming its verified sign-in method (no secrets). Off with FACTORY_AUTH_REQUEST_LOG=off.
+  ...((process.env.FACTORY_AUTH_REQUEST_LOG ?? '').toLowerCase() === 'off' ? {} : { authRequestLog: stdoutAuthRequestLog }),
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatekeeperEgressUrl: process.env.FACTORY_GATEKEEPER_EGRESS_URL,
   gatekeeperEgressToken: process.env.FACTORY_GATEKEEPER_EGRESS_TOKEN,
