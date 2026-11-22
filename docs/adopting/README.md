@@ -26,6 +26,7 @@ Every guide marks each capability:
 
 | Guide | Covers |
 |---|---|
+| [Hosting and setup](hosting-and-setup.md) | Getting a factory: hosted by the factory team vs. running your own; what each costs and needs |
 | [Connectors and integrations](connectors-and-integrations.md) | Email, calendar, Google Workspace, Microsoft 365, Planning Center, Brightwheel, church management systems, SHP national tools, spreadsheets |
 | [Costs and billing](costs-and-billing.md) | What it costs, who pays, how to cap spend |
 | [Security, privacy and child safety](security-privacy-child-safety.md) | Children's data, preschool licensing, COPPA/FERPA-style concerns, background checks, donor and recipient privacy, who can call which agent, human approval |
