@@ -74,6 +74,8 @@ const ROUTES: RouteRow[] = [
   { method: 'POST', path: '/api/v1/agents/import', privilege: 'agents.create', role: 'operator', body: {} },
   { method: 'GET', path: '/api/v1/agents/castle/bundle', privilege: 'config.export.agent', role: 'admin' },
   { method: 'GET', path: '/api/v1/agents/castle/settings', privilege: 'agents.settings.read', role: 'admin' },
+  { method: 'POST', path: '/api/v1/agents/castle/memory/turns', privilege: 'agents.memory.append', role: 'admin', body: { speaker: 'user:dale', source: 'reachy-edge', turns: [{ role: 'user', content: 'hi' }] } },
+  { method: 'GET', path: '/api/v1/agents/castle/memory/summary', privilege: 'agents.memory.read', role: 'admin' },
   { method: 'GET', path: '/api/v1/agents/castle/role-assignments', privilege: 'agents.roles.assign', role: 'admin' },
   { method: 'PUT', path: '/api/v1/agents/castle/role-assignments/discord/1', privilege: 'agents.roles.assign', role: 'admin', body: { roles: [] } },
   { method: 'PUT', path: '/api/v1/agents/castle/settings', privilege: 'agents.settings.set', role: 'admin', body: {} },

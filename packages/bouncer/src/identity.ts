@@ -14,7 +14,7 @@ import {
 import { ROLE_PRIVILEGES, type Privilege } from './privileges.js';
 
 export const PRINCIPAL_ACTOR = new RegExp(
-  `^(?:(?:user|oidc):(?:${SLUG_BODY}|${EMAIL_BODY})|cloudflare:${EMAIL_BODY}|(?:service|cloudflare-service):${SERVICE_BODY}|token:${TOKEN_BODY})$`,
+  `^(?:(?:user|oidc):(?:${SLUG_BODY}|${EMAIL_BODY})|cloudflare:${EMAIL_BODY}|(?:service|cloudflare-service):${SERVICE_BODY}|token:${TOKEN_BODY}|agent:${SLUG_BODY})$`,
 );
 
 /** A principal actor as stored (trimmed, lower-case), or undefined when it is not one. */
@@ -27,7 +27,7 @@ export function parseActor(value: unknown): string | undefined {
 /**
  * Maps legacy `cloudflare:<email>` / `oidc:<email>` (and bare group emails) to the matching `PrincipalRecord.id`
  * in `store` (or deterministic `user:<lowercased-email>` when no store record exists yet), and normalizes
- * `user:<id>`, `service:<name>`, `cloudflare-service:<cn>`, and `token:<name>` to lowercase (D2, S1).
+ * `user:<id>`, `service:<name>`, `cloudflare-service:<cn>`, `token:<name>`, and `agent:<id>` to lowercase (D2, S1).
  */
 export function normalizeActorToPrincipal(actor: string, store?: PrincipalStore): string {
   if (typeof actor !== 'string') throw new Error(`invalid actor: ${JSON.stringify(actor)}`);
@@ -62,6 +62,9 @@ export function normalizeActorToPrincipal(actor: string, store?: PrincipalStore)
   }
   if (prefix === 'service' || prefix === 'cloudflare-service') {
     return `service:${rest}`;
+  }
+  if (prefix === 'agent') {
+    return `agent:${rest}`;
   }
   return trimmed;
 }

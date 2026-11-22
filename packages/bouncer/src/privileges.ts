@@ -84,6 +84,8 @@ export const PRIVILEGES = [
   'agents.roles.read',
   'agents.settings.read',
   'agents.settings.set',
+  'agents.memory.append',
+  'agents.memory.read',
   'agents.create',
   'agents.roles.assign',
   'spend.budget.set',
@@ -322,6 +324,8 @@ export const ROLE_PRIVILEGES: Record<Role, readonly Privilege[]> = {
     'agents.roles.read',
     'agents.settings.read',
     'agents.settings.set',
+    'agents.memory.append',
+    'agents.memory.read',
     'agents.create',
     'agents.roles.assign',
     'spend.budget.set',
@@ -381,6 +385,8 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
   'agents.roles.read',
   'agents.settings.read',
   'agents.settings.set',
+  'agents.memory.append',
+  'agents.memory.read',
   'agents.roles.assign',
   'approvals.decide',
   // E12: a person who holds an agent role may start a run and converse, so a message can reach the agent they hold it on.
@@ -392,6 +398,7 @@ export const AGENT_SCOPED: ReadonlySet<Privilege> = new Set<Privilege>([
 /** The roles that are derived from data about one agent, skill, or run, never read from a credential or a claim. */
 export type DerivedRole =
   | 'agent-owner'
+  | 'agent-edge'
   | 'agent-member'
   | 'requester'
   | 'skill-owner'
@@ -523,6 +530,17 @@ export const DERIVED_ROLE_PRIVILEGES: Record<DerivedRole, readonly Privilege[]> 
    * D11, D29, S2b: `member` grant on a `team` agent — wakes, converses, and clears run-time holds on that team agent.
    */
   'team-member': ['agents.wake', 'agents.converse', 'approvals.decide'],
+  /**
+   * Edge-body grant (Reachy / Rosie): read persona settings and append/read the agent's notebook
+   * without waking a run. Scoped to one agent; never isolates, never sets settings, never clears holds.
+   */
+  'agent-edge': [
+    // agents.read and mcp.use stay on the factory key roles; derived rows may only hold AGENT_SCOPED privileges.
+    'agents.converse',
+    'agents.settings.read',
+    'agents.memory.append',
+    'agents.memory.read',
+  ],
   /**
    * E12 (Dale, 2026-10-10), D29: a person who holds an agent sub-role on a personal agent (Stephanie: `Family` on Donna)
    * may reach that agent, and nothing else: start a run and converse. Never clears holds (`approvals.decide`).

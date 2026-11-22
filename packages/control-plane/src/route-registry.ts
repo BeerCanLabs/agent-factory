@@ -829,10 +829,74 @@ const ConversationTurnBodySchema: JsonSchemaObject = jsonSchema.object({
   message: jsonSchema.string({ description: 'Text message from user to agent' }),
   prompt: jsonSchema.string({ description: 'Prompt or instructions for agent' }),
   waitSeconds: jsonSchema.number({ description: 'Optional seconds to wait/poll for reply (0..25)', minimum: 0, maximum: 25 }),
+  speaker: jsonSchema.string({ description: "Enrolled person speaking: a user:<id> or an enrolled alias (e.g. 'dale')" }),
+  asUser: jsonSchema.string({ description: 'Alias of speaker (same as speaker)' }),
+  mode: jsonSchema.string({ description: 'call = live multi-turn; errand = one-shot task', enum: ['call', 'errand'] }),
+  channel: jsonSchema.string({ description: "How the person is reaching the agent (default 'voice')" }),
+  assurance: jsonSchema.string({ description: "How the client identified the speaker (default 'voice-asserted')" }),
+  conversationId: jsonSchema.string({ description: 'Existing conversation id to continue a live call' }),
   requestedBy: jsonSchema.object({
     provider: jsonSchema.string({ description: 'External identity provider' }),
     id: jsonSchema.string({ description: 'External user identifier' }),
   }, { description: 'Verified external caller identity' }),
+});
+
+const MemoryTurnSchema: JsonSchemaObject = jsonSchema.object({
+  role: jsonSchema.string({ description: 'Turn author', enum: ['user', 'assistant', 'system'] }),
+  content: jsonSchema.string({ description: 'Turn text' }),
+  timestamp: jsonSchema.string({ description: 'ISO-8601 timestamp for this turn' }),
+}, { required: ['role', 'content'] });
+
+const MemoryTurnsBodySchema: JsonSchemaObject = jsonSchema.object({
+  speaker: jsonSchema.string({ description: 'Verified speaker principal or enrolled alias' }),
+  source: jsonSchema.string({ description: "Where the conversation was recorded (e.g. 'reachy-edge')" }),
+  channel: jsonSchema.string({ description: "Channel slug (default 'voice')" }),
+  startedAt: jsonSchema.string({ description: 'ISO-8601 start of the conversation' }),
+  endedAt: jsonSchema.string({ description: 'ISO-8601 end of the conversation' }),
+  sessionId: jsonSchema.string({ description: 'Existing notebook session id to append to' }),
+  sessionName: jsonSchema.string({ description: 'Optional name for a new session' }),
+  turns: jsonSchema.array(MemoryTurnSchema, { description: 'Finished turns to append; the factory does not answer them' }),
+}, { required: ['speaker', 'source', 'turns'] });
+
+const MemoryTurnsResponseSchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent identifier' }),
+  sessionId: jsonSchema.string({ description: 'Notebook session id the turns were written to' }),
+  turnsAppended: jsonSchema.integer({ description: 'Number of turns written' }),
+  source: jsonSchema.string({ description: 'Recorded source slug' }),
+  channel: jsonSchema.string({ description: 'Recorded channel slug' }),
+});
+
+const MemorySummaryQuerySchema: JsonSchemaObject = jsonSchema.object({
+  limit: jsonSchema.integer({ description: 'Max recent sessions to return (1-20, default 5)', minimum: 1, maximum: 20 }),
+  turns: jsonSchema.integer({ description: 'Max turns per session (1-50, default 20)', minimum: 1, maximum: 50 }),
+});
+
+const MemorySummaryResponseSchema: JsonSchemaObject = jsonSchema.object({
+  agentId: jsonSchema.string({ description: 'Agent identifier' }),
+  soul: jsonSchema.string({ description: 'Agent persona text, when the caller may read settings' }),
+  soulSet: jsonSchema.boolean({ description: 'Whether a soul is set, when the caller may not read it' }),
+  memory: jsonSchema.object({}, { description: 'Memory archetype and bounds' }),
+  timezone: jsonSchema.string({ description: 'Agent timezone' }),
+  notebookStale: jsonSchema.boolean({ description: 'True when a live run may have un-pushed notebook writes' }),
+  runId: jsonSchema.string({ description: 'Live run holding the notebook, if any' }),
+  recentSessions: jsonSchema.array(jsonSchema.object({
+    id: jsonSchema.string({ description: 'Session id' }),
+    userId: jsonSchema.string({ description: 'Speaker stored on the session' }),
+    name: jsonSchema.string({ description: 'Session name' }),
+    channelId: jsonSchema.string({ description: 'Channel on the session' }),
+    createdAt: jsonSchema.string({ description: 'Session created at' }),
+    updatedAt: jsonSchema.string({ description: 'Session updated at' }),
+    isActive: jsonSchema.boolean({ description: 'Whether the session is the active one for that speaker' }),
+    turnCount: jsonSchema.integer({ description: 'Total turns in the session' }),
+    turns: jsonSchema.array(jsonSchema.object({
+      role: jsonSchema.string({ description: 'Turn author' }),
+      content: jsonSchema.string({ description: 'Turn text' }),
+      timestamp: jsonSchema.string({ description: 'Turn timestamp' }),
+      surface: jsonSchema.string({ description: 'Surface or channel recorded on the turn' }),
+      channel_id: jsonSchema.string({ description: 'Channel id recorded on the turn' }),
+      source: jsonSchema.string({ description: 'Source slug such as reachy-edge' }),
+    }), { description: 'Most recent turns, oldest first' }),
+  }), { description: 'Recent notebook sessions, newest first' }),
 });
 
 const ConversationRequestsBodySchema: JsonSchemaObject = jsonSchema.object({
@@ -2771,6 +2835,36 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     privilege: "agents.converse",
     querySchema: RepliesQuerySchema,
     responseSchema: SuccessResponseSchema,
+  },
+  {
+    operationId: "append_agent_memory_turns",
+    method: "POST",
+    pattern: "/api/v1/agents/:id/memory/turns",
+    summary: "Append finished conversation turns to an agent's notebook",
+    description: "Writes already-answered edge conversations into the agent's persistent notebook without waking a run. Refuses with 409 when a live run holds the notebook.",
+    staff: "registrar",
+    mcpExposure: "tool",
+    toolset: "agents",
+    mcpToolName: "append_agent_memory_turns",
+    privilege: "agents.memory.append",
+    requestBodySchema: MemoryTurnsBodySchema,
+    responseSchema: MemoryTurnsResponseSchema,
+    statusCodes: [201, 409],
+  },
+  {
+    operationId: "get_agent_memory_summary",
+    method: "GET",
+    pattern: "/api/v1/agents/:id/memory/summary",
+    summary: "Read a compact persona and recent-memory summary",
+    description: "Returns soul (when permitted), memory settings, and recent notebook sessions. Does not wake a run. Flags notebookStale when a live run may have un-pushed writes.",
+    staff: "registrar",
+    mcpExposure: "tool",
+    toolset: "agents",
+    mcpToolName: "get_agent_memory_summary",
+    privilege: "agents.memory.read",
+    querySchema: MemorySummaryQuerySchema,
+    responseSchema: MemorySummaryResponseSchema,
+
   },
   {
     operationId: "list_runs",

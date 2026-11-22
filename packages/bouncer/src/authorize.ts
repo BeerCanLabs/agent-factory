@@ -177,10 +177,16 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
       const effectiveKind =
         resource.agentKind ?? (agentGrants.some((eg) => eg.grant.role === 'accountable-lead') ? 'team' : 'personal');
 
+      const edgeAllows = (eg: (typeof agentGrants)[number]) =>
+        !eg.readOnly &&
+        eg.grant.role === 'agent-edge' &&
+        DERIVED_ROLE_PRIVILEGES['agent-edge'].includes(privilege);
+
       if (effectiveKind === 'team') {
         suppressLegacyOwner = true;
         for (const eg of agentGrants) {
           if (eg.readOnly) continue;
+          if (edgeAllows(eg)) return { allowed: true };
           if (
             eg.grant.role === 'accountable-lead' &&
             eg.source === 'direct' &&
@@ -195,6 +201,7 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
             eg.grant.role !== 'content-owner' &&
             eg.grant.role !== 'accountable-lead' &&
             eg.grant.role !== 'member' &&
+            eg.grant.role !== 'agent-edge' &&
             eg.grant.role.trim().toLowerCase() !== 'owner' &&
             DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege)
           ) {
@@ -203,6 +210,7 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
         }
       } else {
         for (const eg of agentGrants) {
+          if (edgeAllows(eg)) return { allowed: true };
           if (eg.grant.role === 'content-owner' && eg.source === 'direct') {
             suppressLegacyOwner = true;
             if (eg.readOnly) {
@@ -215,6 +223,7 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
           } else if (
             !eg.readOnly &&
             eg.grant.role !== 'accountable-lead' &&
+            eg.grant.role !== 'agent-edge' &&
             eg.grant.role.trim().toLowerCase() !== 'owner' &&
             DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege)
           ) {
@@ -313,11 +322,13 @@ export function requiredRoleForPrivilege(
     if (effectiveKind === 'team') {
       if (DERIVED_ROLE_PRIVILEGES['team-member'].includes(privilege)) return 'member';
       if (DERIVED_ROLE_PRIVILEGES['accountable-lead'].includes(privilege)) return 'accountable-lead';
+      if (DERIVED_ROLE_PRIVILEGES['agent-edge'].includes(privilege)) return 'agent-edge';
       return defaultRole;
     }
     if (effectiveKind === 'personal' || resource.grants !== undefined || resource.owners !== undefined) {
       if (DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege)) return 'agent-member';
       if (DERIVED_ROLE_PRIVILEGES['content-owner'].includes(privilege)) return 'content-owner';
+      if (DERIVED_ROLE_PRIVILEGES['agent-edge'].includes(privilege)) return 'agent-edge';
       return defaultRole;
     }
   }

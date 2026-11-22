@@ -98,6 +98,7 @@ export {
   FLEET_SERVICE_ROLES,
   GRANT_STATES,
   GRANT_SUBJECT,
+  AGENT_PRINCIPAL_ID,
   GROUP_SUBJECT,
   GrantStore,
   GrantStoreError,
