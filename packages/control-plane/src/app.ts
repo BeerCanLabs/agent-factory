@@ -102,6 +102,7 @@ import { handleGitHubAppInstall } from './github-app-install.js';
 import { handleDiscordAppSetup } from './discord-app-setup.js';
 import { handleAppSetup, readSecretCached } from './app-setup-providers.js';
 import { handleAgentSettings, agentInForce } from './agent-settings.js';
+import { handleAgentMemory } from './agent-memory.js';
 import { handleAgentBundle } from './agent-bundle.js';
 import { handleAgentBuilder } from './agent-builder.js';
 import { allowedSubagents, budgetHolder, handleSubagents, spawnSubagent, type SubagentRecord } from './subagents.js';
@@ -241,6 +242,13 @@ export type FactoryState = {
   policies: PolicyStore;
   /** §6.14 SK3: every agent's versioned deployment configuration, held in memory and written through on change. */
   configs?: ConfigStore;
+  /**
+   * The agent's persistent notebook (mind) store. Used by the edge memory routes to append and summarize
+   * conversations without waking a run. Absent: those routes return 503.
+   */
+  mind?: { store: import('@beercanlabs/factory-hydrate').MindStore };
+  /** In-process mutexes per mind prefix for memory writes. */
+  mindLocks?: Map<string, Promise<void>>;
   /**
    * §6.14 SK1: runs the factory's checks on a registered skill version's code. Unset: chosen from the environment
    * (the Registrar's `skillCheckerFromEnv`); null: none.
@@ -557,7 +565,11 @@ export function effectiveGrantsForActor(
   } catch {
     return { ok: true, grants: [] };
   }
-  if (!canonicalSubject.startsWith('user:') && !canonicalSubject.startsWith('service:')) {
+  if (
+    !canonicalSubject.startsWith('user:') &&
+    !canonicalSubject.startsWith('service:') &&
+    !canonicalSubject.startsWith('agent:')
+  ) {
     return { ok: true, grants: [] };
   }
   const groupSet = new Set<string>();
@@ -3578,6 +3590,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   if ((path.startsWith('/api/v1/keymaster/') || path === '/api/v1/gatekeeper-egress/github-app/token') && (await handleGitHubAppInstall(state, req, res, path))) return;
   if (path.startsWith('/api/v1/keymaster/') && (await handleCredentials(state, req, res, path))) return;
   if (await handleAgentSettings(state, req, res, path)) return;
+  if (await handleAgentMemory(state, req, res, path)) return;
   if (await handleAgentCreation(state, req, res, path)) return;
   if (await handleSubagents(state, req, res, path)) return;
   if (await handleConvertAgent(state, req, res, path)) return;

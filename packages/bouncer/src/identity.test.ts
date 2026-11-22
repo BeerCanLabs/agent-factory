@@ -677,6 +677,7 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
     assert.equal(parseActor('OIDC:Carol'), 'oidc:carol');
     assert.equal(parseActor('token:Admin'), 'token:admin');
     assert.equal(parseActor('token:agent:helper'), 'token:agent:helper');
+    assert.equal(parseActor('AGENT:Rosie'), 'agent:rosie');
     for (const bad of [
       '',
       'alice',
@@ -693,6 +694,8 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
       'token:',
       'token:///',
       'token:agent:',
+      'agent:',
+      'agent:///',
       'cloudflare:',
       'cloudflare:notanemail',
       'cloudflare:foo@bar',
@@ -732,6 +735,7 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
     assert.equal(normalizeActorToPrincipal('oidc:_svc@example.com'), 'user:_svc@example.com');
     assert.equal(normalizeActorToPrincipal('Token:Admin'), 'token:admin');
     assert.equal(normalizeActorToPrincipal('token:agent:helper'), 'token:agent:helper');
+    assert.equal(normalizeActorToPrincipal('AGENT:Rosie'), 'agent:rosie');
     assert.equal(normalizeActorToPrincipal('OIDC:Carol'), 'user:carol');
     assert.equal(normalizeActorToPrincipal('user:Alice+Tag@Sub.Example.com'), 'user:alice+tag@sub.example.com');
 

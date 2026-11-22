@@ -286,6 +286,7 @@ const state: FactoryState = {
   repositoryAgentIds: new Set((process.env.FACTORY_REPOSITORY_AGENT_IDS ?? '').split(',').map((v) => v.trim()).filter(Boolean)),
   // RT1: the pinned shared runtime new agents run on. Unset, no agent can be created from a configuration.
   sharedRuntime: loadSharedRuntime(REGISTRY_DIR, process.env),
+  mind: { store: { root: MEMORY_STORE, uri: process.env.MEMORY_STORE_URI } },
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   loginBaseUrl: process.env.FACTORY_LOGIN_BASE_URL || undefined,

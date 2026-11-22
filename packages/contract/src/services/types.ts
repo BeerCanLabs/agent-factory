@@ -169,6 +169,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/gcp/skill-checker.ts',
       'packages/control-plane/src/config-store.ts',
       'packages/control-plane/src/agent-settings.ts',
+      'packages/control-plane/src/agent-memory.ts',
       'packages/control-plane/src/agent-creation.ts',
       'packages/control-plane/src/owner-contacts.ts',
       'packages/control-plane/src/subagents.ts',

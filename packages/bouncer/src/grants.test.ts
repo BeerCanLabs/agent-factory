@@ -472,6 +472,53 @@ describe('GrantStore & domain grants (S2 #351)', () => {
       (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_role',
     );
 
+    assert.deepEqual(parseGrantSubject('AGENT:Rosie'), { subject: 'agent:rosie', kind: 'agent' });
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'agent:rosie',
+          scope: { kind: 'agent', id: 'donna' },
+          role: 'agent-edge',
+          by: 'user:admin',
+          granterIsAdmin: true,
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_scope',
+    );
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'user:dale',
+          scope: { kind: 'agent', id: 'rosie' },
+          role: 'agent-edge',
+          by: 'user:admin',
+          granterIsAdmin: true,
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_role',
+    );
+    const edge = await store.grant({
+      subject: 'agent:rosie',
+      scope: { kind: 'agent', id: 'rosie' },
+      role: 'agent-edge',
+      by: 'user:admin',
+      granterIsAdmin: true,
+    });
+    assert.equal(edge.role, 'agent-edge');
+    assert.equal(edge.subject, 'agent:rosie');
+    const edgeEffective = store.effectiveGrantsFor({ subject: 'agent:rosie' });
+    assert.equal(edgeEffective.length, 1);
+    assert.equal(edgeEffective[0]?.grant.role, 'agent-edge');
+    await assert.rejects(
+      () =>
+        store.grant({
+          subject: 'agent:rosie',
+          scope: { kind: 'fleet' },
+          role: 'viewer',
+          by: 'user:admin',
+          granterIsAdmin: true,
+        }),
+      (err: unknown) => err instanceof GrantStoreError && err.status === 400 && err.code === 'invalid_role',
+    );
+
     // Personal agent unique content-owner + mutual exclusion with accountable-lead (D10, D11)
     await store.grant({
       subject: 'user:dale',

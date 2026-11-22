@@ -395,3 +395,36 @@ describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D2
   });
 });
 
+
+describe('agent-edge grant', () => {
+  it('holds memory, settings read, converse, and nothing else on the granted agent', () => {
+    const edgeGrant = {
+      grant: {
+        id: 'g1',
+        subject: 'agent:rosie',
+        scope: { kind: 'agent' as const, id: 'rosie' },
+        role: 'agent-edge',
+        state: 'active' as const,
+        expiresAt: null,
+        version: 1,
+        createdAt: '2026-11-22T00:00:00.000Z',
+        createdBy: 'user:admin',
+        updatedAt: '2026-11-22T00:00:00.000Z',
+        updatedBy: 'user:admin',
+      },
+      source: 'direct' as const,
+      readOnly: false,
+    };
+    const rosie = as('agent:rosie');
+    const onRosie = { agentId: 'rosie', agentKind: 'team' as const, grants: [edgeGrant] };
+    for (const p of DERIVED_ROLE_PRIVILEGES['agent-edge']) {
+      assert.equal(allowed(rosie, p, onRosie), true, p);
+    }
+    // Any live grant also carries content.submit (S20); agent-edge must not pick up member/owner rights such as wake.
+    const held = PRIVILEGES.filter((p) => allowed(rosie, p, onRosie));
+    assert.deepEqual([...held].sort(), [...DERIVED_ROLE_PRIVILEGES['agent-edge'], 'content.submit'].sort());
+    for (const p of AGENT_SCOPED) {
+      assert.equal(allowed(rosie, p, { agentId: 'donna', agentKind: 'team', grants: [edgeGrant] }), false, p);
+    }
+  });
+});

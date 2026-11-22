@@ -28,8 +28,10 @@ const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
 export const DOMAIN_SUBJECT = new RegExp(`^domain:${EMAIL_DOMAIN_BODY}$`);
 export const GROUP_SUBJECT = new RegExp(`^group:${GROUP_ID_BODY}$`);
+export const AGENT_PRINCIPAL_ID = new RegExp(`^agent:${SLUG_BODY}$`);
+
 export const GRANT_SUBJECT = new RegExp(
-  `^(?:${PRINCIPAL_ID.source.slice(1, -1)}|domain:${EMAIL_DOMAIN_BODY}|group:${GROUP_ID_BODY}|${SERVICE_PRINCIPAL_ID.source.slice(1, -1)})$`,
+  `^(?:${PRINCIPAL_ID.source.slice(1, -1)}|domain:${EMAIL_DOMAIN_BODY}|group:${GROUP_ID_BODY}|${SERVICE_PRINCIPAL_ID.source.slice(1, -1)}|${AGENT_PRINCIPAL_ID.source.slice(1, -1)})$`,
 );
 
 export const FLEET_HUMAN_ROLES = ['viewer', 'operator', 'approver', 'admin', 'budget-owner'] as const;
@@ -40,7 +42,7 @@ export type FleetServiceRole = (typeof FLEET_SERVICE_ROLES)[number];
 
 export type FleetGrantRole = FleetHumanRole | FleetServiceRole;
 
-export const AGENT_BUILTIN_ROLES = ['content-owner', 'accountable-lead', 'member', 'agent-member'] as const;
+export const AGENT_BUILTIN_ROLES = ['content-owner', 'accountable-lead', 'member', 'agent-member', 'agent-edge'] as const;
 export type AgentBuiltInRole = (typeof AGENT_BUILTIN_ROLES)[number];
 
 export const SKILL_GRANT_ROLES = ['content-owner', 'member'] as const;
@@ -49,7 +51,7 @@ export type SkillGrantRole = (typeof SKILL_GRANT_ROLES)[number];
 export const GRANT_STATES = ['active', 'pending-revoked', 'pending-accepted'] as const;
 export type GrantState = (typeof GRANT_STATES)[number];
 
-export type GrantSubjectKind = 'user' | 'domain' | 'group' | 'service';
+export type GrantSubjectKind = 'user' | 'domain' | 'group' | 'service' | 'agent';
 
 export type GrantScope =
   | { kind: 'fleet' }
@@ -290,6 +292,9 @@ export function parseGrantSubject(raw: unknown): { subject: string; kind: GrantS
   if (SERVICE_PRINCIPAL_ID.test(clean)) {
     return { subject: clean, kind: 'service' };
   }
+  if (AGENT_PRINCIPAL_ID.test(clean)) {
+    return { subject: clean, kind: 'agent' };
+  }
   throw new GrantStoreError(400, 'invalid_subject', `invalid grant subject: ${JSON.stringify(raw)}`);
 }
 
@@ -364,6 +369,10 @@ function validateAndNormalizeRole(scope: GrantScope, rawRole: unknown, subjectKi
   const trimmed = rawRole.trim();
   const lower = trimmed.toLowerCase();
 
+  if (subjectKind === 'agent' && !(scope.kind === 'agent' && lower === 'agent-edge')) {
+    throw new GrantStoreError(400, 'invalid_role', `agent:<id> subjects may only hold the agent-edge role on an agent scope`);
+  }
+
   if (scope.kind === 'fleet') {
     if (FLEET_SERVICE_ROLE_SET.has(lower)) {
       if (subjectKind !== 'service') {
@@ -385,6 +394,17 @@ function validateAndNormalizeRole(scope: GrantScope, rawRole: unknown, subjectKi
       return lower;
     }
     throw new GrantStoreError(400, 'invalid_role', `invalid fleet role: ${JSON.stringify(rawRole)}`);
+  }
+
+  if (scope.kind === 'agent' && lower === 'agent-edge') {
+    if (subjectKind !== 'agent') {
+      throw new GrantStoreError(400, 'invalid_role', `role 'agent-edge' requires an agent:<id> subject`);
+    }
+    return 'agent-edge';
+  }
+
+  if (subjectKind === 'agent') {
+    throw new GrantStoreError(400, 'invalid_role', `agent:<id> subjects may only hold the agent-edge role on an agent scope`);
   }
 
   if (subjectKind === 'service') {
@@ -1039,11 +1059,11 @@ export class GrantStore {
     let subjectExtractedEmail: string | undefined;
     if (query.subject !== undefined) {
       const resolved = resolveCanonicalSubject(query.subject, this.principals);
-      if (resolved.kind !== 'user' && resolved.kind !== 'service') {
+      if (resolved.kind !== 'user' && resolved.kind !== 'service' && resolved.kind !== 'agent') {
         throw new GrantStoreError(
           400,
           'invalid_subject',
-          `effectiveGrantsFor subject must be user:<id> or service:<name>, got '${query.subject}'`,
+          `effectiveGrantsFor subject must be user:<id>, service:<name>, or agent:<id>, got '${query.subject}'`,
         );
       }
       directSubject = resolved.subject;
@@ -1052,7 +1072,7 @@ export class GrantStore {
       subjectExtractedEmail = resolved.extractedEmail;
     }
 
-    if (subjectKind === 'service') {
+    if (subjectKind === 'service' || subjectKind === 'agent') {
       const out: EffectiveGrant[] = [];
       for (const g of this.byId.values()) {
         if (g.subject !== directSubject) continue;
@@ -1455,7 +1475,7 @@ export class GrantStore {
         if (scope.kind === 'fleet') {
           throw new GrantStoreError(403, 'forbidden', 'fleet grants require admin authority');
         }
-        if (subjectKind === 'domain' || subjectKind === 'service') {
+        if (subjectKind === 'domain' || subjectKind === 'service' || subjectKind === 'agent') {
           throw new GrantStoreError(403, 'forbidden', `${subjectKind} grants require admin authority`);
         }
         if (input.granterRole === 'accountable-lead' && scope.kind !== 'agent') {
@@ -1474,6 +1494,16 @@ export class GrantStore {
       }
 
       const role = validateAndNormalizeRole(scope, input.role, subjectKind);
+      if (subjectKind === 'agent') {
+        const agentId = resolvedSubject.slice('agent:'.length);
+        if (scope.kind !== 'agent' || scope.id !== agentId) {
+          throw new GrantStoreError(
+            400,
+            'invalid_scope',
+            `an agent:<id> subject may only be granted agent-edge on that same agent`,
+          );
+        }
+      }
       const allowInitialSubmission =
         Boolean(input.initialSubmission) &&
         (scope.kind === 'agent' || scope.kind === 'skill') &&

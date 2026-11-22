@@ -157,8 +157,8 @@ describe('Headless MCP Neck Expansion (TSK-338, GAP-250, GAP-251, E9, CL6, CL11)
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('1. Core toolset default on POST /mcp is <= 40 tools, matches inCore, and 192 total tools in catalog', async () => {
-    assert.equal(TOOLS.length, 192);
+  it('1. Core toolset default on POST /mcp is <= 40 tools, matches inCore, and 194 total tools in catalog', async () => {
+    assert.equal(TOOLS.length, 194);
     const coreCount = TOOLS.filter((t) => (t as any)._meta?.inCore).length;
     assert.ok(coreCount <= 40, `Core tools count must be <= 40, found ${coreCount}`);
     assert.equal(coreCount, 39);
