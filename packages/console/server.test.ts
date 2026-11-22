@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 
 process.env.FACTORY_TOKEN = 'console-must-never-send-this'; // secret-scan:allow (test fixture)
-const { createConsoleServer, providerLabel } = await import('./server.js');
+const { createConsoleServer, createConsoleProbeServer, presentsCredential, providerLabel } = await import('./server.js');
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -26,6 +26,11 @@ describe('A2 console forwards the caller, adds no credential', () => {
         const who = req.headers['cf-access-jwt-assertion'] ? { actor: 'cloudflare:owner@example.com', roles: ['admin', 'operator', 'approver', 'viewer', 'ingest'] } : String(req.headers.cookie ?? '').includes('factory_session=g') ? { actor: 'user:dale', principal: 'user:dale', roles: ['admin'], signedInWith: 'google', displayName: 'Dale' } : null;
         res.writeHead(who ? 200 : 401, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(who ?? { error: 'unauthorized' }));
+      }
+      if (req.url === '/api/v1/health') {
+        const ok = req.headers.authorization === 'Bearer fk_probe' || String(req.headers.cookie ?? '').includes('factory_session=g');
+        res.writeHead(ok ? 200 : 401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(ok ? { status: 'ok', detail: 'verified' } : { error: 'unauthorized' }));
       }
       if (req.url?.startsWith('/authorize')) {
         res.writeHead(302, { Location: 'http://localhost:8000/callback?code=test-code' });
@@ -113,11 +118,46 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(((await login.json()) as { path: string }).path, '/login', 'the login page comes from the control plane');
   });
 
-  it('/healthz returns ok and dynamic console version from package.json', async () => {
-    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.deepEqual(body, { ok: true, service: 'factory-console', version: '0.2.0' });
+  it('R17 / front-door Phase 0: anonymous health is minimal liveness only (no service, no version), for the ALB', async () => {
+    for (const p of ['/healthz', '/api/v1/health']) {
+      seen.length = 0;
+      const res = await fetch(`http://127.0.0.1:${port}${p}`, { headers: { 'user-agent': 'ELB-HealthChecker/2.0' } });
+      assert.equal(res.status, 200, p);
+      assert.equal(res.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(await res.json(), { status: 'ok' }, `${p} names no service, version or dependency`);
+      assert.equal(seen.length, 0, `${p} anonymous liveness never reaches the control plane`);
+    }
+    const head = await fetch(`http://127.0.0.1:${port}/api/v1/health`, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    const post = await fetch(`http://127.0.0.1:${port}/api/v1/health`, { method: 'POST', body: '{}' });
+    assert.equal(post.status, 405);
+  });
+
+  it('R17 / front-door Phase 0: a caller with a credential gets the control plane verified health, or its 401', async () => {
+    const ok = await fetch(`http://127.0.0.1:${port}/healthz`, { headers: { authorization: 'Bearer fk_probe' } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { status: 'ok', detail: 'verified' });
+    const session = await fetch(`http://127.0.0.1:${port}/api/v1/health`, { headers: { cookie: 'factory_session=g' } });
+    assert.equal(session.status, 200);
+    const bad = await fetch(`http://127.0.0.1:${port}/api/v1/health`, { headers: { authorization: 'Bearer fk_wrong' } });
+    assert.equal(bad.status, 401, 'an invalid credential is not downgraded to anonymous liveness');
+  });
+
+  it('presentsCredential recognises bearer, factory session, Access assertion and Access cookie only', () => {
+    const r = (headers: http.IncomingHttpHeaders) => ({ headers }) as http.IncomingMessage;
+    assert.equal(presentsCredential(r({})), false);
+    assert.equal(presentsCredential(r({ cookie: 'theme=dark; other=1' })), false);
+    assert.equal(presentsCredential(r({ authorization: 'Bearer x' })), true);
+    assert.equal(presentsCredential(r({ cookie: 'a=1; factory_session=abc' })), true);
+    assert.equal(presentsCredential(r({ cookie: 'CF_Authorization=h.p.s' })), true);
+    assert.equal(presentsCredential(r({ 'cf-access-jwt-assertion': 'h.p.s' })), true);
+  });
+
+  it('providerLabel names the new verified methods', () => {
+    assert.equal(providerLabel('oauth'), 'Connected app (OAuth)');
+    assert.equal(providerLabel('static-token'), 'Static token');
+    assert.equal(providerLabel('oidc-bearer'), 'OIDC token');
+    assert.equal(providerLabel('run-token'), 'Agent run');
   });
 
   it('#432: the provider label names the IdP of the current session, not a linked one', async () => {
@@ -187,5 +227,41 @@ describe('A2 console forwards the caller, adds no credential', () => {
     });
     assert.equal(all.status, 200);
     assert.equal(((await all.json()) as { path: string }).path, '/mcp/x/all');
+  });
+});
+
+describe('R17 / front-door Phase 0: anonymous liveness can be turned off; private probe listener', () => {
+  it('with anonymousLiveness false, anonymous health is 401 and names nothing', async () => {
+    const cp = http.createServer((_req, res) => {
+      res.writeHead(500);
+      res.end();
+    });
+    const cpPort = await listen(cp);
+    const server = createConsoleServer({ controlPlaneUrl: `http://127.0.0.1:${cpPort}`, anonymousLiveness: false });
+    const port = await listen(server);
+    try {
+      for (const p of ['/healthz', '/api/v1/health']) {
+        const res = await fetch(`http://127.0.0.1:${port}${p}`);
+        assert.equal(res.status, 401, p);
+        assert.deepEqual(await res.json(), { error: 'unauthorized' });
+      }
+    } finally {
+      server.close();
+      cp.close();
+    }
+  });
+
+  it('the private probe listener answers GET /healthz with liveness only and 404 elsewhere', async () => {
+    const probe = createConsoleProbeServer();
+    const port = await listen(probe);
+    try {
+      const ok = await fetch(`http://127.0.0.1:${port}/healthz`);
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { status: 'ok' });
+      assert.equal((await fetch(`http://127.0.0.1:${port}/api/v1/agents`)).status, 404);
+      assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`, { method: 'POST' })).status, 404);
+    } finally {
+      probe.close();
+    }
   });
 });

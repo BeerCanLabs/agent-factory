@@ -39,6 +39,7 @@ import {
 } from './app.js';
 import { ownersOf } from './config-store.js';
 import { adoptContextForAgent, resolveSkillContentOwner, skillRegistry } from './skills.js';
+import { authMethodOf } from './auth-method.js';
 
 const PRIVILEGE_SET: ReadonlySet<string> = new Set<string>(PRIVILEGES);
 const AUTH_ROLE_SET: ReadonlySet<string> = new Set<string>(ROLES);
@@ -1326,7 +1327,9 @@ export async function handleGrantsRoutes(
     // S6 (R11): every signed-in client sees the break-glass alert until the key is rotated.
     // #432: how this request signed in, in identify()'s order (key or bearer, factory session, Access assertion), so the
     // console names the IdP of the current session rather than one the principal was linked through.
-    const signedInWith = req.headers.authorization ? 'api-key' : (sessionIdp(state, req) ?? 'cloudflare-access');
+    // Front-door Phase 0: the method identify() actually verified (inherited by in-process MCP tool calls), not a guess
+    // from which headers are present, so an fk_ key call through MCP no longer reports 'cloudflare-access'.
+    const signedInWith = authMethodOf(req) ?? (req.headers.authorization ? 'api-key' : (sessionIdp(state, req) ?? 'cloudflare-access'));
     const body = out.status === 200 && out.body && typeof out.body === 'object' ? { ...(out.body as object), signedInWith, ...(state.keys ? { breakGlassAlert: state.keys.breakGlassAlert() } : {}) } : out.body;
     json(res, out.status, body);
     return true;

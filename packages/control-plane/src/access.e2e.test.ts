@@ -134,7 +134,7 @@ describe('A2 identity is verified, not asserted (control plane)', { concurrency:
   it('bearer tokens keep working, alongside a service-token assertion', async () => {
     const service = assertion({ common_name: 'deploy-check.access', sub: '' });
     const r = await call(on.port, '/api/v1/whoami', { authorization: `Bearer ${ADMIN_TOKEN}`, 'cf-access-jwt-assertion': service });
-    assert.deepEqual(r.body, { actor: 'token:admin', roles: ['admin'], signedInWith: 'api-key' });
+    assert.deepEqual(r.body, { actor: 'token:admin', roles: ['admin'], signedInWith: 'static-token' });
     assert.equal((await call(off.port, '/api/v1/agents', { authorization: `Bearer ${ADMIN_TOKEN}` })).status, 200);
   });
 });

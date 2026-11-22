@@ -155,7 +155,7 @@ export const ROUTE_EXCEPTIONS = {
   'health-probe': {
     id: 'health-probe',
     protection: 'identity-probe',
-    rationale: 'Health for any verified principal (session or machine key, e.g. a health-probe key); 401 otherwise. Load balancers use the private FACTORY_INTERNAL_HEALTH_PORT listener (R17, D18, D22, S16)',
+    rationale: 'Health for any verified principal (session or machine key, e.g. a health-probe key); 401 otherwise. Load balancers use the private FACTORY_INTERNAL_HEALTH_PORT listener (R17, D18, D22, S16). The console host answers anonymous probes with liveness only (`{"status":"ok"}`, no service or version) until its ALB target groups move to FACTORY_CONSOLE_INTERNAL_HEALTH_PORT (front-door Phase 0)',
   },
   'identity-whoami': {
     id: 'identity-whoami',

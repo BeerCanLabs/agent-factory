@@ -2,6 +2,18 @@ import http from 'node:http';
 import { handleAuthMigration } from './auth-migration.js';
 import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
 import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
+import {
+  bearerAuthMethod,
+  buildAuthRequestLogEntry,
+  keyAuthMethod,
+  keyKindOf,
+  principalAuthMethod,
+  requestAuthMethod,
+  requestKeyInfo,
+  requestLogActor,
+  type AuthMethod,
+  type AuthRequestLogEntry,
+} from './auth-method.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { timingSafeEqual, randomUUID, createHash, createHmac } from 'node:crypto';
 import { checkAgentUpdate, extractGitHubRepo, isNewerVersion, parseSemVer } from './updates.js';
@@ -112,7 +124,7 @@ import { applySpeakAs, clientHasSpeakAsGrant, parseSpeakAsFromRequest, type Voic
 import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
-import { handleLoginRoutes, sendLoginPage, verifySession, type SessionStore } from './login.js';
+import { handleLoginRoutes, sendLoginPage, sessionIdp, verifySession, type SessionStore } from './login.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers, purgeUserOAuth } from './transfers.js';
 import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } from './skill-models.js';
@@ -197,6 +209,8 @@ export type FactoryState = {
   idpConfig?: IdpConfigStore;
   /** S12: server-backed browser sessions and pending OAuth states. */
   sessions?: SessionStore;
+  /** Front-door Phase 0: one structured line per external request naming its verified sign-in method (no secrets). */
+  authRequestLog?: (entry: AuthRequestLogEntry) => void;
   /** S12: test seam for the IdP's token/userinfo/discovery calls; defaults to global fetch. */
   oauthFetch?: typeof fetch;
   /**
@@ -1657,31 +1671,42 @@ export async function identify(
 ): Promise<AuthResult> {
   const allowMaterialize = opts?.allowMaterialize !== false;
   let base = requestBasePrincipal.get(req);
+  // Front-door Phase 0: the method comes from the credential verified here (or inherited with the principal an MCP tool
+  // call dispatches in-process), never from which headers are present.
+  let method: AuthMethod | undefined = base ? (principalAuthMethod.get(base) ?? requestAuthMethod.get(req)) : undefined;
   const key = requestApiKey.get(req);
   if (!base && key) {
     // S5: the key was verified before routing. Its owner's live grants decide; its scopes only narrow them.
     const owner = await resolveVerifiedPrincipal(state, { actor: key.owner, roles: key.roles ?? [] }, false);
     base = { ...owner, keyId: key.id, ...(key.scopes ? { keyScopes: structuredClone(key.scopes) } : {}) };
+    method = keyAuthMethod(key);
   }
   if (!base) {
     const reasons: string[] = [];
     let verified: AuthResult | undefined;
     if (req.headers.authorization) {
       const r = await state.auth.verify(req.headers.authorization);
-      if (r.ok) verified = r;
-      else reasons.push(r.reason);
+      if (r.ok) {
+        verified = r;
+        method = bearerAuthMethod(r.principal.actor);
+      } else reasons.push(r.reason);
     }
     if (!verified && !req.headers.authorization) {
       // S12 (D19): the factory's own HttpOnly session, resolved to a principal from its verified email every request.
       const r = verifySession(state, req);
-      if (r.ok) verified = r;
+      if (r.ok) {
+        verified = r;
+        method = sessionIdp(state, req) ?? 'oidc';
+      }
     }
     if (!verified) {
       const assertion = accessAssertionOf(req.headers);
       if (assertion && state.access) {
         const r = await state.access.verify(assertion);
-        if (r.ok) verified = r;
-        else reasons.push(`access: ${r.reason}`);
+        if (r.ok) {
+          verified = r;
+          method = 'cloudflare-access';
+        } else reasons.push(`access: ${r.reason}`);
       }
     }
     if (!verified || !verified.ok) {
@@ -1692,15 +1717,23 @@ export async function identify(
       requestBasePrincipal.set(req, base);
     }
   }
+  if (method) {
+    requestAuthMethod.set(req, method);
+    principalAuthMethod.set(base, method);
+  }
+  const done = (principal: Principal): AuthResult => {
+    if (method) principalAuthMethod.set(principal, method);
+    return { ok: true, principal };
+  };
 
   if (opts?.skipActAs) {
-    return { ok: true, principal: { ...base, roles: [...base.roles] } };
+    return done({ ...base, roles: [...base.roles] });
   }
   const actAs = requestActAs.get(req) ?? actAsStorage.getStore();
   if (actAs && actAs.actor === base.actor) {
-    return { ok: true, principal: { ...base, roles: [...base.roles], onBehalfOf: actAs.onBehalfOf } };
+    return done({ ...base, roles: [...base.roles], onBehalfOf: actAs.onBehalfOf });
   }
-  return { ok: true, principal: { ...base, roles: [...base.roles] } };
+  return done({ ...base, roles: [...base.roles] });
 }
 
 export type RequirePrivilegeResource = {
@@ -1738,6 +1771,7 @@ export async function requirePrivilege(
       });
       if (verdict.kind === 'ok') {
         requestRun.set(req, verdict.run);
+        requestAuthMethod.set(req, 'run-token');
         result = {
           ok: true,
           principal: {
@@ -3345,6 +3379,8 @@ async function authenticateRun(req: http.IncomingMessage, res: http.ServerRespon
     json(res, 401, { error: 'invalid_run_token' });
     return null;
   }
+  requestAuthMethod.set(req, 'run-token');
+  requestLogActor.set(req, `agent:${verdict.run.agentId}`);
   return verdict.run;
 }
 
@@ -3381,12 +3417,38 @@ export function createFactoryServer(state: FactoryState): http.Server {
       ? startSubscriptionDiscoveryTimer(state, state.subscriptionDiscoveryIntervalMs)
       : undefined;
   const server = http.createServer(async (req, res) => {
+    if (state.authRequestLog) attachAuthRequestLog(state, req, res, state.authRequestLog);
     await dispatchControlPlaneHttp(state, req, res);
   });
   if (discoveryTimer) {
     server.on('close', () => clearInterval(discoveryTimer));
   }
   return server;
+}
+
+/**
+ * Front-door Phase 0 (docs/design/front-door-auth.md §7): when the response finishes, log one structured line naming
+ * how this external request authenticated. Only method, path (no query), status, verified actor and non-secret key ids
+ * are written; never a header, cookie, token or body. In-process MCP sub-requests are not logged separately: the outer
+ * POST /mcp line already names the caller and its method.
+ */
+export function attachAuthRequestLog(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  sink: (entry: AuthRequestLogEntry) => void,
+): void {
+  const startedAt = Date.now();
+  res.once('finish', () => {
+    try {
+      const run = requestRun.get(req);
+      const actor =
+        requestBasePrincipal.get(req)?.actor ?? requestApiKey.get(req)?.owner ?? requestLogActor.get(req) ?? (run ? `agent:${run.agentId}` : undefined);
+      sink(buildAuthRequestLogEntry(req, res.statusCode, startedAt, actor));
+    } catch {
+      // Logging never breaks a request.
+    }
+  });
 }
 
 export async function dispatchControlPlaneHttp(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -3450,6 +3512,7 @@ export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.Incomin
   }
 
   requestApiKey.set(req, rec);
+  requestKeyInfo.set(req, { keyId: rec.id, keyKind: keyKindOf(rec, BREAK_GLASS_OWNER), ...(rec.oauthClientId ? { oauthClientId: rec.oauthClientId } : {}) });
   if (rec.owner === BREAK_GLASS_OWNER) {
     // S6 (R11): every break-glass call is ledgered and raises the alert until the key is rotated.
     state.ledger.append({
