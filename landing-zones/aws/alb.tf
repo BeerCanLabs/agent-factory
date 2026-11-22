@@ -106,8 +106,11 @@ resource "aws_lb_target_group" "console" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.factory.id
   target_type = "ip"
+  # Front-door Phase 0 (R17): probe the console's private listener, which only the ALB can reach, so the public
+  # health endpoints can refuse anonymous callers (FACTORY_CONSOLE_ANON_LIVENESS=off).
   health_check {
-    path                = "/api/v1/health"
+    path                = "/healthz"
+    port                = "3001"
     matcher             = "200"
     interval            = 30
     timeout             = 5
