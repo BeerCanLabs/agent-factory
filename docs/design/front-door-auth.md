@@ -1,6 +1,6 @@
 # Front-door authentication: one way in for every client
 
-Status: **Proposed design (not implemented).** Owner: Dale Sackrider. Requested 22 Nov 2026, 8:12 AM Phoenix time.
+Status: **Proposed design; Phase 0 approved and in progress (see §9a).** Owner: Dale Sackrider. Requested 22 Nov 2026, 8:12 AM Phoenix time.
 Builds on: [plans/factory-auth.md](../../plans/factory-auth.md) (the "Factory Auth Design": R1–R18, D1–D33) and the MCP OAuth work (TSK-339, `packages/control-plane/src/mcp-oauth.ts`).
 
 > **Dale's requirement (verbatim):** "I do not want any endpoint to have a different authentication method than the
@@ -403,6 +403,18 @@ days.
   (≈$20–25/mo) for more rate-limit rules and the full managed WAF?
 - **D-9 Speak-as hardening timing.** Keep header-based speaker assertion through phase 3, or require signed speaker
   assertions before Higgins/Rosie migrate?
+
+## 9a. Decisions recorded (Dale Sackrider, 22 Nov 2026, 8:45 AM Phoenix time)
+
+| # | Decision | Effect on this design |
+|---|---|---|
+| D-1 | **Login moves to `https://auth.dalesackrider.com`.** | `auth.dalesackrider.com` becomes the issuer and hosts `/login`, `/authorize`, `/token`, `/device`, `/register`, `/revoke`, `/.well-known/*` and `/jwks`. `factory-dashboard.dalesackrider.com` stays an alias issuer until phase 3 so existing MCP connectors keep working, then becomes a resource/console host only. |
+| D-2 | **Any site may register a console, with the user's consent and no admin powers.** | Open registration (CIMD and DCR). Third-party clients always show a consent screen naming their origin and are capped below `admin`, `grants:manage` and `keys:manage`. Admins can still block a client. No "promote to trusted" path for third-party origins was requested, so it is not planned. |
+| D-3 | **Access-token lifetime: not answered, so the 10-minute default applies.** | Access tokens live 10 minutes. |
+| D-8 | **Stay on Cloudflare Free.** | One rate-limit rule (the combined auth-endpoint rule in §6), the Free Managed Ruleset, DDoS protection and Turnstile (free). No Pro-only rules. |
+| — | **Start Phase 0: yes.** | Phase 0 code work starts in its own pull request (whoami fix, sign-in method logging, health endpoints). The Cloudflare rate-limit rule is documented there but **not** applied; it still needs Dale's separate yes. |
+
+**Still open:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-7 (retire or keep `agent-factory.beercanlabs.com` and `garrison.dalesackrider.com`), D-9 (speak-as hardening timing). The proposals in §9 stay as recommendations until Dale decides.
 
 ## 10. Proposed implementation issues
 
