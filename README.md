@@ -6,6 +6,8 @@ If you are an AI asked to “build that” from this repo, read **[AGENTS.md](./
 
 Canonical architecture: [POSITION_PAPER.md](./POSITION_PAPER.md).
 
+**Adopting the factory without IT staff?** (churches, preschools, volunteer nonprofits): start with **[docs/adopting/](docs/adopting/README.md)**: plain-language guides, two organization playbooks, and a prioritized list of [adoption gaps](docs/adopting/GAPS.md).
+
 ---
 
 ## What this is
@@ -128,6 +130,7 @@ The architecture is opinionated and accepts certain limits by design:
 - **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.
 
 ```
+docs/adopting/                    # Adoption guides for non-technical organizations + GAPS.md
 docs/CREATING_AGENTS.md           # Dual-mode hosting, activation smoke gate & migration runbook
 docs/SKILLS.md                    # Skills authoring, manifest, packaging & publishing guide
 docs/CLI.md                       # Factory CLI guide & subscription commands
