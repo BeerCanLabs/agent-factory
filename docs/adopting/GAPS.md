@@ -357,7 +357,7 @@ Each gap states what the adopter wants, why it fails today (with a repo citation
 
 **Wanted:** instructions that use the vendor’s own words.
 
-**Why it fails today:** the Discord entry tells the reader to open “Privileged GatekeeperEgress Intents” (`packages/keymaster/src/catalog.ts`). That is factory jargon leaking into a Discord tutorial (Discord’s label is Privileged Gateway Intents).
+**Why it fails today:** the Discord entry tells the reader to open “Privileged GatekeeperEgress Intents” (`packages/keymaster/src/catalog.ts`). That is factory jargon leaking into a Discord tutorial (on Discord's own screen it is the privileged intents setting of Discord's Gateway).
 
 **Suggested fix:** fix copy during the catalog approval pass (GAP-P15).
 
