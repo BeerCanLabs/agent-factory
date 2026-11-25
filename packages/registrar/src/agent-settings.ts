@@ -23,7 +23,21 @@ export type AgentSettings = {
   memory?: AgentMemorySettings;
   /** IANA time zone used for the agent's local clock (e.g. America/Phoenix). */
   timezone?: string;
+  /**
+   * #552: standing facts the owner has set (a board roster, a watch list, who is whom). They live in the versioned
+   * configuration, not in the agent's memory, so a runtime or memory change can never erase them. The runtime puts them
+   * in every turn's system prompt, like the soul, so they are seen for every caller: never a secret.
+   */
+  facts?: StandingFact[];
 };
+
+export type StandingFact = { subject: string; fact: string; source?: string };
+
+export const MAX_FACTS = 200;
+export const MAX_FACT_SUBJECT_CHARS = 200;
+export const MAX_FACT_CHARS = 2_000;
+export const MAX_FACT_SOURCE_CHARS = 500;
+export const MAX_FACTS_TOTAL_CHARS = 32_768;
 
 export const MAX_SOUL_CHARS = 65_536;
 export const MAX_ROLES = 50;
@@ -102,6 +116,46 @@ export function parseTimezone(input: unknown): { ok: true; timezone: string } | 
   return { ok: true, timezone };
 }
 
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
+
+function factText(v: unknown, where: string, max: number, oneLine: boolean): string | { error: string } {
+  if (typeof v !== 'string' || !v.trim()) return { error: `${where} must be non-empty text` };
+  const text = oneLine ? v.split(/\s+/).filter(Boolean).join(' ') : v.trim();
+  if (text.length > max) return { error: `${where} is at most ${max} characters` };
+  if (CONTROL.test(text)) return { error: `${where} must be plain text` };
+  return text;
+}
+
+/** #552: the owner's standing facts, in the owner's order. A bad or duplicate fact is refused and said, never dropped. */
+export function parseFacts(input: unknown): { ok: true; facts: StandingFact[] } | { ok: false; error: string } {
+  if (!Array.isArray(input) || input.length > MAX_FACTS) return { ok: false, error: `facts must be a list of at most ${MAX_FACTS} facts` };
+  const facts: StandingFact[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  for (const [i, f] of input.entries()) {
+    const where = `facts[${i}]`;
+    if (!isObject(f)) return { ok: false, error: `${where} must be an object with subject and fact` };
+    for (const k of Object.keys(f)) if (k !== 'subject' && k !== 'fact' && k !== 'source') return { ok: false, error: `${where} has an unknown field "${k}"` };
+    const subject = factText(f.subject, `${where}.subject`, MAX_FACT_SUBJECT_CHARS, true);
+    if (typeof subject !== 'string') return { ok: false, error: subject.error };
+    const fact = factText(f.fact, `${where}.fact`, MAX_FACT_CHARS, false);
+    if (typeof fact !== 'string') return { ok: false, error: fact.error };
+    let source: string | undefined;
+    if (f.source !== undefined && !(typeof f.source === 'string' && !f.source.trim())) {
+      const s = factText(f.source, `${where}.source`, MAX_FACT_SOURCE_CHARS, true);
+      if (typeof s !== 'string') return { ok: false, error: s.error };
+      source = s;
+    }
+    const key = `${subject.toLowerCase()}\u0000${fact.toLowerCase()}`;
+    if (seen.has(key)) return { ok: false, error: `${where} repeats an earlier fact about "${subject}"` };
+    seen.add(key);
+    total += subject.length + fact.length + (source?.length ?? 0);
+    if (total > MAX_FACTS_TOTAL_CHARS) return { ok: false, error: `facts are at most ${MAX_FACTS_TOTAL_CHARS} characters in all` };
+    facts.push({ subject, fact, ...(source ? { source } : {}) });
+  }
+  return { ok: true, facts };
+}
+
 export function parseSoul(input: unknown): { ok: true; soul: string } | { ok: false; error: string } {
   if (typeof input !== 'string' || !input.trim()) return { ok: false, error: 'soul must be non-empty text' };
   if (input.length > MAX_SOUL_CHARS) return { ok: false, error: `soul is at most ${MAX_SOUL_CHARS} characters` };
@@ -109,14 +163,17 @@ export function parseSoul(input: unknown): { ok: true; soul: string } | { ok: fa
   return { ok: true, soul: input };
 }
 
+export const SETTING_PARTS = ['soul', 'roles', 'memory', 'timezone', 'facts'] as const;
+export type SettingPart = (typeof SETTING_PARTS)[number];
+
 /**
  * A change to the settings: each key present replaces that part, `null` removes it. Anything else is refused. The result
  * is the new section (`{}` when nothing is left, which means "back to the repository").
  */
 export function applySettingsChange(current: AgentSettings | undefined, change: unknown): SettingsResult {
-  if (!isObject(change)) return { ok: false, error: 'the change must be an object with soul, roles, memory and/or timezone' };
-  for (const k of Object.keys(change)) if (k !== 'soul' && k !== 'roles' && k !== 'memory' && k !== 'timezone') return { ok: false, error: `unknown setting "${k}"` };
-  if (!Object.keys(change).length) return { ok: false, error: 'nothing to change: send soul, roles, memory and/or timezone' };
+  if (!isObject(change)) return { ok: false, error: 'the change must be an object with soul, roles, memory, timezone and/or facts' };
+  for (const k of Object.keys(change)) if (!(SETTING_PARTS as readonly string[]).includes(k)) return { ok: false, error: `unknown setting "${k}"` };
+  if (!Object.keys(change).length) return { ok: false, error: 'nothing to change: send soul, roles, memory, timezone and/or facts' };
   const next: AgentSettings = { ...(current ?? {}) };
   if ('soul' in change) {
     if (change.soul === null) delete next.soul;
@@ -150,11 +207,20 @@ export function applySettingsChange(current: AgentSettings | undefined, change: 
       next.timezone = r.timezone;
     }
   }
+  if ('facts' in change) {
+    // An empty list is the same as removing them: the section never holds `facts: []`.
+    if (change.facts === null || (Array.isArray(change.facts) && !change.facts.length)) delete next.facts;
+    else {
+      const r = parseFacts(change.facts);
+      if (!r.ok) return r;
+      next.facts = r.facts;
+    }
+  }
   return { ok: true, settings: next };
 }
 
 /** Which parts differ, by name only (a ledger row and a message never carry the soul). */
-export function changedParts(before: AgentSettings | undefined, after: AgentSettings | undefined): Array<'soul' | 'roles' | 'memory' | 'timezone'> {
+export function changedParts(before: AgentSettings | undefined, after: AgentSettings | undefined): SettingPart[] {
   const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-  return (['soul', 'roles', 'memory', 'timezone'] as const).filter((k) => !same(before?.[k], after?.[k]));
+  return SETTING_PARTS.filter((k) => !same(before?.[k], after?.[k]));
 }

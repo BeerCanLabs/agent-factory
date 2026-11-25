@@ -133,6 +133,8 @@ export function agentConfigForRun(state: FactoryState, run: Run, res: http.Serve
     version: current.version ?? 1,
     ...(agent.warmDownSeconds ? { warmDownSeconds: agent.warmDownSeconds } : {}),
     ...(typeof current.agent.timezone === 'string' && current.agent.timezone ? { timezone: current.agent.timezone } : {}),
+    // #552: the owner's standing facts ride with the soul, so they never depend on what the agent's memory still holds.
+    ...(Array.isArray(current.agent.facts) && current.agent.facts.length ? { facts: current.agent.facts } : {}),
     owners,
   });
 }

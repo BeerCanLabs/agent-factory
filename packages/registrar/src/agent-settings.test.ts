@@ -3,7 +3,7 @@
 // prototype key.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { applySettingsChange, changedParts, parseMemory, parseRoles, parseSoul, MAX_SOUL_CHARS } from './agent-settings.js';
+import { applySettingsChange, changedParts, parseFacts, parseMemory, parseRoles, parseSoul, MAX_FACT_CHARS, MAX_FACTS, MAX_SOUL_CHARS } from './agent-settings.js';
 import { configHash, type ConfigContent } from './config-store.js';
 
 const plain = (v: unknown) => JSON.parse(JSON.stringify(v));
@@ -113,5 +113,30 @@ describe('CF1 a change replaces what it names, null removes it, and anything els
     assert.ok(b.ok);
     assert.equal('timezone' in b.settings, false);
     assert.deepEqual(changedParts({ timezone: 'America/Los_Angeles' }, { timezone: 'America/Phoenix' }), ['timezone']);
+  });
+  it('#552: keeps standing facts in order, trims them, and refuses a bad, duplicate or oversized one', () => {
+    const a = applySettingsChange(undefined, { facts: [{ subject: '  Board   president ', fact: ' Bruce is President. ', source: 'Dale' }, { subject: 'VIP', fact: 'John McFarlane' }] });
+    assert.ok(a.ok);
+    assert.deepEqual(a.settings.facts, [{ subject: 'Board president', fact: 'Bruce is President.', source: 'Dale' }, { subject: 'VIP', fact: 'John McFarlane' }]);
+    assert.deepEqual(changedParts(undefined, a.settings), ['facts']);
+    for (const bad of [
+      'x',
+      [{ subject: 'a' }],
+      [{ fact: 'b' }],
+      [{ subject: 'a', fact: 'b', extra: 1 }],
+      [{ subject: 'a', fact: 'b' }, { subject: 'A', fact: 'B' }],
+      [{ subject: 'a', fact: 'x'.repeat(MAX_FACT_CHARS + 1) }],
+      [{ subject: 'a', fact: 'bell\u0007' }],
+      Array.from({ length: MAX_FACTS + 1 }, (_, i) => ({ subject: `s${i}`, fact: 'f' })),
+      Array.from({ length: 20 }, (_, i) => ({ subject: `s${i}`, fact: 'f'.repeat(MAX_FACT_CHARS) })),
+    ]) assert.equal(parseFacts(bad).ok, false, JSON.stringify(bad).slice(0, 80));
+    const blank = applySettingsChange(undefined, { facts: [{ subject: 'a', fact: 'b', source: '  ' }] });
+    assert.ok(blank.ok);
+    assert.deepEqual(blank.settings.facts, [{ subject: 'a', fact: 'b' }], 'a blank source is no source');
+    const b = applySettingsChange(a.settings, { facts: [] });
+    assert.ok(b.ok);
+    assert.equal('facts' in b.settings, false, 'an empty list removes them');
+    const c = applySettingsChange(a.settings, { facts: null });
+    assert.ok(c.ok && !('facts' in c.settings));
   });
 });

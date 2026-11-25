@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from memory import (
     DEFAULT_RETENTION_DAYS,
     canonical_archetype,
 )
-from memory import ephemeral, episodic, workspace, notebook
+from memory import ephemeral, episodic, legacy_import, workspace, notebook
 
 
 
@@ -56,6 +57,8 @@ class Mind:
     """What the loop needs of memory: the history for this turn, a place to remember it, and the AM5 answers."""
 
     archetype = ""
+    # #552: what happened to a legacy notebook on this boot (`none`, `done`, `failed` or `not_imported`), for the result.
+    legacy: dict = {"status": "none"}
 
     def fast_path(self, who: str, text: str) -> str | None:
         return None
@@ -110,9 +113,19 @@ class PersonalAssistant(Mind):
         self.db = _connect(memory_dir / "agent_state.db")
         episodic.init_episodic_tables(self.db)
         notebook.init_notebook_tables(self.db)
+        # #552: an agent's pre-shared-runtime notebook comes forward once, loudly if it cannot.
+        self.legacy = legacy_import.import_legacy(memory_dir, self.db)
         if notebook.should_rotate(memory_dir, self.db):
+            # Tables a legacy import brought in are carried whole, or rotation would lose them again.
+            schemas = legacy_import.table_sql(self.db, legacy_import.carried_tables(memory_dir))
+
+            def init_fn(conn: sqlite3.Connection) -> None:
+                episodic.init_episodic_tables(conn)
+                for sql in schemas.values():
+                    conn.execute(sql)
+
             try:
-                self.db = notebook.rotate(memory_dir, self.db, init_fn=episodic.init_episodic_tables)
+                self.db = notebook.rotate(memory_dir, self.db, init_fn=init_fn, carry_tables=tuple(schemas))
             except Exception as e:
                 print(f"[mind] Error rotating notebook: {e}", flush=True)
                 self.db = _connect(memory_dir / "agent_state.db")
@@ -252,7 +265,14 @@ def open_mind(memory: dict, memory_dir: Path) -> Mind:
     if kind == ARCHETYPE_PERSONAL_ASSISTANT:
         return PersonalAssistant(memory_dir, bounds)
     if kind == ARCHETYPE_TEAM_MEMBER:
-        return TeamMember(memory_dir, bounds)
+        mind = TeamMember(memory_dir, bounds)
+        # A team member's memory is per-project workspaces, not one notebook, so nothing is imported; say so, loudly.
+        legacy = legacy_import.find_legacy(memory_dir)
+        if legacy:
+            names = [p.name for p in legacy]
+            print(f"[mind] ERROR: legacy notebook(s) {names} are not imported for a team-member agent; that memory is not available", file=sys.stderr, flush=True)
+            mind.legacy = {"status": "not_imported", "files": [{"file": n, "status": "not_imported"} for n in names]}
+        return mind
     if kind == ARCHETYPE_PURPOSE_BUILT:
         return PurposeBuilt(bounds)
     raise ValueError(f"unknown memory archetype {memory.get('archetype')!r}")
