@@ -114,7 +114,7 @@ describe('GitHub Apps per owner', { concurrency: false }, () => {
     assert.ok(org.body.action.startsWith('https://github.example/organizations/getdraft/settings/apps/new?state='));
     assert.equal(org.body.manifest.name, 'Flow (agent-factory) getdraft');
     assert.equal(org.body.ownerType, 'org');
-    assert.equal(org.body.manifest.hook_attributes.url, 'https://factory.example.com/hooks/flow', 'every app of the agent posts to its one hook');
+    assert.equal(org.body.manifest.hook_attributes.url, 'https://factory.example.com/api/v1/hooks/flow', 'every app of the agent posts to its one hook');
     const user = await start({ owner: 'dsackr' });
     assert.equal(user.status, 200);
     assert.ok(user.body.action.startsWith('https://github.example/settings/apps/new?state='));

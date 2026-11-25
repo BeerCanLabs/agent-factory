@@ -99,7 +99,7 @@ export function buildManifest(publicBase: string, agentId: string, agentName: st
     name: name ?? `${`${agentName} (${new URL(publicBase).hostname.split('.')[0]})`.slice(0, 29)} ${randomUUID().slice(0, 4)}`,
     url: publicBase,
     redirect_url: `${publicBase}/api/v1/keymaster/github-app/callback`,
-    ...(needs.events || needs.workflows ? { hook_attributes: { url: `${publicBase}/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
+    ...(needs.events || needs.workflows ? { hook_attributes: { url: `${publicBase}/api/v1/hooks/${encodeURIComponent(agentId)}`, active: true } } : {}),
     default_permissions: {
       contents: 'write',
       pull_requests: 'write',
@@ -205,8 +205,11 @@ export async function handleGitHubAppSetup(state: FactoryState, req: http.Incomi
 
 async function callback(state: FactoryState, res: http.ServerResponse, url: URL) {
   const key = stateKey(state);
-  const parsed = key ? verifyConsentState(key, url.searchParams.get('state') ?? '') : undefined;
+  const given = url.searchParams.get('state');
+  const parsed = key && given ? verifyConsentState(key, given) : undefined;
   if (!parsed || parsed.provider !== 'github-app') {
+    // #526: opened by hand (no state at all), say what this address is rather than that a link expired.
+    if (!given) return page(res, 400, 'Nothing to finish here', 'This address only finishes a GitHub App setup that GitHub sends back. Start the setup from the factory console.');
     state.ledger.append({ timestamp: new Date().toISOString(), agentId: 'unknown', type: 'action', action: 'GITHUB_APP_CALLBACK_REJECTED', actor: 'anonymous' });
     return page(res, 400, 'Setup failed', 'This link is invalid or has expired. Start again from the factory.');
   }
