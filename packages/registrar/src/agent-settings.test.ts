@@ -130,6 +130,9 @@ describe('CF1 a change replaces what it names, null removes it, and anything els
       Array.from({ length: MAX_FACTS + 1 }, (_, i) => ({ subject: `s${i}`, fact: 'f' })),
       Array.from({ length: 20 }, (_, i) => ({ subject: `s${i}`, fact: 'f'.repeat(MAX_FACT_CHARS) })),
     ]) assert.equal(parseFacts(bad).ok, false, JSON.stringify(bad).slice(0, 80));
+    const blank = applySettingsChange(undefined, { facts: [{ subject: 'a', fact: 'b', source: '  ' }] });
+    assert.ok(blank.ok);
+    assert.deepEqual(blank.settings.facts, [{ subject: 'a', fact: 'b' }], 'a blank source is no source');
     const b = applySettingsChange(a.settings, { facts: [] });
     assert.ok(b.ok);
     assert.equal('facts' in b.settings, false, 'an empty list removes them');

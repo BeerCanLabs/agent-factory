@@ -42,7 +42,8 @@ def find_legacy(memory_dir: Path) -> list[Path]:
         return []
     found = []
     for p in memory_dir.iterdir():
-        if p.is_file() and p.name.endswith(LEGACY_SUFFIX) and p.name != NOTEBOOK_FILE and not p.name.startswith("."):
+        # `workspace_<project>.db` is a team member's live workspace, never a cartridge notebook, whatever the project is called.
+        if p.is_file() and p.name.endswith(LEGACY_SUFFIX) and p.name != NOTEBOOK_FILE and not p.name.startswith((".", "workspace_")):
             found.append(p)
     return sorted(found, key=lambda p: p.name)
 
@@ -168,7 +169,7 @@ def _import_tables(src: sqlite3.Connection, dst: sqlite3.Connection) -> dict[str
 
 
 def _import_one(path: Path, dst: sqlite3.Connection) -> dict:
-    src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    src = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         dst.commit()  # nothing of an earlier step rides in this import's transaction
         try:
@@ -196,8 +197,14 @@ def import_legacy(memory_dir: Path, dst: sqlite3.Connection) -> dict:
         try:
             digest = _sha256(path)
             seen = marker["files"].get(path.name)
-            if isinstance(seen, dict) and seen.get("sha256") == digest:
-                files.append({"file": path.name, "status": "already"})
+            if isinstance(seen, dict) and seen.get("sha256"):
+                # Imported once, ever. A legacy notebook is not written any more; one that changed since is reported, not
+                # imported again (a second import would duplicate rows in tables with no key).
+                if seen["sha256"] == digest:
+                    files.append({"file": path.name, "status": "already"})
+                else:
+                    files.append({"file": path.name, "status": "changed_since_import"})
+                    print(f"[mind] WARNING: legacy notebook {path.name} changed after it was imported; it is not imported again", file=sys.stderr, flush=True)
                 continue
             counts = _import_one(path, dst)
             marker["files"][path.name] = {"sha256": digest, "importedAt": datetime.now(timezone.utc).isoformat(), **counts}

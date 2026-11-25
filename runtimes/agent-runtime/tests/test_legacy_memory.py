@@ -98,6 +98,21 @@ class TestLegacyImport(Base):
         self.assertEqual(result["output"]["legacyMemory"]["files"][0]["turns"], 0)
         self.assertEqual(self.notebook().execute("SELECT COUNT(*) FROM conversation_turns WHERE session_id = 's-roster'").fetchone()[0], 2)
 
+    def test_a_legacy_notebook_that_changed_after_its_import_is_reported_not_imported_again(self):
+        self.wake(PA, [turn("hi")])
+        db = sqlite3.connect(str(self.legacy))
+        db.execute("INSERT INTO executive_briefings (timestamp, category, payload) VALUES ('2026-11-01T00:00:00Z', 'daily', '{}')")
+        db.commit()
+        db.close()
+        with mock.patch("sys.stderr"):
+            _, _, result = self.wake(PA, [turn("again")])
+        self.assertEqual(result["output"]["legacyMemory"]["files"][0]["status"], "changed_since_import")
+        self.assertEqual(self.notebook().execute("SELECT COUNT(*) FROM executive_briefings").fetchone()[0], 1)
+
+    def test_a_team_members_workspace_is_never_taken_for_a_legacy_notebook(self):
+        (self.mind / "workspace_old_state.db").write_bytes(b"")
+        self.assertEqual([p.name for p in legacy_import.find_legacy(self.mind)], ["donna_state.db"])
+
     def test_an_unreadable_legacy_notebook_fails_loudly_and_is_tried_again_next_boot(self):
         self.legacy.write_bytes(b"not a database" * 100)
         with mock.patch("sys.stderr") as err:

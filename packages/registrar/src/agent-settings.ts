@@ -141,7 +141,7 @@ export function parseFacts(input: unknown): { ok: true; facts: StandingFact[] } 
     const fact = factText(f.fact, `${where}.fact`, MAX_FACT_CHARS, false);
     if (typeof fact !== 'string') return { ok: false, error: fact.error };
     let source: string | undefined;
-    if (f.source !== undefined) {
+    if (f.source !== undefined && !(typeof f.source === 'string' && !f.source.trim())) {
       const s = factText(f.source, `${where}.source`, MAX_FACT_SOURCE_CHARS, true);
       if (typeof s !== 'string') return { ok: false, error: s.error };
       source = s;
