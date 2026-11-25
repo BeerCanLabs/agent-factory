@@ -78,7 +78,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
 
   it('#483: the ops leader also gets workflow_run and Actions write (to dispatch its workflows); no other agent does', () => {
     const ops = buildManifest('https://f.example', 'sdlc-ops', 'Ops', appNeeds({ skillIds: ['sdlc-ops'] }));
-    assert.deepEqual(ops.hook_attributes, { url: 'https://f.example/hooks/sdlc-ops', active: true });
+    assert.deepEqual(ops.hook_attributes, { url: 'https://f.example/api/v1/hooks/sdlc-ops', active: true });
     assert.deepEqual(ops.default_events, ['workflow_run'], 'jury #485 B2: an ops-only app takes only workflow_run');
     assert.deepEqual(ops.default_permissions, { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read', actions: 'write' });
     const both = buildManifest('https://f.example', 'lead', 'Lead', appNeeds({ skillIds: ['sdlc-conductor', 'sdlc-ops'] }));
@@ -92,7 +92,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
 
   it('GAP-257: only the agents that need them get the hook and events, or organization Projects', () => {
     const conductor = buildManifest('https://f.example', 'flow bot', 'Flow', appNeeds({ skillIds: ['sdlc-conductor', 'sdlc-merge'] }));
-    assert.deepEqual(conductor.hook_attributes, { url: 'https://f.example/hooks/flow%20bot', active: true }, 'the agent id is URL-encoded');
+    assert.deepEqual(conductor.hook_attributes, { url: 'https://f.example/api/v1/hooks/flow%20bot', active: true }, 'the agent id is URL-encoded');
     assert.deepEqual(conductor.default_events, ['issues', 'issue_comment', 'pull_request', 'check_suite', 'status']);
     assert.ok(!conductor.default_events.includes('check_run'), 'check_run is ignored by the factory, so never subscribed');
     assert.equal(conductor.default_permissions.checks, 'read');
@@ -137,6 +137,14 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
   it('rejects a forged state and stores nothing', async () => {
     const r = await cb('code=abc&state=forged.sig');
     assert.equal(r.status, 400);
+    assert.equal(stored.size, 0);
+    assert.equal(conversions.length, 0);
+  });
+
+  it('#526: says what the callback is when opened by hand with no state, and stores nothing', async () => {
+    const r = await cb('');
+    assert.equal(r.status, 400);
+    assert.match(await r.text(), /only finishes a GitHub App setup/);
     assert.equal(stored.size, 0);
     assert.equal(conversions.length, 0);
   });
@@ -186,7 +194,7 @@ describe('GitHub App manifest setup (E5.1a)', { concurrency: false }, () => {
       const r = await start(ADMIN, { replace: true });
       assert.equal(r.status, 200);
       const b = await r.json() as any;
-      assert.deepEqual(b.manifest.hook_attributes, { url: 'https://factory.example.com/hooks/archie', active: true });
+      assert.deepEqual(b.manifest.hook_attributes, { url: 'https://factory.example.com/api/v1/hooks/archie', active: true });
       assert.ok(b.manifest.default_events.includes('pull_request'));
       assert.equal((await cb(`code=upgrade&state=${encodeURIComponent(b.state)}`)).status, 200);
       assert.equal(stored.get(githubAppSecretNames('archie').webhookSecret), 'whsec-fake');

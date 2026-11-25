@@ -315,7 +315,7 @@ variable "ledger_recover_reason" {
 }
 
 variable "factory_public_base_url" {
-  description = "Public origin of the factory for browser flows (Keymaster OAuth consent and callbacks, §6.11), e.g. https://factory.example.com. Register <this>/api/v1/connections/google/callback as a redirect URI on the Google OAuth client. Empty disables consent links."
+  description = "Public origin of the factory for browser flows and third-party callbacks (Keymaster OAuth consent and callbacks §6.11, GitHub App manifest callback and webhook URL), e.g. https://factory.example.com. It must be a host whose /api/v1/* reaches the control plane without a Cloudflare Access login (the console host, which proxies /api/v1/*; agent-factory #526). Register <this>/api/v1/connections/<provider>/callback as a redirect URI on each OAuth client. Set cloudflare_hostname explicitly when this is not the Access-protected control-plane host. Empty disables consent links."
   type        = string
   default     = ""
 }
