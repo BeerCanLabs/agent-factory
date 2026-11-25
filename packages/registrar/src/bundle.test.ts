@@ -100,4 +100,13 @@ describe('CF3 agent bundle', () => {
     badKind.agent.kind = 'enterprise';
     assert.equal(parseBundle(badKind).ok, false);
   });
+  it('#552: leaves the owner’s standing facts behind, since they name people', () => {
+    const withFacts = { ...content, agent: { ...content.agent, facts: [{ subject: 'Board', fact: 'Bruce is President; bruce@example.org' }] } };
+    const b = buildBundle(agent, withFacts as never);
+    assert.equal(b.settings!.soul, 'You are Nova.');
+    assert.equal((b.settings as { facts?: unknown }).facts, undefined);
+    assert.ok(!JSON.stringify(b).includes('bruce@example.org'));
+    const onlyFacts = buildBundle(agent, { ...content, agent: { facts: [{ subject: 'a', fact: 'b' }] } } as never);
+    assert.equal(onlyFacts.settings, undefined, 'a section of only facts exports no settings');
+  });
 });

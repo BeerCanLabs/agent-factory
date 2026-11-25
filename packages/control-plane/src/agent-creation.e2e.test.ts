@@ -235,6 +235,21 @@ describe('agents are created from a configuration on the shared runtime (CF6, RT
     await call('PUT', '/api/v1/agents/old/settings', { soul: null });
   });
 
+  it('#552: serves the owner’s standing facts with the configuration, ledgers the change by name only, and removes them on null', async () => {
+    const run = state.runs.create({ agentId: 'nova', state: 'WORKING', actor: 'token:admin', trigger: 'api' } as never);
+    const token = await tokens.mint({ runId: run.runId, agentId: 'nova' });
+    const facts = [{ subject: 'Board president', fact: 'Bruce is President; Dale is VP.', source: 'Dale, 22 Nov 2026' }];
+    const set = await call('PUT', '/api/v1/agents/nova/settings', { facts });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    assert.deepEqual(set.body.changed, ['facts']);
+    assert.deepEqual((await call('GET', `/api/v1/runs/${run.runId}/agent-config`, undefined, token)).body.facts, facts);
+    const row = ledger.query().reverse().find((r) => (r as { action?: string }).action === 'AGENT_SETTINGS_CHANGED');
+    assert.ok(row && !JSON.stringify(row).includes('Bruce'), 'the ledger names the part, never the facts');
+    assert.equal((await call('PUT', '/api/v1/agents/nova/settings', { facts: [{ subject: 'x' }] })).status, 400, 'a fact needs its text');
+    assert.equal((await call('PUT', '/api/v1/agents/nova/settings', { facts: null })).status, 200);
+    assert.equal((await call('GET', `/api/v1/runs/${run.runId}/agent-config`, undefined, token)).body.facts, undefined);
+  });
+
   it('refuses to register a new agent id from a repository, with a message that says how to create one; existing, retired and staff ids keep the old way; a purged id is new', async () => {
     const reg = (id: string) => call('POST', '/api/v1/registry/agents', { repo: `https://github.com/beercanlabs/SM-${id}`, commit: SHA, cartridge: cartridge(id) });
     const refused = await reg('fresh');

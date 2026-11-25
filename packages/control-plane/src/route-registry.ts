@@ -927,6 +927,12 @@ const AgentSettingsBodySchema: JsonSchemaObject = jsonSchema.object({
   soul: jsonSchema.string({ description: 'Updated core persona and instructions' }),
   memory: jsonSchema.object({}, { description: 'Memory configuration block' }),
   roles: jsonSchema.array(jsonSchema.object({}, { description: 'Role definitions' })),
+  timezone: jsonSchema.string({ description: 'IANA timezone name for the agent clock' }),
+  facts: jsonSchema.array(jsonSchema.object({
+    subject: jsonSchema.string({ description: 'Who or what the fact is about (one line, at most 200 characters)' }),
+    fact: jsonSchema.string({ description: 'The fact itself (at most 2000 characters)' }),
+    source: jsonSchema.string({ description: 'Where it came from, e.g. "Dale, 22 Nov 2026"' }),
+  }, { required: ['subject', 'fact'] }), { description: 'Standing facts the owner sets (#552): kept in configuration, shown in every turn\'s prompt, never a secret. null or [] removes them.' }),
 });
 
 const AgentRenameBodySchema: JsonSchemaObject = jsonSchema.object({

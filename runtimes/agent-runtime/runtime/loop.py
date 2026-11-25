@@ -185,7 +185,34 @@ def clock_line(tz_name: str | None = None) -> str:
     return datetime.now(timezone.utc).strftime("%A %Y-%m-%d %H:%M UTC")
 
 
-def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | None = None) -> str:
+MAX_FACTS_PROMPT_CHARS = 40000
+
+
+def format_facts(facts: object) -> str:
+    """#552: the owner's standing facts, from configuration. They outrank anything memory says, because memory can be
+    lost or wrong and these are what the owner set. Malformed entries are skipped (the factory validated them)."""
+    if not isinstance(facts, list):
+        return ""
+    lines = []
+    for f in facts:
+        if not isinstance(f, dict):
+            continue
+        subject = _plain_token(f.get("subject"), 200)
+        fact = f.get("fact")
+        if not subject or not isinstance(fact, str) or not fact.strip():
+            continue
+        source = _plain_token(f.get("source"), 500)
+        lines.append(f"- {subject}: {' '.join(fact.split())}" + (f" (source: {source})" if source else ""))
+    if not lines:
+        return ""
+    body = "\n".join(lines)[:MAX_FACTS_PROMPT_CHARS]
+    return (
+        "\n\nStanding facts set by your owner in your configuration. Treat them as current and correct. If memory, "
+        "documents or earlier conversations disagree, these win; mention the conflict instead of changing them:\n" + body
+    )
+
+
+def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | None = None, facts: object = None) -> str:
     caller = caller_of(payload)
     speaking = format_verified_caller(caller)
     scheduled_note = ""
@@ -196,7 +223,8 @@ def system_prompt(soul: str, payload: dict, pending: str = "", tz_name: str | No
     history_note = " Earlier user messages in history begin with [YYYY-MM-DD HH:MM UTC] showing when they were sent, and intermediate tool calls from completed past turns are omitted. Never prefix your own replies with a timestamp."
     channel = _plain_token(caller.get("channel"), 32)
     voice_note = f"\n\n{VOICE_GUIDANCE}" if channel and channel.lower() == "voice" else ""
-    return f"{helper_system_soul(soul, payload)}{speaking}{scheduled_note}{pending_note_text}\n\n{TURN_GUIDANCE}{voice_note}\n\nIt is {now}.{history_note}"
+    facts_note = "" if is_helper_payload(payload) else format_facts(facts)
+    return f"{helper_system_soul(soul, payload)}{facts_note}{speaking}{scheduled_note}{pending_note_text}\n\n{TURN_GUIDANCE}{voice_note}\n\nIt is {now}.{history_note}"
 
 
 def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], payload: dict) -> str:
@@ -210,7 +238,7 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
         return fast
     history, banner = mind.history(who, payload)
     tz_name = getattr(factory, "timezone", None)
-    system = system_prompt(soul, payload, pending, tz_name if isinstance(tz_name, str) else None) + (f"\n\n{banner}" if banner else "")
+    system = system_prompt(soul, payload, pending, tz_name if isinstance(tz_name, str) else None, getattr(factory, "facts", None)) + (f"\n\n{banner}" if banner else "")
     messages: list[dict] = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_text}]
     specs = [t.spec() for t in tools.values()]
     for spec, _ in mind.tools():
@@ -331,6 +359,7 @@ def main(factory: Factory | None = None) -> int:
     factory.memory_dir = memory_dir
     factory.owners = config.get("owners") if isinstance(config.get("owners"), list) else []
     factory.timezone = config.get("timezone") if isinstance(config.get("timezone"), str) else None
+    factory.facts = config.get("facts") if isinstance(config.get("facts"), list) else None
     relayed = relay_tools(factory, memory_dir, factory.owners)
     reserved = {spec["function"]["name"] for spec, _ in mind.tools()} | {t.name for t in relayed}
     loaded, problems = load_skills(config.get("skills") or [], reserved=reserved)
@@ -390,6 +419,9 @@ def main(factory: Factory | None = None) -> int:
         "archetype": mind.archetype,
         "processed_at": datetime.now(timezone.utc).isoformat(),
     }
+    legacy = getattr(mind, "legacy", None)
+    if isinstance(legacy, dict) and legacy.get("status") not in (None, "none"):
+        output["legacyMemory"] = legacy  # #552: an import, or a failure to import, is in the run's result, never silent
     if not is_smoke and last_reply is not None and episodic.is_silent_reply(last_reply):
         output["silent"] = True
     if is_smoke and last_reply is not None:

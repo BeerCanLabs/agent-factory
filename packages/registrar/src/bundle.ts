@@ -51,10 +51,16 @@ export function buildBundle(
     },
     origin: configured ? 'configuration' : 'repository',
     ...(configured ? {} : { source: { ...(content.source.repo ? { repo: content.source.repo } : {}), ...(content.source.commit ? { commit: content.source.commit } : {}) } }),
-    ...(content.agent ? { settings: structuredClone(content.agent) } : {}),
+    // #552: standing facts name people (a roster, emails), and a bundle holds no person: they stay in this factory.
+    ...(content.agent && Object.keys(withoutFacts(content.agent)).length ? { settings: structuredClone(withoutFacts(content.agent)) } : {}),
     skills: content.skills.map((s) => ({ id: s.id, version: s.version })),
     policy: content.policy ? structuredClone(content.policy) : null,
   };
+}
+
+function withoutFacts(settings: AgentSettings): AgentSettings {
+  const { facts: _facts, ...rest } = settings;
+  return rest;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
