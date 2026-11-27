@@ -1,6 +1,6 @@
 # Front-door authentication: one way in for every client
 
-Status: **Proposed design; Phase 0 approved and in progress (see §9a).** Owner: Dale Sackrider. Requested 22 Nov 2026, 8:12 AM Phoenix time.
+Status: **Proposed design; Phase 0 approved and in progress (see §9a). Three-host topology (`auth.` / `api.` / `factory.<domain>`) approved 27 Nov 2026 (see §9b).** Owner: Dale Sackrider. Requested 22 Nov 2026, 8:12 AM Phoenix time.
 Builds on: [plans/factory-auth.md](../../plans/factory-auth.md) (the "Factory Auth Design": R1–R18, D1–D33) and the MCP OAuth work (TSK-339, `packages/control-plane/src/mcp-oauth.ts`).
 
 > **Dale's requirement (verbatim):** "I do not want any endpoint to have a different authentication method than the
@@ -111,9 +111,11 @@ Cloudflare **1010/403** on `/api/v1/*` but not on `/mcp`. No rate-limiting rules
 **Goals**
 - G1. Exactly one place where a human authenticates: the factory login page. Exactly one issuer of credentials: the
   factory authorization server (AS).
-- G2. Every protected endpoint (`/api/v1/*`, `/mcp`, `/ui`) accepts exactly one credential type from outside the
-  cluster: a factory-issued access token (or, for the first-party console on the AS's own origin, the session that holds
-  one). No endpoint authenticates differently.
+- G2. Every protected endpoint (`/api/v1/*`, `/mcp`, and first-party `/ui` on `factory.<domain>`) accepts exactly one
+  credential type from outside the cluster: a factory-issued access token. The first-party web shell on
+  `factory.<domain>` authenticates at `auth.<domain>` and talks only to `api.<domain>` with Bearer tokens (a BFF on
+  the factory origin may hold the refresh token). The session cookie stays on the issuer origin only and is never an
+  API credential. No endpoint authenticates differently.
 - G3. Any origin may host a factory UI or MCP client; it gets in through the same front door (OAuth 2.1 + PKCE).
 - G4. Short-lived access tokens carrying identity, audience, client, scopes and role information; refresh tokens to
   avoid repeated logins; immediate revocation.
@@ -136,23 +138,48 @@ Cloudflare **1010/403** on `/api/v1/*` but not on `/mcp`. No rate-limiting rules
            │ /device) · Turnstile on /login · no Access apps · no BIC exceptions           │
            └───────────────────────────────────────────────────────────────────────────────┘
                                              │
-   Browser console (any origin) ──┐          ▼
-   Claude / Cursor MCP client ────┤   ┌───────────────────────────── Factory ─────────────────────────────┐
-   CLI (loopback + PKCE) ─────────┼──▶│  Front door = Authorization Server (issuer https://auth.<domain>) │
-   Higgins / Rosie (device flow) ─┤   │   /login  /authorize  /token  /device  /register  /revoke  /jwks  │
-   Automations (device / client) ─┘   │   IdPs: Google · Meta · Cloudflare · OIDC  (identity only, D1)   │
-                                      │                       │ access token (JWT, ~10 min)              │
-                                      │                       ▼                                          │
-                                      │  Resource servers: /api/v1/*  and  /mcp   (one verifier)          │
-                                      │   verify JWT → sub, aud, scope, client, act, sid → live grants   │
-                                      │   → Bouncer authorize() → ledger                                 │
-                                      └───────────────────────────────────────────────────────────────────┘
+   factory.<domain> web shell ────┐          ▼
+    (Console, Garrison (3D), 2D   ├─▶ https://auth.<domain>   Front door / Authorization Server
+     game, Web Chat, Connect)     │     /login  /authorize  /token  /device  /register  /revoke  /jwks
+   Third-party console (any origin)┤    IdPs: Google · Meta · Cloudflare · OIDC  (identity only, D1)
+   Claude / Cursor MCP client ────┤              │ access token (JWT, ~10 min)
+   CLI (loopback + PKCE) ─────────┤              ▼
+   Higgins / Rosie (device flow) ─┤     https://api.<domain>   Headless neck (one verifier)
+   Automations (device / client) ─┘       /api/v1/*  /mcp  /mcp/agents/:id
+                                          /api/v1/agents/:id/conversation  webhooks
+                                          verify JWT → sub, aud, scope, client, act, sid → live grants
+                                          → Bouncer authorize() → ledger
 ```
+
+### 4.0 Host topology (D-1, D-7)
+
+The product is generic: every deployment exposes three public hostnames. `dalesackrider.com` is the concrete running
+example, not part of the product name.
+
+| Host (generic) | Concrete example | Role |
+|---|---|---|
+| `auth.<domain>` | `auth.dalesackrider.com` | Single authentication / OIDC+OAuth issuer — the one front door. Hosts `/login`, `/authorize`, `/token`, `/device`, `/register`, `/revoke`, `/.well-known/*` and `/jwks`. Session cookies live only on this origin. |
+| `api.<domain>` | `api.dalesackrider.com` | The headless neck. Hosts `/api/v1/*`, `/mcp`, `/mcp/agents/:id`, `/api/v1/agents/:id/conversation`, and webhooks. Every head — browser, CLI, MCP client, device — talks to this neck with a factory-issued Bearer token. |
+| `factory.<domain>` | `factory.dalesackrider.com` | First-party browser shell for all web-enabled heads, under one top nav switcher (name not yet vetted; "head switcher" is a placeholder). Authenticates against `auth.<domain>` and talks only to `api.<domain>`. |
+
+The first-party heads on `factory.<domain>` (tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559)):
+
+1. **Web Console** — operations/admin UI.
+2. **Garrison (3D)** — the existing 3D gaming interface (moves here from a separate `garrison.<domain>` public host). Garrison stays the 3D interface; it is not replaced by the 2D game.
+3. **2D game interface (Zelda-style)** — a planned additional game head, separate from Garrison, under the same top nav switcher. Name and layout still to be designed (loop in UX Design).
+4. **Web Chat** — chat with any factory agent in the browser via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only.
+5. **Connect / non-web heads page** — instructions for connecting AI apps (Grok Bot, Claude, Cursor, and similar) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI.
+
+`factory-dashboard.<domain>` remains an issuer/resource alias until phase 3 (D-1) so existing MCP connectors keep working, then redirects to the new hosts. `agent-factory.beercanlabs.com` is retired as a public advertised host. This topology is design authority only: it does not itself change live DNS, Cloudflare, AWS, or production UI.
+
+Third-party or additional consoles may still be hosted on any origin (`mygarrison.dalesackrider.com`, `thisismadeup.ai`, …) and reach the same neck through the same front door (§4.3).
 
 ### 4.1 One authorization server
 
-- **Issuer**: a stable URL, e.g. `https://auth.dalesackrider.com` or keep `https://factory-dashboard.dalesackrider.com`
-  (decision D-1). Everything is advertised by `/.well-known/oauth-authorization-server` and
+- **Issuer**: `https://auth.<domain>` (D-1; concrete example `https://auth.dalesackrider.com`). Path-based issuers
+  such as `https://<domain>/auth` are not used — OAuth/OIDC discovery and cookie isolation expect the issuer at the
+  root of its own hostname. `https://factory-dashboard.dalesackrider.com` stays an alias issuer until phase 3 so
+  existing MCP connectors keep working. Everything is advertised by `/.well-known/oauth-authorization-server` and
   `/.well-known/openid-configuration` (RFC 8414, OIDC Discovery), plus `jwks_uri`.
 - **Login page** is the only interactive authentication UI. `/authorize` without a factory session redirects to
   `/login?return=…`; after the IdP callback the AS sets its own session cookie **on the issuer origin only** and resumes
@@ -184,7 +211,7 @@ Cloudflare **1010/403** on `/api/v1/*` but not on `/mcp`. No rate-limiting rules
 {
   "iss": "https://auth.dalesackrider.com",
   "sub": "user:stephanie",                 // canonical principal (D2)
-  "aud": ["https://factory-dashboard.dalesackrider.com/api", "https://factory-dashboard.dalesackrider.com/mcp"],
+  "aud": ["https://api.dalesackrider.com/api", "https://api.dalesackrider.com/mcp"],  // generic: https://api.<domain>/api and /mcp
   "client_id": "higgins-tesla",            // which app / device
   "scope": "mcp agents:converse agents:read",
   "roles": ["operator"],                   // fleet roles at issue time (display/UX hint)
@@ -209,8 +236,9 @@ store, the response carries `X-Factory-Grants-Stale: 1` so UIs refetch `whoami`.
 `agents:read`, `agents:converse`, `agents:manage`, `skills:manage`, `grants:manage`, `keys:manage`, `admin`, `offline_access`.
 A token can never exceed the principal's live grants; scopes only narrow (same rule as `fk_` key scopes today).
 
-**Audiences**: one audience per resource (`…/api`, `…/mcp`), requested with RFC 8707 `resource`. A console asks for
-both; an MCP connector asks only for `/mcp` (current behaviour kept).
+**Audiences**: one audience per resource on the neck host (`https://api.<domain>/api`, `https://api.<domain>/mcp`),
+requested with RFC 8707 `resource`. A console or the first-party web shell asks for both; an MCP connector asks only
+for `/mcp` (current behaviour kept).
 
 ### 4.3 Consoles on any origin (`mygarrison.dalesackrider.com`, `thisismadeup.ai`)
 
@@ -289,10 +317,13 @@ Revocation set is durable (S3 config store) and cached in memory; entries expire
 All 220 privileged `/api/v1/*` routes, identity probes (`whoami`, `authz/check`, `setup/status`, schemas), keys,
 grants, consents, transfers, speak-as, `/mcp`, health (R17: a probe token or the private health port).
 
-### 5.3 First-party console on the issuer origin
-`/ui` keeps using the session cookie **only to obtain tokens** (a same-origin BFF exchange); its API calls also use
-Bearer tokens. Result: the API has one verifier, the cookie is never an API credential. (Phase 2 keeps accepting the
-cookie on `/api/v1/*` for the first-party console until it is switched.)
+### 5.3 First-party web shell on `factory.<domain>`
+The first-party shell (Console, Garrison (3D), 2D game, Web Chat, Connect) lives on `factory.<domain>`, authenticates against
+`auth.<domain>`, and calls only `api.<domain>` with Bearer tokens. A tiny backend-for-frontend on the factory origin
+is the recommended way to hold the refresh token (IETF "OAuth 2.0 for Browser-Based Apps" BCP). The session cookie
+stays on the issuer origin (`auth.<domain>`) and is never an API credential. (Phase 2 may keep accepting the cookie on
+`/api/v1/*` only while the neck still shares a host with the console during migration; once `api.` and `factory.` are
+split, the cookie must not be accepted on the neck.)
 
 ### 5.4 Removed credential paths
 `Cf-Access-Jwt-Assertion` (credential 4), `FACTORY_TOKEN` (credential 2a), external `FACTORY_OIDC_*` bearer
@@ -414,7 +445,16 @@ days.
 | D-8 | **Stay on Cloudflare Free.** | One rate-limit rule (the combined auth-endpoint rule in §6), the Free Managed Ruleset, DDoS protection and Turnstile (free). No Pro-only rules. |
 | — | **Start Phase 0: yes.** | Phase 0 code work starts in its own pull request (whoami fix, sign-in method logging, health endpoints). The Cloudflare rate-limit rule is documented there but **not** applied; it still needs Dale's separate yes. |
 
-**Still open:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-7 (retire or keep `agent-factory.beercanlabs.com` and `garrison.dalesackrider.com`), D-9 (speak-as hardening timing). The proposals in §9 stay as recommendations until Dale decides.
+**Still open after 22 Nov:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-7, and D-9 (speak-as hardening timing). D-7 was decided on 27 Nov 2026 (see §9b). The other proposals in §9 stay as recommendations until Dale decides.
+
+## 9b. Decisions recorded (Dale Sackrider, 27 Nov 2026, Phoenix time)
+
+| # | Decision | Effect on this design |
+|---|---|---|
+| D-7 | **Three public hostnames.** The generic product shape is `auth.<domain>`, `api.<domain>`, and `factory.<domain>`. The concrete running instance uses `dalesackrider.com`. | See §4.0. `auth.dalesackrider.com` is the issuer (already D-1). `api.dalesackrider.com` is the headless neck (`/api/v1/*`, `/mcp`, `/mcp/agents/:id`, `/api/v1/agents/:id/conversation`, webhooks). `factory.dalesackrider.com` is the first-party browser shell. This supersedes the earlier "one public host + one auth host" framing. `agent-factory.beercanlabs.com` is retired as a public advertised host. First-party Garrison moves under `factory.<domain>` rather than remaining a separate public host at `garrison.dalesackrider.com`. `factory-dashboard.dalesackrider.com` remains an issuer/resource alias until phase 3 (D-1), then redirects to the new hosts. Design only — no live DNS, Cloudflare, AWS, or production UI change in this update. |
+| — | **First-party web heads live on `factory.<domain>`**, under one top nav switcher (name not yet vetted; "head switcher" is a placeholder). | The shell hosts: (1) Web Console (operations/admin UI); (2) Garrison (3D gaming interface — Garrison stays the 3D head); (3) a planned 2D Zelda-style game interface, separate from Garrison, under the same top nav switcher; (4) Web Chat with any factory agent via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only; (5) a Connect / non-web heads page with instructions for AI apps (Grok Bot, Claude, Cursor) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI. The 2D game head was added 27 Nov 2026 (Dale, t376u). The shell authenticates against `auth.<domain>` and talks only to `api.<domain>` (the same neck as every other head). Loop in the factory UX Design agent to name the switcher and design the shell layout. Tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). |
+
+**Still open:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-9 (speak-as hardening timing).
 
 ## 10. Proposed implementation issues
 
@@ -427,7 +467,7 @@ days.
 7. **Scopes and scope-based consent; first-party client flag** — replace `mcp:full`.
 8. **Single resource-server verifier for `/api/v1/*` and `/mcp`** — JWT → live grants ∩ scope → Bouncer.
 9. **CORS driven by the client registry** — exact-origin allow-list, no credentials.
-10. **First-party console uses Bearer tokens via a same-origin BFF** — cookie only at the AS.
+10. **First-party web shell uses Bearer tokens via a BFF on `factory.<domain>`** — cookie only at the AS (`auth.<domain>`); the shell talks only to `api.<domain>`.
 11. **Device authorization grant (RFC 8628) and `/device` approval page** — incl. admin act-as with ledger.
 12. **CLI: tokens instead of `cli` `fk_` keys; `factory login --device`.**
 13. **Migrate Higgins (Tesla) to OAuth/device flow; revoke Stephanie's `tesla` key after 7 clean days.**
@@ -443,7 +483,8 @@ days.
 23. **Speak-as: signed speaker assertions / token exchange with `act` and `assurance`.**
 24. **Conformance test: one credential type per route class** — fail CI on any new auth path.
 25. **Demo third-party console on `mygarrison.dalesackrider.com`** — proves the any-origin story end to end.
-26. **Docs: "Connect a console or device to the factory" how-to** — for adopting orgs without IT staff.
+26. **Docs: "Connect a console or device to the factory" how-to** — for adopting orgs without IT staff. The first-party Connect page on `factory.<domain>` (#559) is the in-product version of this how-to (MCP at `https://api.<domain>/mcp`, plus CLI download/install/auth).
+27. **Unified first-party web shell on `factory.<domain>`** — shared top nav switcher for Console, Garrison (3D), a planned 2D Zelda-style game interface, Web Chat, and the Connect/CLI page; shell authenticates at `auth.<domain>` and talks only to `api.<domain>`. See [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). Design and UX first; no live infra or production UI until an implementation PR is approved.
 
 ## 11. References
 
