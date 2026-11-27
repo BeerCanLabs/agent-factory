@@ -376,6 +376,13 @@ days.
 - Durable sessions and revocation set.
 - Scopes and consent screen by scope; first-party client flag.
 
+**Console screens during Phase 1** (what operators should see; stale Cloudflare Access branding is removed):
+- **Slice 1:** The identity chip shows the real sign-in method (`signedInWith`). Login already refuses an unverified email; `#527` closes the same hole on the OIDC bearer path. **Your API Keys** surfaces the factory issuer, OpenID configuration URL, and JWKS URL. Static `fk_` / `fk_at_` keys remain listed (dual-run starts in Slice 2).
+- **Slice 2:** whoami reports a distinct method for a factory JWT vs a legacy `fk_at_` or static `fk_` key. Keys copy may note that new access tokens are 10-minute JWTs; the keys UI is not removed.
+- **Slice 3:** Account / People & Access can list and revoke sessions and refresh families. Copy names the D-4 lifetimes (12 h idle / 7 d absolute; 30-day people / 90-day device refresh). Sign-out revokes that session's refresh family.
+- **Slice 4:** The consent page lists requested scopes and the client's origin. Connected apps show granted scopes. First-party heads are not mistaken for third-party consoles. Third-party clients are not offered admin / grants-manage / keys-manage.
+- **Slice 5:** Privileges in the sidebar keep matching *live* grants (D-5). Add the Phase 0 leftover **"Who still uses old credentials"** view (§10 item 2) so operators can see remaining `fk_`, `factory-token`, `oidc-bearer`, and `cloudflare-access` use before Phase 3.
+
 **Phase 2 — Any-origin consoles and device flow (≈1 week).**
 - CORS from client registry; `resource=…/api` audience allowed for browser clients.
 - First-party console switched to Bearer tokens (BFF on its own origin).
@@ -445,27 +452,29 @@ days.
 | D-8 | **Stay on Cloudflare Free.** | One rate-limit rule (the combined auth-endpoint rule in §6), the Free Managed Ruleset, DDoS protection and Turnstile (free). No Pro-only rules. |
 | — | **Start Phase 0: yes.** | Phase 0 code work starts in its own pull request (whoami fix, sign-in method logging, health endpoints). The Cloudflare rate-limit rule is documented there but **not** applied; it still needs Dale's separate yes. |
 
-**Still open after 22 Nov:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-7, and D-9 (speak-as hardening timing). D-7 was decided on 27 Nov 2026 (see §9b). The other proposals in §9 stay as recommendations until Dale decides.
+**Still open after 22 Nov:** D-4, D-5, D-6, D-7, and D-9. D-7, D-4, and D-5 were decided on 27 Nov 2026 (see §9b). The other proposals in §9 stay as recommendations until Dale decides.
 
 ## 9b. Decisions recorded (Dale Sackrider, 27 Nov 2026, Phoenix time)
 
 | # | Decision | Effect on this design |
 |---|---|---|
 | D-7 | **Three public hostnames.** The generic product shape is `auth.<domain>`, `api.<domain>`, and `factory.<domain>`. The concrete running instance uses `dalesackrider.com`. | See §4.0. `auth.dalesackrider.com` is the issuer (already D-1). `api.dalesackrider.com` is the headless neck (`/api/v1/*`, `/mcp`, `/mcp/agents/:id`, `/api/v1/agents/:id/conversation`, webhooks). `factory.dalesackrider.com` is the first-party browser shell. This supersedes the earlier "one public host + one auth host" framing. `agent-factory.beercanlabs.com` is retired as a public advertised host. First-party Garrison moves under `factory.<domain>` rather than remaining a separate public host at `garrison.dalesackrider.com`. `factory-dashboard.dalesackrider.com` remains an issuer/resource alias until phase 3 (D-1), then redirects to the new hosts. Design only — no live DNS, Cloudflare, AWS, or production UI change in this update. |
+| D-4 | **Session and refresh lifetimes as recommended.** 12 h idle / 7 d absolute session; 30-day sliding refresh for people; 90-day sliding refresh for devices. | Sessions expire after 12 hours idle or 7 days absolute, whichever first. Human refresh tokens slide for 30 days; device refresh tokens slide for 90 days. Implemented in Phase 1 Slice 3. |
+| D-5 | **JWT role/grant hints, live grant check on every request.** | Access tokens may carry role and grant hints for UIs, but the resource server re-checks live grants on every request. A revocation applies immediately, not at the end of the 10-minute token lifetime. Implemented in Phase 1 Slice 5. |
 | — | **First-party web heads live on `factory.<domain>`**, under one top nav switcher (name not yet vetted; "head switcher" is a placeholder). | The shell hosts: (1) Web Console (operations/admin UI); (2) Garrison (3D gaming interface — Garrison stays the 3D head); (3) a planned 2D Zelda-style game interface, separate from Garrison, under the same top nav switcher; (4) Web Chat with any factory agent via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only; (5) a Connect / non-web heads page with instructions for AI apps (Grok Bot, Claude, Cursor) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI. The 2D game head was added 27 Nov 2026 (Dale, t376u). The shell authenticates against `auth.<domain>` and talks only to `api.<domain>` (the same neck as every other head). Loop in the factory UX Design agent to name the switcher and design the shell layout. Tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). |
 
-**Still open:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-9 (speak-as hardening timing).
+**Still open:** D-6 (break-glass), D-9 (speak-as hardening timing).
 
 ## 10. Proposed implementation issues
 
 1. **Fix whoami `signedInWith` for key and MCP calls** — carry the verified credential kind through `identify()` and MCP in-process dispatch; report `amr`/`client_id`.
 2. **Ledger credential kind on every request + "old credentials still in use" console view** — the data that gates each removal.
 3. **Close unauthenticated health on the console host** — enforce R17 or move to the private health port.
-4. **AS signing keys, JWKS and OIDC discovery** — KMS/Secrets-Manager-held ES256 keys with `kid` rotation.
-5. **JWT access tokens (RFC 9068) from `/token` with `api` and `mcp` audiences** — dual-accept alongside `fk_at_`.
-6. **Durable sessions, refresh families and revocation set** — survive restarts and multiple tasks.
-7. **Scopes and scope-based consent; first-party client flag** — replace `mcp:full`.
-8. **Single resource-server verifier for `/api/v1/*` and `/mcp`** — JWT → live grants ∩ scope → Bouncer.
+4. **AS signing keys, JWKS and OIDC discovery** — KMS/Secrets-Manager-held ES256 keys with `kid` rotation. Tracked in [#562](https://github.com/BeerCanLabs/agent-factory/issues/562) (also closes [#527](https://github.com/BeerCanLabs/agent-factory/issues/527)).
+5. **JWT access tokens (RFC 9068) from `/token` with `api` and `mcp` audiences** — dual-accept alongside `fk_at_`. Tracked in [#563](https://github.com/BeerCanLabs/agent-factory/issues/563).
+6. **Durable sessions, refresh families and revocation set** — survive restarts and multiple tasks (D-4). Tracked in [#564](https://github.com/BeerCanLabs/agent-factory/issues/564).
+7. **Scopes and scope-based consent; first-party client flag** — replace `mcp:full`. Tracked in [#565](https://github.com/BeerCanLabs/agent-factory/issues/565).
+8. **Single resource-server verifier for `/api/v1/*` and `/mcp`** — JWT → live grants ∩ scope → Bouncer (D-5). Tracked in [#566](https://github.com/BeerCanLabs/agent-factory/issues/566).
 9. **CORS driven by the client registry** — exact-origin allow-list, no credentials.
 10. **First-party web shell uses Bearer tokens via a BFF on `factory.<domain>`** — cookie only at the AS (`auth.<domain>`); the shell talks only to `api.<domain>`.
 11. **Device authorization grant (RFC 8628) and `/device` approval page** — incl. admin act-as with ledger.

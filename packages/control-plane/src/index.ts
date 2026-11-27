@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Checkpointer, FileLedger, LedgerLease, LeaseHeldError, archiveAndStartSegment, checkpointSinkFromEnv, hydrateLedgerFromSink, readSegment, secretValuesFromEnv, segmentWormUri } from '@beercanlabs/factory-ledger';
 import { providersFromEnv } from '@beercanlabs/factory-secrets-bind';
-import { accessAuthFromEnv, authFromEnv } from '@beercanlabs/factory-auth';
+import { accessAuthFromEnv, authFromEnv, loadAsKeySetFromEnv, parseIssuerAliases } from '@beercanlabs/factory-auth';
 import {
   BUILTIN_SYSTEM_AGENTS,
   configBackendFromEnv,
@@ -233,6 +233,12 @@ const idpConfig = await IdpConfigStore.open(
 const mcpOAuthStore = await McpOAuthStore.open(
   docBackendFromUri<McpOAuthDoc>(process.env.FACTORY_MCP_OAUTH_STORE_URI, join(DATA_DIR, 'auth', 'mcp-oauth')),
 );
+const providers = providersFromEnv();
+const asKeys = await loadAsKeySetFromEnv(process.env, providers);
+if (asKeys.ephemeral) {
+  console.warn('FACTORY_AS_SIGNING_KEY is unset; using an ephemeral ES256 key. /jwks will change on every process start. Set FACTORY_AS_SIGNING_KEY or FACTORY_AS_SIGNING_KEY_SECRET for a durable issuer key.');
+}
+
 const recoveryOutbox = docBackendFromUri<RecoveryOutboxDoc>(process.env.FACTORY_RECOVERY_OUTBOX_URI, join(DATA_DIR, 'auth', 'recovery-outbox'));
 
 const state: FactoryState = {
@@ -274,7 +280,7 @@ const state: FactoryState = {
   // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
   access: accessAuthFromEnv(),
   version: VERSION,
-  providers: providersFromEnv(),
+  providers,
   // GAP-261: a charged run that ends, however it ends, reports its plan's spend.
   runs: Object.assign(new FileRunStore(RUNS_DIR), {
     onChange: (run: Parameters<typeof inspector.publishRun>[0]) => {
@@ -292,6 +298,9 @@ const state: FactoryState = {
   callbacks: callbackPolicyFromEnv(),
   publicBaseUrl: process.env.FACTORY_PUBLIC_BASE_URL || undefined,
   loginBaseUrl: process.env.FACTORY_LOGIN_BASE_URL || undefined,
+  asIssuer: process.env.FACTORY_AS_ISSUER || undefined,
+  asIssuerAliases: parseIssuerAliases(process.env.FACTORY_AS_ISSUER_ALIASES),
+  asKeys,
   // Front-door Phase 0: one JSON line per request naming its verified sign-in method (no secrets). Off with FACTORY_AUTH_REQUEST_LOG=off.
   ...((process.env.FACTORY_AUTH_REQUEST_LOG ?? '').toLowerCase() === 'off' ? {} : { authRequestLog: stdoutAuthRequestLog }),
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',

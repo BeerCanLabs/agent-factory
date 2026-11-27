@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { factoryApi, type KeyView, type OAuthConsentView } from '../api/client.js';
+import { factoryIssuerInfo, type FactoryIssuerInfo } from './keys-model.js';
 
 const btn = 'px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 transition';
 const dangerBtn = 'px-2 py-1 rounded border border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/60 disabled:opacity-50 transition';
@@ -12,15 +13,23 @@ export const KeysView: React.FC = () => {
   const [family, setFamily] = useState('cli');
   const [error, setError] = useState('');
   const [revokingClientId, setRevokingClientId] = useState<string | null>(null);
+  const [issuer, setIssuer] = useState<FactoryIssuerInfo>(() =>
+    factoryIssuerInfo(typeof window !== 'undefined' ? window.location.origin : ''),
+  );
 
   const load = async () => {
     try {
-      const [keysRes, consentsRes] = await Promise.all([
+      const origin = window.location.origin;
+      const [keysRes, consentsRes, discovery] = await Promise.all([
         factoryApi.listKeys(),
         factoryApi.listOAuthConsents().catch(() => ({ consents: [] })),
+        fetch(`${origin}/.well-known/openid-configuration`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
       ]);
       setKeys(keysRes.keys);
       setConsents(consentsRes.consents || []);
+      setIssuer(factoryIssuerInfo(origin, discovery));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -54,12 +63,33 @@ export const KeysView: React.FC = () => {
 
   return (
     <div className="space-y-8 text-xs max-w-5xl">
+      <div className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
+        <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Factory issuer</h2>
+        <p className="text-slate-500 dark:text-slate-400">
+          The factory authorization server publishes OpenID and JWKS discovery so MCP and OIDC clients can verify factory-issued tokens. Existing API keys and connected-app tokens stay valid during the Phase 1 dual-run.
+        </p>
+        <dl className="grid gap-2 sm:grid-cols-1 font-mono text-[11px]">
+          <div>
+            <dt className="text-slate-500 dark:text-slate-400 uppercase tracking-wide text-[10px] font-sans">Issuer</dt>
+            <dd className="break-all text-slate-800 dark:text-slate-200">{issuer.issuer || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-slate-500 dark:text-slate-400 uppercase tracking-wide text-[10px] font-sans">OpenID configuration</dt>
+            <dd className="break-all text-slate-800 dark:text-slate-200">{issuer.discoveryUrl || '—'}</dd>
+          </div>
+          <div>
+            <dt className="text-slate-500 dark:text-slate-400 uppercase tracking-wide text-[10px] font-sans">JWKS</dt>
+            <dd className="break-all text-slate-800 dark:text-slate-200">{issuer.jwksUri || '—'}</dd>
+          </div>
+        </dl>
+      </div>
+
       {/* API Keys Section */}
       <div className="space-y-4">
         <div>
           <h1 className="text-lg font-semibold text-slate-900 dark:text-white">Your API keys</h1>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">
-            Static API keys issued for CLI, scripts, and local developer automation. A new secret is shown once and never stored unhashed.
+            Static API keys issued for CLI, scripts, and local developer automation. A new secret is shown once and never stored unhashed. These keys remain valid while the factory also begins issuing short-lived JWTs.
           </p>
         </div>
 

@@ -146,6 +146,7 @@ import {
 export { handleMcp, handleAgentMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
 import { handleMcpOAuthRoutes, McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
+import { handleAsDiscoveryRoutes } from './as-discovery.js';
 export { McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
 import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, OPS_SKILL, conductorEventFor, conductorInput, opsEventFor } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
@@ -285,6 +286,12 @@ export type FactoryState = {
   publicBaseUrl?: string;
   /** S12: origin for sign-in callbacks when people browse a different host than publicBaseUrl (the console). */
   loginBaseUrl?: string;
+  /** Front-door Phase 1: primary AS issuer (`https://auth.<domain>`). */
+  asIssuer?: string;
+  /** Front-door Phase 1: alias issuers (e.g. `https://factory-dashboard.<domain>`) until Phase 3. */
+  asIssuerAliases?: string[];
+  /** Front-door Phase 1: ES256 signing keys advertised at /jwks. */
+  asKeys?: import('@beercanlabs/factory-auth').AsKeySet;
   /** Signs OAuth consent state. Defaults to the callback signing key. */
   connectionStateKey?: string;
   /** GitHub API and web origins for app setup (E5.1). Default to github.com; tests point them at fakes. */
@@ -1488,7 +1495,10 @@ export async function resolveVerifiedPrincipal(
 
   if (state.principals && state.principals.healthy) {
     const extracted = extractVerifiedEmailFromActor(actor);
-    if (extracted) {
+    // #527: an oidc:<email> actor is only treated as a verified email when the provider attested email_verified.
+    if (extracted && extracted.idp === 'oidc' && verified.emailVerified !== true) {
+      // Keep the raw oidc: actor; do not rewrite, materialize, or attach that email's grants.
+    } else if (extracted) {
       const existing = state.principals.findByEmail(extracted.email);
       if (existing) {
         actor = existing.id;
@@ -1529,7 +1539,14 @@ export async function resolveVerifiedPrincipal(
     }
   }
 
-  if (state.grants && state.grants.healthy && (!state.principals || state.principals.healthy)) {
+  const oidcEmailUnverified =
+    extractVerifiedEmailFromActor(actor)?.idp === 'oidc' && verified.emailVerified !== true;
+  if (
+    !oidcEmailUnverified &&
+    state.grants &&
+    state.grants.healthy &&
+    (!state.principals || state.principals.healthy)
+  ) {
     const grantRes = effectiveGrantsForActor(state, actor);
     if (grantRes.ok && grantRes.grants) {
       for (const eg of grantRes.grants) {
@@ -3562,6 +3579,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
   const path = (req.url ?? '/').split('?')[0];
   const started = Number(process.env.FACTORY_STARTED_AT ?? Date.now());
 
+  if (await handleAsDiscoveryRoutes(state, req, res, path)) return;
   if (await handleMcpOAuthRoutes(state, req, res, path)) return;
 
   if ((path === '/login' || path.startsWith('/api/v1/auth/')) && (await handleLoginRoutes(state, req, res, path))) return;
