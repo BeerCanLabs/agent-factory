@@ -505,7 +505,7 @@ Content-Type: application/json
 7. **On Smoke Pass:**
    - Commits the new versioned configuration record to `config.json` with `source: { repo: pin.repo, commit: pin.commit }`, `skills`, and `agent` settings.
    - Keeps `createdFrom: 'configuration'` and keeps `agent.repo` and `agent.commit` pinned to the shared runtime (`pin.repo`, `pin.commit`).
-   - Deletes legacy cartridge-specific fields from the agent record (`skillIds`, `skillRoutes`, `roles`, `admission`, and `pendingConfig`).
+   - Deletes legacy cartridge-specific fields from the agent record (`skillIds`, `skillRoutes`, `roles`, `admission`, `pendingConfig`, and cartridge release metadata: `installedVersion`, `updateAvailable`, `offeredVersion`, `offeredCommit`, `releaseNotes`, `publishedAt`, `lastCheckedAt`, `stagedVersion`, `stagedCommit`, `pendingDrain`). `repo`, `commit`, and `deployedRuntime` stay pinned to the shared runtime. A failed smoke or build restores the previous release fields with the rest of the repository record.
    - Transitions `state` to `'SLEEPING'`, saves the agent record, and records `CONFIG_VERSIONED`, `AGENT_DEPLOYED`, and `AGENT_CONVERTED` in the ledger.
    - Returns `HTTP 200 OK` with `{ ok: true, id, createdFrom: "configuration", state: "SLEEPING", artifact, deployedRuntime, configurationVersion, smoke: { ok: true } }`.
 8. **On Smoke or Build Failure:**
@@ -531,6 +531,18 @@ Content-Type: application/json
 2. **Verify Memory Storage Gate (`AM1`):**
    - If `purpose-built`: verify that the runtime shim performs no object-storage mind pull on wake or push on sleep.
    - If `personal-assistant` or `team-member`: verify that `notebook.db` hydrates and replicates cleanly.
+
+### Leftover cartridge release metadata (Chuck / `finley`, #456)
+
+Conversion used to rewrite `repo` and `commit` onto the shared runtime and leave the old cartridge's SemVer fields in place. Chuck (`id: finley`) is the live case: `createdFrom` is already `"configuration"` and `repo` is already `https://github.com/BeerCanLabs/agent-factory`, but the record can still carry SM-finley 1.1.0 (`installedVersion`, `offeredVersion`, `offeredCommit`, `updateAvailable`, `releaseNotes` citing `BeerCanLabs/SM-finley`, `publishedAt`, `lastCheckedAt`). There is no settings API that clears those fields, and this change does not edit a live registry.
+
+**What the factory does on the next control-plane start.** For every agent with `createdFrom: "configuration"` that is not an in-memory helper run, startup deletes the cartridge release keys listed above when any of them is set, then rewrites that agent's registry file (`registryOf().update`, so a built-in with no file is not created). It does not change the runtime pin, model, budget, skills, or mind prefix, and it does not call GitHub. A repository agent is left alone. The same delete runs at the end of a successful `POST /api/v1/agents/:id/convert`. `checkAgentUpdate` returns before `GET /repos/{owner}/{repo}/releases/latest` when `createdFrom` is `"configuration"`, even if `repo` is still an archived cartridge URL such as `https://github.com/BeerCanLabs/SM-finley`.
+
+**Operator check after deploy (no secrets).** Read agent `finley` (`GET /api/v1/agents/finley` or the registry file `<FACTORY_REGISTRY_DIR>/finley.json`). Those release keys are absent. `releaseNotes` does not mention SM-finley. `POST /api/v1/agents/finley/updates/check` stays `409 configuration_agent` and does not request `BeerCanLabs/SM-finley/releases/latest`. The console Updates drawer lists Chuck under **Shared runtime** as configuration-hosted, not as cartridge `v1.1.0`. The fleet row says `shared runtime` and does not offer a GitHub check.
+
+**Clearing the record before that restart.** On the host that holds `FACTORY_REGISTRY_DIR`, delete only these keys from `finley.json` if they are present: `installedVersion`, `updateAvailable`, `offeredVersion`, `offeredCommit`, `releaseNotes`, `publishedAt`, `lastCheckedAt`, `stagedVersion`, `stagedCommit`, `pendingDrain`. Leave `repo`, `commit`, `deployedRuntime`, `createdFrom`, policy, and skills as they are. Do not un-archive [BeerCanLabs/SM-finley](https://github.com/BeerCanLabs/SM-finley) and do not change Chuck's runtime pin. Restart is optional after a hand edit; the next start applies the same delete if any key remains.
+
+**Knowledge profile (separate repository).** `knowledge/agents/finley.md` is in [BeerCanLabs/knowledge](https://github.com/BeerCanLabs/knowledge), not this repo. `resource:` must not present the archived SM-finley repository as Chuck's live home. [BeerCanLabs/knowledge#13](https://github.com/BeerCanLabs/knowledge/pull/13) already retargets `resource:` at `BeerCanLabs/agent-factory` and labels the old cartridge as history. Merge that pull request; do not copy the profile into agent-factory.
 
 ---
 

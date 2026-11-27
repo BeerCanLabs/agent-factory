@@ -21,8 +21,8 @@
  *   GET  /api/v1/skills/:id/adopters                                 viewer: the agents that use it, and pending requests
  *   POST /api/v1/registry/skills/:id/retire                          admin: { reason?, force? }
  *   GET  /api/v1/agents/:id/skills                                   the agent's owner or a viewer: adopted, requested, revoked, available
- *   POST /api/v1/agents/:id/skills                                   the agent's owner or an admin: { skillId, version, reason? } asks to adopt
- *   POST /api/v1/agents/:id/skills/:skillId/adoption/approve|reject  admin: { reason? } decides the request
+ *   POST /api/v1/agents/:id/skills                                   the agent's owner or an admin: { skillId, version, reason?, redeploy? } asks to adopt
+ *   POST /api/v1/agents/:id/skills/:skillId/adoption/approve|reject  admin: { reason?, redeploy? } decides the request (redeploy defaults to the request, else true)
  *   DELETE /api/v1/agents/:id/skills/:skillId                        the agent's owner or an admin: { reason? } removes the adoption
  *
  * SK1, SK3, SK6, SK7: a private skill is visible only to admins and to the owners of its owner agent, and is adopted
@@ -76,7 +76,7 @@ import {
 } from './app.js';
 import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
-import { triggerApply } from './apply.js';
+import { applyConfig, triggerApply, type ApplyOutcome } from './apply.js';
 import { handleSkillGrantTransfer } from './transfers.js';
 import { accountableLeadOf, configOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
@@ -1466,6 +1466,38 @@ function reasonOf(res: http.ServerResponse, body: Record<string, unknown>): stri
   return body.reason.trim() || undefined;
 }
 
+/** #519: `redeploy` on an adoption request or approval. Omitted means the caller did not choose; a non-boolean is refused. */
+function redeployFlag(body: Record<string, unknown>): boolean | undefined | 'invalid' {
+  if (!Object.prototype.hasOwnProperty.call(body, 'redeploy')) return undefined;
+  return typeof body.redeploy === 'boolean' ? body.redeploy : 'invalid';
+}
+
+/** What an adoption approval tells the caller about the SK4 apply (started, queued, skipped, failed, or already matching). */
+export type AdoptionApplyStatus = {
+  status: 'started' | 'pending' | 'unchanged' | 'skipped' | 'failed';
+  reason?: string;
+};
+
+/**
+ * #519: starts the existing apply path when `redeploy` is true, and always returns a status the caller can show.
+ * The deploy itself stays in the background (`started`); opting out never calls `applyConfig`.
+ */
+function adoptionApply(state: FactoryState, agentId: string, actor: string, reason: string, redeploy: boolean): AdoptionApplyStatus {
+  if (!redeploy) return { status: 'skipped', reason: 'redeploy_declined' };
+  try {
+    const out: ApplyOutcome = applyConfig(state, agentId, actor, reason);
+    if (out.status === 'started') {
+      void out.done;
+      return { status: 'started' };
+    }
+    if (out.status === 'pending') return { status: 'pending' };
+    return { status: out.status, reason: out.reason };
+  } catch (err) {
+    console.error(`[control-plane] could not start applying ${agentId}:`, err);
+    return { status: 'failed', reason: 'apply_error' };
+  }
+}
+
 async function agentSkillsList(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse, agentId: string): Promise<void> {
   const principal = await requirePrivilege(req, res, state, 'config.read', { agentId });
   if (!principal) return;
@@ -1602,6 +1634,8 @@ export async function requestAdoptionFor(
   requestedBy: string,
   reason?: string,
   rawHolds?: unknown,
+  /** #519: stored on the request. Omitted means redeploy when an admin approves (the default). */
+  redeploy?: boolean,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   // Under the agent's lock: an approval being written clears the request it approved, so a newer request for the same
   // skill must wait for it, or the approval would clear that one too and the asker's 201 would be a lie.
@@ -1657,6 +1691,7 @@ export async function requestAdoptionFor(
     }
     const store = adoptionStore(state);
     const earlier = store.get(agentId, skillId);
+    const wantRedeploy = redeploy !== false;
     const record = store.request({
       agentId,
       skillId,
@@ -1665,6 +1700,7 @@ export async function requestAdoptionFor(
       ...(reason ? { reason } : {}),
       accessAdded: accessAddedFor(state, agentId, check.record),
       ...(storedHolds ? { holds: storedHolds } : {}),
+      redeploy: wantRedeploy,
     });
     ledgerAdoption(state, agentId, 'SKILL_ADOPTION_REQUESTED', requestedBy, skillId, version, reason, check.record.commit);
     // A newer request for the same skill replaces a pending one; say so, so the asker is not surprised.
@@ -1693,7 +1729,9 @@ async function requestAdoption(state: FactoryState, req: http.IncomingMessage, r
     return json(res, 400, { error: 'invalid_skill', message: 'skillId (kebab-case) and version (semantic version) are required' });
   }
   const rawHolds = body.holds !== undefined ? body.holds : body.holdOverrides;
-  const out = await requestAdoptionFor(state, agentId, skillId, version, principal.actor, reason, rawHolds);
+  const flag = redeployFlag(body);
+  if (flag === 'invalid') return json(res, 400, { error: 'invalid_redeploy', message: 'redeploy must be true or false' });
+  const out = await requestAdoptionFor(state, agentId, skillId, version, principal.actor, reason, rawHolds, flag ?? true);
   json(res, out.status, out.body);
 }
 
@@ -1703,6 +1741,8 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
   const body = await readJson(req);
   const reason = reasonOf(res, body);
   if (reason === null) return;
+  const flag = redeployFlag(body);
+  if (flag === 'invalid') return json(res, 400, { error: 'invalid_redeploy', message: 'redeploy must be true or false' });
   const adoptions = adoptionStore(state);
   if (decision === 'reject') {
     // Under the agent's lock, so a rejection cannot land while an approval of the same request is being written.
@@ -1786,6 +1826,8 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
     if (!written.ok) return { status: 500, body: { error: written.error, message: 'the adoption could not be written; the request is still pending' } };
     adoptions.clear(agentId, skillId);
     ledgerAdoption(state, agentId, 'SKILL_ADOPTION_APPROVED', principal.actor, skillId, request.version, reason, check.record.commit);
+    // The approver's explicit flag wins. Otherwise the owner's request is honored, and an older request with no flag redeploys.
+    const redeploy = flag ?? request.redeploy ?? true;
     return {
       status: 200,
       body: {
@@ -1794,11 +1836,18 @@ async function decideAdoption(state: FactoryState, req: http.IncomingMessage, re
         version: request.version,
         configVersion: written.version,
         hash: written.hash,
+        redeploy,
         ...(Object.keys(holds).length ? { holds } : {}),
       },
     };
   });
-  if (outcome.status === 200) triggerApply(state, agentId, principal.actor, `adopt ${skillId}`);
+  if (outcome.status === 200 && 'redeploy' in outcome.body) {
+    const redeploy = outcome.body.redeploy === true;
+    const apply = redeploy
+      ? adoptionApply(state, agentId, principal.actor, `adopt ${skillId}`, true)
+      : { status: 'skipped' as const, reason: 'redeploy_declined' };
+    return json(res, 200, { ...outcome.body, apply });
+  }
   json(res, outcome.status, outcome.body);
 }
 

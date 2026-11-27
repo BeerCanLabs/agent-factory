@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, RefreshCw, ArrowUpCircle, CheckCircle2, Clock } from 'lucide-react';
+import { X, RefreshCw, ArrowUpCircle, CheckCircle2, Clock, Boxes } from 'lucide-react';
 import type { AgentRecord } from '../api/types.js';
+import { cartridgeUpdateBuckets } from './cartridge-updates.js';
 
 interface UpdateDrawerProps {
   isOpen: boolean;
@@ -21,8 +22,7 @@ export const UpdateDrawer: React.FC<UpdateDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const updatesAvailable = agents.filter((a) => a.updateAvailable);
-  const upToDate = agents.filter((a) => !a.updateAvailable);
+  const { updatesAvailable, upToDate, configurationHosted } = cartridgeUpdateBuckets(agents);
 
   const handleCheck = async (id: string) => {
     setCheckingId(id);
@@ -104,6 +104,31 @@ export const UpdateDrawer: React.FC<UpdateDrawerProps> = ({
                           {agent.releaseNotes}
                         </p>
                       )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {configurationHosted.length > 0 && (
+              <div className="space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                  Shared runtime ({configurationHosted.length})
+                </h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  These agents run the pinned shared runtime. A cartridge repository release, including an archived repo, is not their version.
+                </p>
+                <div className="space-y-2">
+                  {configurationHosted.map((agent) => (
+                    <div
+                      key={agent.id}
+                      className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40 flex items-center space-x-2.5 text-xs"
+                    >
+                      <Boxes className="w-4 h-4 text-slate-400" />
+                      <div>
+                        <div className="font-semibold text-slate-800 dark:text-slate-200">{agent.name}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">Configuration-hosted</div>
+                      </div>
                     </div>
                   ))}
                 </div>

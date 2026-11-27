@@ -51,6 +51,9 @@ export const AdoptersPanel: React.FC<{
                   </span>
                 )}
                 {r.auto && <span className="text-[10px] text-slate-500">adopted automatically</span>}
+                {r.state === 'requested' && (
+                  <span className="text-[10px] text-slate-500">{r.redeploy === false ? 'will not redeploy until asked' : 'redeploys when approved'}</span>
+                )}
                 {r.upgradeAvailable && skill.latestApproved && <span className="text-[10px] font-semibold text-sky-700 dark:text-sky-400">update available: {skill.latestApproved}</span>}
                 <span className="text-slate-500">
                   {r.state === 'requested' ? (r.requestedBy ? `asked by ${r.requestedBy}` : '') : r.approvedBy ? `approved by ${r.approvedBy}` : ''}

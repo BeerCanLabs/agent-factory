@@ -541,12 +541,12 @@ export const factoryApi = {
   },
 
   // Adoption is a configuration change with its own approval (SK3). An admin decides; an owner may ask and remove.
-  async requestAdoption(agentId: string, skillId: string, version: string, reason?: string): Promise<Record<string, unknown>> {
-    return request(`/agents/${encodeURIComponent(agentId)}/skills`, { method: 'POST', body: JSON.stringify({ skillId, version, ...(reason ? { reason } : {}) }) });
+  async requestAdoption(agentId: string, skillId: string, version: string, reason?: string, redeploy = true): Promise<Record<string, unknown>> {
+    return request(`/agents/${encodeURIComponent(agentId)}/skills`, { method: 'POST', body: JSON.stringify({ skillId, version, redeploy, ...(reason ? { reason } : {}) }) });
   },
 
-  async approveAdoption(agentId: string, skillId: string, reason?: string): Promise<Record<string, unknown>> {
-    return request(`/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/adoption/approve`, { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) });
+  async approveAdoption(agentId: string, skillId: string, reason?: string, redeploy = true): Promise<Record<string, unknown>> {
+    return request(`/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/adoption/approve`, { method: 'POST', body: JSON.stringify({ redeploy, ...(reason ? { reason } : {}) }) });
   },
 
   async rejectAdoption(agentId: string, skillId: string, reason?: string): Promise<Record<string, unknown>> {

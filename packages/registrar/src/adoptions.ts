@@ -4,8 +4,10 @@
  *
  * What an agent runs is its configuration (`config.skills`, hashed, SK4). A request that changes nothing yet, a
  * rejected request and a revocation are not configuration: they live here, create no configuration version and so
- * trigger no build. Only an approved adoption (or a removal) writes a version. A revoked private adoption is kept so
- * that a later version of the skill is not adopted for its owner again by itself (SK6).
+ * trigger no build. Only an approved adoption (or a removal) writes a version. A request may record `redeploy`
+ * (default true, #519): approving it then starts the SK4 apply, unless the owner or the approver set it false.
+ * A revoked private adoption is kept so that a later version of the skill is not adopted for its owner again by
+ * itself (SK6).
  *
  * Records live in `<dir>/<agentId>/<skillId>.json`, one per (agent, skill), read once and served from memory.
  */
@@ -35,6 +37,11 @@ export type AdoptionRecord = {
   accessAdded?: AccessAdded;
   /** S23 (D31): effective per-action holds requested on adoption (skill defaults plus any stricter owner overrides). */
   holds?: Record<string, boolean>;
+  /**
+   * #519: whether approving this request should rebuild the agent. Absent on records written before the flag
+   * existed, which means yes (redeploy on adoption).
+   */
+  redeploy?: boolean;
 };
 
 export type AdoptionRequest = {
@@ -45,6 +52,8 @@ export type AdoptionRequest = {
   reason?: string;
   accessAdded?: AccessAdded;
   holds?: Record<string, boolean>;
+  /** #519: the owner's choice. Omitted means redeploy when the request is approved. */
+  redeploy?: boolean;
 };
 
 function setHoldKey(target: Record<string, boolean>, key: string, value: boolean): void {
@@ -210,6 +219,9 @@ export class AdoptionStore {
           if (rec.holds !== undefined && !isPlainHoldMap(rec.holds)) {
             throw new Error('adoption record has invalid holds map');
           }
+          if (rec.redeploy !== undefined && typeof rec.redeploy !== 'boolean') {
+            throw new Error('adoption record has invalid redeploy flag');
+          }
           this.records.set(`${agentId}/${rec.skillId}`, rec);
         } catch (err) {
           this.warn(`skipping unreadable adoption record ${join(dir, agentId, file)}:`, err);
@@ -262,6 +274,7 @@ export class AdoptionStore {
       ...(input.reason ? { reason: input.reason } : {}),
       ...(input.accessAdded ? { accessAdded: structuredClone(input.accessAdded) } : {}),
       ...(input.holds && Object.keys(input.holds).length ? { holds: structuredClone(input.holds) } : {}),
+      ...(input.redeploy !== undefined ? { redeploy: input.redeploy } : {}),
     });
   }
 
@@ -288,6 +301,7 @@ export class AdoptionStore {
       ...(reason ?? rec.reason ? { reason: (reason ?? rec.reason)! } : {}),
       ...(rec.accessAdded ? { accessAdded: structuredClone(rec.accessAdded) } : {}),
       ...(Object.keys(holds).length ? { holds: structuredClone(holds) } : {}),
+      ...(rec.redeploy !== undefined ? { redeploy: rec.redeploy } : {}),
     });
   }
 
@@ -347,6 +361,8 @@ export type Adopter = {
   /** When the request was made (`requested`) or approved (`approved`). */
   since?: string;
   auto?: true;
+  /** #519: the owner's redeploy choice on a pending request. Absent means redeploy when approved. */
+  redeploy?: boolean;
 };
 
 /**
@@ -369,7 +385,14 @@ export function adopters(configs: Pick<ConfigStore, 'agentIds' | 'current' | 'hi
   }
   for (const r of adoptions.forSkill(skillId)) {
     if (r.state !== 'requested' || (version && r.version !== version)) continue;
-    out.push({ agentId: r.agentId, version: r.version, state: 'requested', requestedBy: r.requestedBy, since: r.requestedAt });
+    out.push({
+      agentId: r.agentId,
+      version: r.version,
+      state: 'requested',
+      requestedBy: r.requestedBy,
+      since: r.requestedAt,
+      ...(r.redeploy !== undefined ? { redeploy: r.redeploy } : {}),
+    });
   }
   return out.sort((a, b) => a.agentId.localeCompare(b.agentId) || a.state.localeCompare(b.state));
 }

@@ -54,6 +54,8 @@ export interface AgentRecord {
   mindPrefix?: string;
   /** SK4: the skills the deployed image contains, as the approved versions it was built from. Absent: none. */
   deployedSkills?: Array<{ id: string; version: string }>;
+  /** Set when the agent runs on the pinned shared runtime and has no cartridge release of its own. */
+  createdFrom?: 'configuration';
   installedVersion?: string;
   updateAvailable?: boolean;
   offeredVersion?: string;
@@ -342,6 +344,8 @@ export interface SkillAdopter {
   auto?: boolean;
   /** Only from the adopters endpoint: a newer approved version exists. */
   upgradeAvailable?: boolean;
+  /** #519: the owner's choice on a pending request. Absent means redeploy when approved. */
+  redeploy?: boolean;
 }
 
 /** A skill in the catalog: `versions` are summaries in the list, full records for one skill. */
@@ -516,6 +520,8 @@ export interface AgentSkillRequest {
   requestedBy?: string;
   requestedAt?: string;
   reason?: string;
+  /** #519: whether approving this request should rebuild the agent. Absent means yes. */
+  redeploy?: boolean;
 }
 
 /** The latest approved version of a skill this agent could be given. It also lists the skills the agent already runs. */

@@ -265,3 +265,41 @@ describe('which agents use a skill, and which skills an agent uses (SK7)', () =>
     }
   });
 });
+
+describe('redeploy choice on an adoption request (#519)', () => {
+  it('stores the flag, reloads it, keeps it when holds change, and shows it to the approver', async () => {
+    const dir = tmp();
+    try {
+      const store = new AdoptionStore(dir);
+      const saved = store.request({ agentId: 'higgins', skillId: 'tavily-search', version: '0.1.0', requestedBy: 'token:ops', redeploy: false }, new Date('2026-10-10T01:00:00Z'));
+      assert.equal(saved.redeploy, false);
+      assert.equal(new AdoptionStore(dir).get('higgins', 'tavily-search')!.redeploy, false);
+      const held = store.updateHolds('higgins', 'tavily-search', { search: true });
+      assert.equal(held?.redeploy, false);
+      assert.equal(new AdoptionStore(dir).get('higgins', 'tavily-search')!.redeploy, false);
+      assert.equal(store.request({ agentId: 'donna', skillId: 'print', version: '1.0.0', requestedBy: 'a' }).redeploy, undefined);
+
+      const configs = await VersionedConfigStore.open(new FileConfigBackend(join(dir, 'config')));
+      const listed = adopters(configs, store, 'tavily-search');
+      assert.deepEqual(listed.map((a) => [a.agentId, a.state, a.redeploy]), [['higgins', 'requested', false]]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record whose redeploy flag is not a boolean', () => {
+    const dir = tmp();
+    try {
+      mkdirSync(join(dir, 'ada'), { recursive: true });
+      writeFileSync(join(dir, 'ada', 'print.json'), JSON.stringify({
+        agentId: 'ada', skillId: 'print', version: '1.0.0', state: 'requested', requestedBy: 'a', requestedAt: '2026-10-10T01:00:00.000Z', redeploy: 'yes',
+      }));
+      const warned: string[] = [];
+      const store = new AdoptionStore(dir, (message, err) => warned.push(`${message} ${err instanceof Error ? err.message : String(err)}`));
+      assert.equal(store.get('ada', 'print'), undefined);
+      assert.match(warned.join('\n'), /invalid redeploy/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

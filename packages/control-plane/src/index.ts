@@ -12,6 +12,7 @@ import {
   loadCatalog,
   loadDynamicRegistry,
   mergeAgents,
+  registryOf,
   VersionedConfigStore,
 } from '@beercanlabs/factory-registrar';
 import { createFactoryServer, createProbeServer, FactoryState, relinkVendorModels } from './app.js';
@@ -43,6 +44,7 @@ import { dataExportLocationFromEnv } from './aws/data-export.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
+import { migrateConfigurationReleaseMetadata } from './updates.js';
 import { startTransferSweeper } from './transfers.js';
 import { stdoutAuthRequestLog } from './auth-method.js';
 
@@ -348,6 +350,13 @@ const state: FactoryState = {
         }),
 };
 auditFleetStateLoad(state);
+
+// Configuration-hosted agents have no cartridge release. Drop leftover SemVer fields (for example
+// Chuck / finley still carrying SM-finley 1.1.0 notes) and rewrite only records that changed.
+const clearedReleaseMetadata = migrateConfigurationReleaseMetadata(state.agents.values(), (agent) => registryOf(state).update(agent));
+if (clearedReleaseMetadata.length) {
+  console.log(`[control-plane] cleared stale cartridge release metadata: ${clearedReleaseMetadata.join(', ')}`);
+}
 
 process.env.FACTORY_STARTED_AT = String(Date.now());
 

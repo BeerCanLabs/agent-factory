@@ -234,6 +234,17 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
   });
 
   it('2. In-Place Conversion Preserves Identity, Policy, Owners, Schedules, and Role Assignments', async () => {
+    // Leftover cartridge release metadata must not survive conversion (issue #456, Chuck / finley).
+    const skippy = state.agents.get('skippy-like')!;
+    skippy.installedVersion = '1.1.0';
+    skippy.offeredVersion = '1.1.0';
+    skippy.offeredCommit = 'main';
+    skippy.updateAvailable = false;
+    skippy.releaseNotes = 'See BeerCanLabs/SM-finley/compare/v1.0.1...v1.1.0';
+    skippy.publishedAt = '2026-10-17T02:01:00.000Z';
+    skippy.lastCheckedAt = '2026-10-20T04:51:00.000Z';
+    registryOf(state).save(skippy);
+
     // Register and approve skill knowledge-retrieval@0.1.0 covering route 'knowledge'
     skillRegistry(state).save({
       id: 'knowledge-retrieval',
@@ -288,6 +299,14 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
     assert.equal(converted.skillIds, undefined);
     assert.equal(converted.skillRoutes, undefined);
     assert.equal(converted.roles, undefined);
+    assert.equal(converted.installedVersion, undefined);
+    assert.equal(converted.offeredVersion, undefined);
+    assert.equal(converted.offeredCommit, undefined);
+    assert.equal(converted.updateAvailable, undefined);
+    assert.equal(converted.releaseNotes, undefined);
+    assert.equal(converted.publishedAt, undefined);
+    assert.equal(converted.lastCheckedAt, undefined);
+    assert.equal(JSON.stringify(converted).includes('SM-finley'), false);
 
     // Exactly one new configuration version added over pre-conversion config
     const postVersions = await state.configs!.history('skippy-like');
@@ -349,6 +368,10 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
       triggers: [],
       memoryPrefix: 'repo-stay',
       dir: '/tmp/repo-stay',
+      installedVersion: '1.0.0',
+      offeredVersion: '1.2.0',
+      releaseNotes: 'repo-stay release notes stay on a failed conversion',
+      updateAvailable: true,
     };
     state.agents.set('repo-stay', repoStay);
     registryOf(state).save(repoStay);
@@ -390,6 +413,10 @@ describe('Convert repository agent in place (TSK-283, CF6, L4, AM1, GAP-209)', {
       assert.equal(stayAgent.commit, REPO_COMMIT);
       assert.equal(stayAgent.deployedCommit, REPO_COMMIT);
       assert.equal(stayAgent.artifact, 'repo-image:v1');
+      assert.equal(stayAgent.installedVersion, '1.0.0');
+      assert.equal(stayAgent.offeredVersion, '1.2.0');
+      assert.equal(stayAgent.releaseNotes, 'repo-stay release notes stay on a failed conversion');
+      assert.equal(stayAgent.updateAvailable, true);
 
       // Verify compute registration rolled back to previous artifact
       const lastCompute = computeRegistered.filter((c) => c.agentId === 'repo-stay').at(-1);

@@ -5,6 +5,7 @@ import { ApiError, factoryApi } from '../../api/client.js';
 import { Dialog } from '../../components/Dialog.js';
 import { Requirements } from './Requirements.js';
 import { errorText, key, retireConfirmed, retireEffect, retireImpact, shortSha, sourceLinks } from './skills-model.js';
+import { adoptionApplyText, applyOf } from './agent-skills-model.js';
 import { btnDanger, btnPrimary, btnQuiet, input, label } from './ui.js';
 
 export type Decision = { kind: 'approve' | 'reject'; skill: SkillSummary; version: SkillVersion };
@@ -373,6 +374,19 @@ export const RetireDialog: React.FC<{ skill: SkillSummary; adopters: SkillAdopte
 
 export type AdoptionAction = { kind: 'approve' | 'reject' | 'remove' | 'upgrade'; skill: SkillSummary; adopter: SkillAdopter };
 
+/** #519: the owner's or approver's choice to rebuild on adoption. On by default. */
+export const RedeployChoice: React.FC<{ checked: boolean; onChange: (value: boolean) => void; disabled?: boolean; when: 'request' | 'approve' | 'upgrade' }> = ({ checked, onChange, disabled, when }) => (
+  <label className="flex items-start gap-2 text-xs">
+    <input type="checkbox" className="mt-0.5" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+    <span>
+      <span className="font-semibold text-slate-800 dark:text-slate-200">
+        {when === 'request' ? 'Redeploy when this is approved' : when === 'upgrade' ? 'Redeploy with the new version' : 'Redeploy this agent now'}
+      </span>
+      <span className="block text-slate-500">On by default. Turn it off to save the configuration and rebuild later, for example to batch several changes into one redeploy.</span>
+    </span>
+  </label>
+);
+
 /**
  * SK3, SK5, SK6: decide a request, remove an adoption, or move an agent to the newer approved version. Every one is a
  * change to the agent's configuration that the factory then builds and deploys; an approval adds the skill to the
@@ -381,6 +395,7 @@ export type AdoptionAction = { kind: 'approve' | 'reject' | 'remove' | 'upgrade'
 export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => void; onDone: (message: string) => void }> = ({ action, onClose, onDone }) => {
   const { kind, skill, adopter } = action;
   const [reason, setReason] = useState('');
+  const [redeploy, setRedeploy] = useState(adopter.redeploy !== false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const target = kind === 'upgrade' ? skill.latestApproved : adopter.version;
@@ -388,14 +403,15 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
   const agent = adopter.agentId;
   const ownerPrivate = skill.visibility === 'private' && skill.owner === agent;
   const text = reason.trim() || undefined;
+  const choosesRedeploy = kind === 'approve' || kind === 'upgrade';
 
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
       if (kind === 'approve') {
-        await factoryApi.approveAdoption(agent, skill.id, text);
-        onDone(`Approved ${what} for ${agent}. Its configuration has a new version and ${agent} is being rebuilt with it.`);
+        const approved = await factoryApi.approveAdoption(agent, skill.id, text, redeploy);
+        onDone(`Approved ${what} for ${agent}. ${adoptionApplyText(agent, applyOf(approved))}`);
       } else if (kind === 'reject') {
         await factoryApi.rejectAdoption(agent, skill.id, text);
         onDone(`Rejected ${agent}’s request for ${what}. Nothing changed.`);
@@ -404,14 +420,14 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
         onDone(`Removed ${skill.id} from ${agent}. ${agent} is being rebuilt without it.`);
       } else {
         if (!target) throw new Error('there is no newer approved version');
-        await factoryApi.requestAdoption(agent, skill.id, target, text);
+        await factoryApi.requestAdoption(agent, skill.id, target, text, redeploy);
         try {
-          await factoryApi.approveAdoption(agent, skill.id, text);
+          const approved = await factoryApi.approveAdoption(agent, skill.id, text, redeploy);
+          onDone(`Moved ${agent} from ${skill.id}@${adopter.version} to ${what}. ${adoptionApplyText(agent, applyOf(approved))}`);
         } catch (err) {
           onDone(`Asked for ${what} for ${agent}, but approving it failed (${apiText(err)}). The request is waiting in the list.`);
           return;
         }
-        onDone(`Moved ${agent} from ${skill.id}@${adopter.version} to ${what}. It is being rebuilt with it.`);
       }
     } catch (err) {
       const body = err instanceof ApiError ? err.body : null;
@@ -457,7 +473,7 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
       {kind === 'approve' && (
         <>
           <p>
-            This adds <strong className="font-mono">{what}</strong> to {agent}’s configuration as a new version, and {agent} is rebuilt with it. Approving does not grant access: {agent}’s policy still decides which routes the skill may use.
+            This adds <strong className="font-mono">{what}</strong> to {agent}’s configuration as a new version. Approving does not grant access: {agent}’s policy still decides which routes the skill may use.
           </p>
           <Requirements requires={skill.requires} />
         </>
@@ -471,9 +487,10 @@ export const AdoptionDialog: React.FC<{ action: AdoptionAction; onClose: () => v
       )}
       {kind === 'upgrade' && (
         <p>
-          {agent} moves from <span className="font-mono">{adopter.version}</span> to <span className="font-mono">{skill.latestApproved}</span>. This asks for the new version and approves it in one step, and {agent} is rebuilt with it.
+          {agent} moves from <span className="font-mono">{adopter.version}</span> to <span className="font-mono">{skill.latestApproved}</span>. This asks for the new version and approves it in one step.
         </p>
       )}
+      {choosesRedeploy && <RedeployChoice checked={redeploy} onChange={setRedeploy} disabled={busy} when={kind === 'upgrade' ? 'upgrade' : 'approve'} />}
       <label className="block space-y-1">
         <span className={label}>Reason (optional)</span>
         <textarea className={`${input} h-16`} value={reason} maxLength={2000} onChange={(e) => setReason(e.target.value)} placeholder="Recorded in the ledger" />
