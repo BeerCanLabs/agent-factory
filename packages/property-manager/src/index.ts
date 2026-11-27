@@ -18,7 +18,7 @@ export type { Run, RunState, RunStore } from './runs.js';
 export { pollQueueOnce, startQueuePollers } from './queues.js';
 export type { AwsCli, CreateRun, QueueAgent } from './queues.js';
 export {
-  SYSTEM, activeRun, applyKillSwitch, blockRun, checkHealth, createRun, deliverToMailbox, finishRun, haltUnhealthy, reconcileRuns, resetAgent,
-  routeEvents, scheduleTimeout, markRunReady, unblockRun,
+  SYSTEM, activeRun, applyKillSwitch, blockRun, bumpSecretGeneration, checkHealth, createRun, deliverToMailbox, finishRun, haltUnhealthy, reconcileRuns, resetAgent,
+  routeEvents, scheduleTimeout, markRunReady, secretGeneration, unblockRun,
 } from './lifecycle.js';
-export type { CreateRunOptions, PropertyManagerPolicies, PropertyManagerState, MailboxMessage, MailboxQueue, Outcome } from './lifecycle.js';
+export type { CreateRunOptions, PropertyManagerPolicies, PropertyManagerState, SecretGenerationState, MailboxMessage, MailboxQueue, Outcome } from './lifecycle.js';
