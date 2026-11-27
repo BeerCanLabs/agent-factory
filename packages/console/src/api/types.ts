@@ -54,6 +54,8 @@ export interface AgentRecord {
   mindPrefix?: string;
   /** SK4: the skills the deployed image contains, as the approved versions it was built from. Absent: none. */
   deployedSkills?: Array<{ id: string; version: string }>;
+  /** Set when the agent runs on the pinned shared runtime and has no cartridge release of its own. */
+  createdFrom?: 'configuration';
   installedVersion?: string;
   updateAvailable?: boolean;
   offeredVersion?: string;

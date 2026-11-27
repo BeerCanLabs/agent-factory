@@ -21,6 +21,7 @@ import {
 import type { AgentPolicy, AgentRecord, AgentState, OfferedModel } from '../api/types.js';
 import { usePermissions } from '../auth/usePermissions.js';
 import { factoryApi } from '../api/client.js';
+import { isConfigurationHostedAgent } from '../components/cartridge-updates.js';
 import {
   budgetFormFromPolicy,
   applyBudgetFormToPolicy,
@@ -518,28 +519,39 @@ export const FleetView: React.FC<FleetViewProps> = ({
                     </div>
                     <div className="flex items-center space-x-2">
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">{agent.id}</p>
-                      <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800/60 px-1.5 py-0.2 rounded border border-slate-200 dark:border-slate-800">
-                        v{agent.installedVersion || '0.1.0'}
-                      </span>
-                      {agent.updateAvailable && (
-                        <button
-                          onClick={() => onOpenUpdateModal?.(agent)}
-                          title={`Update available: v${agent.offeredVersion}. Click to review & install.`}
-                          className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800/80 hover:bg-emerald-200 dark:hover:bg-emerald-900 flex items-center space-x-1 animate-pulse"
+                      {isConfigurationHostedAgent(agent) ? (
+                        <span
+                          className="text-[10px] font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800/60 px-1.5 py-0.2 rounded border border-slate-200 dark:border-slate-800"
+                          title="Runs the pinned shared runtime. Cartridge releases are not this agent's version."
                         >
-                          <ArrowUpCircle className="w-3 h-3" />
-                          <span>v{agent.offeredVersion} available</span>
-                        </button>
-                      )}
-                      {onCheckUpdate && (
-                        <button
-                          onClick={() => handleCheckUpdate(agent.id)}
-                          disabled={checkingUpdateId === agent.id}
-                          title="Check for update on GitHub"
-                          className="p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded transition"
-                        >
-                          <RefreshCw className={`w-2.5 h-2.5 ${checkingUpdateId === agent.id ? 'animate-spin text-emerald-500' : ''}`} />
-                        </button>
+                          shared runtime
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800/60 px-1.5 py-0.2 rounded border border-slate-200 dark:border-slate-800">
+                            v{agent.installedVersion || '0.1.0'}
+                          </span>
+                          {agent.updateAvailable && (
+                            <button
+                              onClick={() => onOpenUpdateModal?.(agent)}
+                              title={`Update available: v${agent.offeredVersion}. Click to review & install.`}
+                              className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800/80 hover:bg-emerald-200 dark:hover:bg-emerald-900 flex items-center space-x-1 animate-pulse"
+                            >
+                              <ArrowUpCircle className="w-3 h-3" />
+                              <span>v{agent.offeredVersion} available</span>
+                            </button>
+                          )}
+                          {onCheckUpdate && (
+                            <button
+                              onClick={() => handleCheckUpdate(agent.id)}
+                              disabled={checkingUpdateId === agent.id}
+                              title="Check for update on GitHub"
+                              className="p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded transition"
+                            >
+                              <RefreshCw className={`w-2.5 h-2.5 ${checkingUpdateId === agent.id ? 'animate-spin text-emerald-500' : ''}`} />
+                            </button>
+                          )}
+                        </>
                       )}
                       {outstandingCredentials && agent.id in outstandingCredentials && (
                         <button
@@ -621,7 +633,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
                         </span>
                       )}
 
-                      {agent.updateAvailable && (
+                      {!isConfigurationHostedAgent(agent) && agent.updateAvailable && (
                         <button
                           onClick={() => onOpenUpdateModal?.(agent)}
                           disabled={!permissions.canInstallUpdates}
