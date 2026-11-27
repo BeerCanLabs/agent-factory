@@ -1,6 +1,7 @@
 // DESIGN_AUTHORITY.md §6.3.2 (S1), §6.7 (enforcement), and cross-package contracts that have drifted before.
 import { describe, it } from 'node:test';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { baseline, expectOnlyBaselined, files, read, registeredGaps, repoRoot } from './support.js';
@@ -88,5 +89,17 @@ describe('K1 no hard-coded credentials (GAP-045)', () => {
   it('the platform repo contains no credential values (scripts/secret-scan.sh)', () => {
     const r = spawnSync('bash', [join(repoRoot, 'scripts/secret-scan.sh'), repoRoot], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stdout + r.stderr);
+  });
+});
+
+describe('repository license (#569)', () => {
+  // sha256 of https://www.apache.org/licenses/LICENSE-2.0.txt. Keep LICENSE verbatim so GitHub's license detection
+  // (licensee) reports Apache-2.0 for the repository.
+  const APACHE_2_0_SHA256 = 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30';
+
+  it('the root LICENSE is the unmodified Apache License 2.0 that package.json declares', () => {
+    assert.equal((JSON.parse(read('package.json')) as { license?: string }).license, 'Apache-2.0');
+    const text = read('LICENSE').replace(/\r\n/g, '\n');
+    assert.equal(createHash('sha256').update(text).digest('hex'), APACHE_2_0_SHA256, 'LICENSE is not the verbatim Apache-2.0 text');
   });
 });
