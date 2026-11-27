@@ -28,6 +28,10 @@ const USAGE = `factory ${version}
   factory config set <key> <value>  keys: address, auth (auto|cloudflare-access|oidc), theme, manager
   factory skill pack <dir>        package a skill directory into a conforming .tar.gz
   factory skill register <dir|package.tar.gz>  pack and register a skill package with the factory
+  factory skill adopt <agent> <skill> <version> [--redeploy true|false] [--reason <text>]
+                               ask to adopt a skill (redeploy on approval defaults to true; --no-redeploy opts out)
+  factory skill approve <agent> <skill> [--redeploy true|false] [--reason <text>]
+                               approve a pending adoption and, by default, redeploy the agent
   factory --manager <id>          use a manager agent with another id for this run
   factory <command> --as user:<id>  (admins) run one command on behalf of a person; ledgered
   factory grants|grant|revoke-grant|principals   people and role grants
@@ -78,6 +82,38 @@ export type MainOptions = {
   store?: CredentialStore;
   streams?: MainStreams;
 };
+
+/**
+ * #519: flags for `factory skill adopt` and `factory skill approve`.
+ * `--redeploy true|false` (or `--redeploy=true|false`); `--no-redeploy` opts out. The default is to redeploy.
+ */
+export function parseSkillAdoptionArgs(argv: string[]): { positional: string[]; redeploy: boolean; reason?: string } | { error: string } {
+  const positional: string[] = [];
+  let redeploy = true;
+  let reason: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--no-redeploy') {
+      redeploy = false;
+      continue;
+    }
+    if (a === '--redeploy' || a.startsWith('--redeploy=')) {
+      const v = a === '--redeploy' ? argv[++i] : a.slice('--redeploy='.length);
+      if (v !== 'true' && v !== 'false') return { error: '--redeploy must be true or false' };
+      redeploy = v === 'true';
+      continue;
+    }
+    if (a === '--reason') {
+      const v = argv[++i];
+      if (!v || v.startsWith('--')) return { error: 'usage: --reason <text>' };
+      reason = v;
+      continue;
+    }
+    if (a.startsWith('-')) return { error: `unknown flag ${a}` };
+    positional.push(a);
+  }
+  return { positional, redeploy, ...(reason ? { reason } : {}) };
+}
 
 /** Writes, and returns once the data has been handed on. A pipe takes it in pieces; exiting before then cuts the output off. */
 const writeAll = (stream: { write: (text: string, cb?: () => void) => boolean | void }, text: string): Promise<void> =>
@@ -383,7 +419,52 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         return 1;
       }
     }
-    throw new Error('usage: factory skill pack <dir> | factory skill register <dir|package.tar.gz>');
+    if (sub === 'adopt' || sub === 'approve') {
+      const parsed = parseSkillAdoptionArgs(argv.slice(2));
+      if ('error' in parsed) {
+        streams.stderr.write(`${parsed.error}\n`);
+        return 1;
+      }
+      const usage = sub === 'adopt'
+        ? 'usage: factory skill adopt <agent> <skill> <version> [--redeploy true|false] [--no-redeploy] [--reason <text>]'
+        : 'usage: factory skill approve <agent> <skill> [--redeploy true|false] [--no-redeploy] [--reason <text>]';
+      if (sub === 'adopt' && parsed.positional.length !== 3) {
+        streams.stderr.write(`${usage}\n`);
+        return 1;
+      }
+      if (sub === 'approve' && parsed.positional.length !== 2) {
+        streams.stderr.write(`${usage}\n`);
+        return 1;
+      }
+      const instance = await instanceInUse();
+      const kind = await knownMethod(instance, (await loadConfig()).auth, store);
+      if (!kind) throw new Error(`not signed in to ${instance}. Run: factory login ${instance}`);
+      const session = makeSession(kind, instance, { store });
+      const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
+      const [agentId, skillId, version] = parsed.positional;
+      const body = { redeploy: parsed.redeploy, ...(parsed.reason ? { reason: parsed.reason } : {}), ...(sub === 'adopt' ? { skillId, version } : {}) };
+      const path = sub === 'adopt'
+        ? `/api/v1/agents/${encodeURIComponent(agentId)}/skills`
+        : `/api/v1/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/adoption/approve`;
+      const r = await client.request('POST', path, body);
+      const b = r.body as { error?: string; message?: string; version?: string; configVersion?: number; apply?: { status?: string; reason?: string }; state?: string };
+      if (r.status >= 300) {
+        streams.stderr.write(`${sub === 'adopt' ? 'Adoption request' : 'Approval'} failed (HTTP ${r.status}): ${b?.message ?? b?.error ?? JSON.stringify(b)}\n`);
+        return 1;
+      }
+      const choice = parsed.redeploy ? 'yes' : 'no';
+      if (sub === 'adopt') {
+        await writeAll(streams.stdout, `Requested ${skillId}@${version} for ${agentId} (redeploy on approval: ${choice}) (HTTP ${r.status})\n`);
+        return 0;
+      }
+      const apply = b?.apply;
+      const applyText = apply?.status === 'skipped' && apply.reason
+        ? `skipped (${apply.reason})`
+        : (apply?.status ?? 'unknown');
+      await writeAll(streams.stdout, `Approved ${skillId}@${b?.version ?? '?'} for ${agentId} (configuration v${b?.configVersion ?? '?'}; redeploy: ${choice}). Apply: ${applyText}. (HTTP ${r.status})\n`);
+      return 0;
+    }
+    throw new Error('usage: factory skill pack <dir> | factory skill register <dir|package.tar.gz> | factory skill adopt <agent> <skill> <version> | factory skill approve <agent> <skill>');
   }
 
   if (cmd && isCommand(cmd)) return await runOneCommand(argv, store, actAs, streams);

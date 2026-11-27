@@ -151,8 +151,41 @@ export const rebuildText = (r: Rebuild): string | undefined =>
   r.kind === 'rebuilding'
     ? 'Rebuilding: the factory is building and deploying this agent with its new skills. Nothing needs doing.'
     : r.kind === 'waiting'
-      ? `Waiting to be applied: the configuration ${[r.missing.length ? `adds ${r.missing.join(', ')}` : '', r.extra.length ? `removes ${r.extra.join(', ')}` : ''].filter(Boolean).join(' and ')}, and the running image does not have the change yet. It is applied automatically; if it stays like this, ask an admin to redeploy the agent.`
+      ? `Waiting to be applied: the configuration ${[r.missing.length ? `adds ${r.missing.join(', ')}` : '', r.extra.length ? `removes ${r.extra.join(', ')}` : ''].filter(Boolean).join(' and ')}, and the running image does not have the change yet. Redeploy the agent to apply it.`
       : undefined;
+
+/** The apply block on an adoption approval (#519). */
+export type AdoptionApplyReport = { status?: string; reason?: string };
+
+/** Reads `apply` off an adoption approval body. */
+export function applyOf(body: Record<string, unknown> | null | undefined): AdoptionApplyReport | undefined {
+  const apply = body?.apply;
+  if (!apply || typeof apply !== 'object') return undefined;
+  const status = (apply as { status?: unknown }).status;
+  const reason = (apply as { reason?: unknown }).reason;
+  return { ...(typeof status === 'string' ? { status } : {}), ...(typeof reason === 'string' ? { reason } : {}) };
+}
+
+/** What to tell the owner after an adoption is approved, from the apply status the factory returned (#519). */
+export function adoptionApplyText(agent: string, apply: AdoptionApplyReport | undefined): string {
+  const reason = apply?.reason;
+  switch (apply?.status) {
+    case 'started':
+      return `${agent} is being rebuilt with the new configuration.`;
+    case 'pending':
+      return `A deploy of ${agent} is already running; this change is queued and will be applied when that deploy finishes.`;
+    case 'unchanged':
+      return `${agent}’s running image already matches the new configuration.`;
+    case 'failed':
+      return `The configuration was saved, but the rebuild did not start${reason ? ` (${reason})` : ''}. Redeploy ${agent} to try again.`;
+    case 'skipped':
+      return reason === 'redeploy_declined'
+        ? `The configuration was saved. ${agent}’s running image was left as it is until a later redeploy.`
+        : `The configuration was saved, but the rebuild was skipped${reason ? ` (${reason})` : ''}. Redeploy ${agent} to apply it.`;
+    default:
+      return `The configuration was saved.`;
+  }
+}
 
 // ---- Choosing a version ---------------------------------------------------------------------------------------
 

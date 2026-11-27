@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentSkills } from '../../api/types.js';
-import { actorOf, agentSkillRows, choosableVersions, compareVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText } from './agent-skills-model.js';
+import { actorOf, adoptionApplyText, agentSkillRows, applyOf, choosableVersions, compareVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText } from './agent-skills-model.js';
 
 const ADMIN = permsFor({ isAdmin: true, isOwner: false });
 const OWNER = permsFor({ isAdmin: false, isOwner: true });
@@ -171,13 +171,28 @@ describe('whether the agent is being rebuilt', () => {
   it('says a change is waiting when the image and the configuration differ and no deploy is running, naming what differs', () => {
     const w = rebuildState({ state: 'SLEEPING', deployedSkills: [{ id: 'old', version: '1.0.0' }, { id: 'print', version: '0.1.0' }] }, adopted);
     assert.deepEqual(w, { kind: 'waiting', missing: ['print@0.1.1'], extra: ['old@1.0.0', 'print@0.1.0'] });
-    assert.equal(rebuildText(w), 'Waiting to be applied: the configuration adds print@0.1.1 and removes old@1.0.0, print@0.1.0, and the running image does not have the change yet. It is applied automatically; if it stays like this, ask an admin to redeploy the agent.');
+    assert.equal(rebuildText(w), 'Waiting to be applied: the configuration adds print@0.1.1 and removes old@1.0.0, print@0.1.0, and the running image does not have the change yet. Redeploy the agent to apply it.');
     assert.equal(rebuildState({ state: 'SLEEPING' }, adopted).kind, 'waiting', 'an image with no recorded skills is not the one with print in it');
   });
 
   it('never says waiting for a built-in agent, which has no composed image, but still says rebuilding', () => {
     assert.deepEqual(rebuildState({ state: 'SLEEPING', isBuiltin: true }, adopted), { kind: 'none' });
     assert.deepEqual(rebuildState({ state: 'DEPLOYING', isBuiltin: true }, adopted), { kind: 'rebuilding' });
+  });
+});
+
+describe('what an adoption approval says about redeploy (#519)', () => {
+  it('names started, pending, unchanged, failed, and a skip, including an opt-out', () => {
+    assert.match(adoptionApplyText('flow', { status: 'started' }), /flow is being rebuilt/);
+    assert.match(adoptionApplyText('flow', { status: 'pending' }), /already running/);
+    assert.match(adoptionApplyText('flow', { status: 'unchanged' }), /already matches/);
+    assert.match(adoptionApplyText('flow', { status: 'failed', reason: 'skill_unavailable' }), /skill_unavailable/);
+    assert.match(adoptionApplyText('flow', { status: 'skipped', reason: 'redeploy_declined' }), /left as it is until a later redeploy/);
+    assert.match(adoptionApplyText('flow', { status: 'skipped', reason: 'not_deployed' }), /not_deployed/);
+    assert.match(adoptionApplyText('flow', undefined), /configuration was saved/);
+    assert.deepEqual(applyOf({ apply: { status: 'started' } }), { status: 'started' });
+    assert.deepEqual(applyOf({ apply: { status: 'skipped', reason: 'redeploy_declined' } }), { status: 'skipped', reason: 'redeploy_declined' });
+    assert.equal(applyOf({}), undefined);
   });
 });
 

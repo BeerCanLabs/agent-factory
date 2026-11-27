@@ -484,6 +484,42 @@ describe('applying an agent’s configuration: a skills change rebuilds and rede
       assert.equal(actions('AGENT_CONFIG_APPLIED', 'hugh').length, 0, 'and it is not reported as applied');
     });
 
+    it('adoption approval redeploys by default, and an opt-out leaves the running image (#519)', async () => {
+      await deployedAgent('redeploy-on');
+      builds.length = 0;
+      assert.equal((await call('/api/v1/agents/redeploy-on/skills', 'POST', OWNER, { skillId: 'tavily-search', version: '0.1.0' })).status, 201);
+      const approved = await call('/api/v1/agents/redeploy-on/skills/tavily-search/adoption/approve', 'POST', ADMIN, {});
+      assert.equal(approved.status, 200, JSON.stringify(approved.body));
+      assert.equal(approved.body.redeploy, true);
+      assert.equal(approved.body.apply.status, 'started');
+      await settled('redeploy-on', () => deployed('redeploy-on').includes('tavily-search@0.1.0'));
+      assert.deepEqual(configured('redeploy-on'), ['tavily-search@0.1.0']);
+      assert.deepEqual(deployed('redeploy-on'), configured('redeploy-on'));
+      assert.equal(agent('redeploy-on').state, 'SLEEPING');
+
+      await deployedAgent('redeploy-off');
+      const before = builds.length;
+      assert.equal((await call('/api/v1/agents/redeploy-off/skills', 'POST', OWNER, { skillId: 'tavily-search', version: '0.1.0', redeploy: false })).status, 201);
+      const opted = await call('/api/v1/agents/redeploy-off/skills/tavily-search/adoption/approve', 'POST', ADMIN, {});
+      assert.equal(opted.status, 200, JSON.stringify(opted.body));
+      assert.equal(opted.body.redeploy, false);
+      assert.deepEqual(opted.body.apply, { status: 'skipped', reason: 'redeploy_declined' });
+      await sleep(40);
+      assert.equal(builds.length, before, 'opting out does not build');
+      assert.deepEqual(configured('redeploy-off'), ['tavily-search@0.1.0']);
+      assert.deepEqual(deployed('redeploy-off'), []);
+      assert.equal(agent('redeploy-off').state, 'SLEEPING');
+      assert.equal(actions('AGENT_CONFIG_APPLY_STARTED', 'redeploy-off').length, 0);
+
+      await deployedAgent('redeploy-force');
+      assert.equal((await call('/api/v1/agents/redeploy-force/skills', 'POST', OWNER, { skillId: 'tavily-search', version: '0.1.0', redeploy: false })).status, 201);
+      const forced = await call('/api/v1/agents/redeploy-force/skills/tavily-search/adoption/approve', 'POST', ADMIN, { redeploy: true });
+      assert.equal(forced.body.redeploy, true);
+      assert.equal(forced.body.apply.status, 'started');
+      await settled('redeploy-force', () => deployed('redeploy-force').includes('tavily-search@0.1.0'));
+      assert.deepEqual(deployed('redeploy-force'), configured('redeploy-force'));
+    });
+
     it('the deploy route keeps its behavior: a failure after the build leaves the agent in ERROR', async () => {
       await deployedAgent('iris');
       registerFails = true;
