@@ -23,8 +23,54 @@ export interface ModelReference {
   price?: ModelPricing;
 }
 
-/** Standard published pricing per million tokens for flagship models (used for 1-click admission). */
+/** Standard published pricing per million tokens for flagship models (used for 1-click admission).
+ *
+ * Current entries were checked on 2026-11-27 against each vendor's published list price (standard tier, short context):
+ * the AWS Pricing API (`AmazonBedrock`, `AmazonBedrockFoundationModels`, us-east-1), docs.anthropic.com, docs.x.ai and
+ * ai.google.dev. Bedrock `us.` (geo) inference profiles bill the regional rate, 10% above the global rate. Longer keys
+ * come before shorter ones in each family because `resolveModelReference` takes the first prefix match.
+ * The legacy entries further down predate this check and are kept for older vendor ids.
+ */
 export const REFERENCE_MODEL_PRICING: Record<string, { friendlyName: string; price: ModelPricing }> = {
+  // AWS Bedrock open-weight models (on-demand standard, us-east-1)
+  'deepseek.v3.2': { friendlyName: 'deepseek-v3.2', price: { inputPerMTok: 0.62, outputPerMTok: 1.85 } },
+  'minimax.minimax-m2.5': { friendlyName: 'minimax-m2.5', price: { inputPerMTok: 0.3, outputPerMTok: 1.2 } },
+  'moonshotai.kimi-k2.5': { friendlyName: 'kimi-k2.5', price: { inputPerMTok: 0.6, outputPerMTok: 3.0 } },
+  'zai.glm-5': { friendlyName: 'glm-5', price: { inputPerMTok: 1.0, outputPerMTok: 3.2 } },
+  'qwen.qwen3-coder-next': { friendlyName: 'qwen3-coder-next', price: { inputPerMTok: 0.5, outputPerMTok: 1.2 } },
+  'openai.gpt-oss-120b-1:0': { friendlyName: 'gpt-oss-120b', price: { inputPerMTok: 0.15, outputPerMTok: 0.6 } },
+  'openai.gpt-oss-20b-1:0': { friendlyName: 'gpt-oss-20b', price: { inputPerMTok: 0.07, outputPerMTok: 0.3 } },
+  // AWS Bedrock Claude through `us.` geo inference profiles (regional rate)
+  'us.anthropic.claude-opus-4-6-v1': { friendlyName: 'claude-opus-4-6', price: { inputPerMTok: 5.5, outputPerMTok: 27.5 } },
+  'us.anthropic.claude-sonnet-4-6': { friendlyName: 'claude-sonnet-4-6', price: { inputPerMTok: 3.3, outputPerMTok: 16.5 } },
+  'us.anthropic.claude-sonnet-4-5-20250929-v1:0': { friendlyName: 'claude-sonnet-4-5', price: { inputPerMTok: 3.3, outputPerMTok: 16.5 } },
+  'us.anthropic.claude-haiku-4-5-20251001-v1:0': { friendlyName: 'claude-haiku-4-5', price: { inputPerMTok: 1.1, outputPerMTok: 5.5 } },
+  // Anthropic API (Claude Haiku 5.5 is $0.50 / $2.50 for prompts over 100k tokens)
+  'claude-fable-5-2': { friendlyName: 'claude-fable-5-2', price: { inputPerMTok: 8.0, outputPerMTok: 40.0 } },
+  'claude-fable-5-1': { friendlyName: 'claude-fable-5-1', price: { inputPerMTok: 10.0, outputPerMTok: 50.0 } },
+  'claude-opus-5-5': { friendlyName: 'claude-opus-5-5', price: { inputPerMTok: 4.0, outputPerMTok: 20.0 } },
+  'claude-opus-5': { friendlyName: 'claude-opus-5', price: { inputPerMTok: 5.0, outputPerMTok: 25.0 } },
+  'claude-opus-4-6': { friendlyName: 'claude-opus-4-6', price: { inputPerMTok: 5.0, outputPerMTok: 25.0 } },
+  'claude-sonnet-5-5': { friendlyName: 'claude-sonnet-5-5', price: { inputPerMTok: 2.0, outputPerMTok: 10.0 } },
+  'claude-sonnet-5': { friendlyName: 'claude-sonnet-5', price: { inputPerMTok: 2.0, outputPerMTok: 10.0 } },
+  'claude-sonnet-4-6': { friendlyName: 'claude-sonnet-4-6', price: { inputPerMTok: 3.0, outputPerMTok: 15.0 } },
+  'claude-sonnet-4-5': { friendlyName: 'claude-sonnet-4-5', price: { inputPerMTok: 3.0, outputPerMTok: 15.0 } },
+  'claude-haiku-5-5': { friendlyName: 'claude-haiku-5-5', price: { inputPerMTok: 0.1, outputPerMTok: 0.5 } },
+  'claude-haiku-4-5': { friendlyName: 'claude-haiku-4-5', price: { inputPerMTok: 1.0, outputPerMTok: 5.0 } },
+  // xAI API (prompts under 200k tokens; 200k and over bill double)
+  'grok-4.7': { friendlyName: 'grok-4.7', price: { inputPerMTok: 2.0, outputPerMTok: 6.0 } },
+  'grok-4.20-multi-agent-0309': { friendlyName: 'grok-4.20-multi-agent-0309', price: { inputPerMTok: 1.25, outputPerMTok: 2.5 } },
+  'grok-4.20-0309-reasoning': { friendlyName: 'grok-4.20-0309-reasoning', price: { inputPerMTok: 1.25, outputPerMTok: 2.5 } },
+  'grok-4.20-0309-non-reasoning': { friendlyName: 'grok-4.20-0309-non-reasoning', price: { inputPerMTok: 1.25, outputPerMTok: 2.5 } },
+  'grok-build-0.1': { friendlyName: 'grok-build-0.1', price: { inputPerMTok: 1.0, outputPerMTok: 2.0 } },
+  // Google Gemini API (output includes thinking tokens)
+  // gemini-4-argon is $2 / $10 through 2026-11-30 and $4 / $20 from 2026-12-01; the later price is recorded.
+  'gemini-4-argon': { friendlyName: 'gemini-4-argon', price: { inputPerMTok: 4.0, outputPerMTok: 20.0 } },
+  // gemini-3.8-flash rises to $1.50 / $7.50 on 2027-01-01.
+  'gemini-3.8-flash': { friendlyName: 'gemini-3.8-flash', price: { inputPerMTok: 0.75, outputPerMTok: 3.75 } },
+  'gemini-3.1-pro-preview': { friendlyName: 'gemini-3.1-pro-preview', price: { inputPerMTok: 2.0, outputPerMTok: 12.0 } },
+  'gemini-2.5-pro': { friendlyName: 'gemini-2.5-pro', price: { inputPerMTok: 1.25, outputPerMTok: 10.0 } },
+  'gemini-2.5-flash': { friendlyName: 'gemini-2.5-flash', price: { inputPerMTok: 0.3, outputPerMTok: 2.5 } },
   // OpenAI
   'gpt-4o': { friendlyName: 'gpt-4o', price: { inputPerMTok: 2.5, outputPerMTok: 10.0 } },
   'gpt-4o-2024-08-06': { friendlyName: 'gpt-4o', price: { inputPerMTok: 2.5, outputPerMTok: 10.0 } },

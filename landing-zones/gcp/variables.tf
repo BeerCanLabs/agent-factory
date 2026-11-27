@@ -138,7 +138,7 @@ variable "ledger_retention_days" {
 variable "model_catalog" {
   description = "JSON model catalog (M1-M3) served by both the control plane and the Executive inside gatekeeper-egress (supports Vertex AI and API-key providers)."
   type        = string
-  default     = "{\"claude-sonnet-4-6\":{\"provider\":\"anthropic\",\"price\":{\"inputPerMTok\":3,\"outputPerMTok\":15}},\"claude-opus-4-6\":{\"provider\":\"anthropic\",\"price\":{\"inputPerMTok\":15,\"outputPerMTok\":75}},\"claude-haiku-4-5\":{\"provider\":\"anthropic\",\"price\":{\"inputPerMTok\":0.8,\"outputPerMTok\":4}},\"gemini-2.5-pro\":{\"provider\":\"vertex-gemini\",\"price\":{\"inputPerMTok\":1.25,\"outputPerMTok\":10}},\"gemini-2.5-flash\":{\"provider\":\"vertex-gemini\",\"price\":{\"inputPerMTok\":0.15,\"outputPerMTok\":0.6}},\"gpt-4o\":{\"provider\":\"openai\",\"price\":{\"inputPerMTok\":2.5,\"outputPerMTok\":10}},\"grok-3\":{\"provider\":\"xai\",\"price\":{\"inputPerMTok\":3,\"outputPerMTok\":15}}}"
+  default     = "{\"claude-sonnet-5-5\":{\"provider\":\"anthropic\",\"price\":{\"inputPerMTok\":2,\"outputPerMTok\":10}},\"claude-opus-5-5\":{\"provider\":\"anthropic\",\"price\":{\"inputPerMTok\":4,\"outputPerMTok\":20}},\"claude-haiku-5-5\":{\"provider\":\"anthropic\",\"price\":{\"inputPerMTok\":0.1,\"outputPerMTok\":0.5}},\"gemini-2.5-pro\":{\"provider\":\"vertex-gemini\",\"price\":{\"inputPerMTok\":1.25,\"outputPerMTok\":10}},\"gemini-2.5-flash\":{\"provider\":\"vertex-gemini\",\"price\":{\"inputPerMTok\":0.3,\"outputPerMTok\":2.5}},\"gpt-4o\":{\"provider\":\"openai\",\"price\":{\"inputPerMTok\":2.5,\"outputPerMTok\":10}},\"grok-4.7\":{\"provider\":\"xai\",\"price\":{\"inputPerMTok\":2,\"outputPerMTok\":6}}}"
 }
 
 variable "default_model" {

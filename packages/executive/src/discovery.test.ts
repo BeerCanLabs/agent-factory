@@ -21,6 +21,35 @@ describe('Executive Model Discovery & Reference Pricing', () => {
     assert.deepEqual(gemini.price, { inputPerMTok: 0.1, outputPerMTok: 0.4 });
   });
 
+  it('prices the Bedrock open-weight models at the us-east-1 on-demand list price (#557)', () => {
+    const expected: Record<string, [string, number, number]> = {
+      'deepseek.v3.2': ['deepseek-v3.2', 0.62, 1.85],
+      'minimax.minimax-m2.5': ['minimax-m2.5', 0.3, 1.2],
+      'moonshotai.kimi-k2.5': ['kimi-k2.5', 0.6, 3.0],
+      'zai.glm-5': ['glm-5', 1.0, 3.2],
+      'qwen.qwen3-coder-next': ['qwen3-coder-next', 0.5, 1.2],
+      'openai.gpt-oss-120b-1:0': ['gpt-oss-120b', 0.15, 0.6],
+    };
+    for (const [id, [friendlyName, inputPerMTok, outputPerMTok]] of Object.entries(expected)) {
+      assert.deepEqual(resolveModelReference(id), { friendlyName, price: { inputPerMTok, outputPerMTok } }, id);
+    }
+  });
+
+  it('prices Bedrock us. geo inference profiles at the regional rate and resolves the newest Claude ids first (#557)', () => {
+    assert.deepEqual(resolveModelReference('us.anthropic.claude-haiku-4-5-20251001-v1:0').price, { inputPerMTok: 1.1, outputPerMTok: 5.5 });
+    assert.deepEqual(resolveModelReference('us.anthropic.claude-opus-4-6-v1').price, { inputPerMTok: 5.5, outputPerMTok: 27.5 });
+    assert.deepEqual(resolveModelReference('claude-haiku-4-5-20251001').price, { inputPerMTok: 1.0, outputPerMTok: 5.0 });
+    assert.deepEqual(resolveModelReference('claude-opus-5-5').price, { inputPerMTok: 4.0, outputPerMTok: 20.0 });
+    assert.deepEqual(resolveModelReference('claude-opus-5').price, { inputPerMTok: 5.0, outputPerMTok: 25.0 });
+    assert.deepEqual(resolveModelReference('models/gemini-3.8-flash').price, { inputPerMTok: 0.75, outputPerMTok: 3.75 });
+  });
+
+  it('every reference price is a finite non-negative pair', () => {
+    for (const [id, ref] of Object.entries(REFERENCE_MODEL_PRICING)) {
+      for (const v of [ref.price.inputPerMTok, ref.price.outputPerMTok]) assert.ok(Number.isFinite(v) && v >= 0, id);
+    }
+  });
+
   it('handles custom uncataloged models gracefully with derived friendly name', () => {
     const custom = resolveModelReference('my-company-finetuned-llama3-20261017');
     assert.equal(custom.friendlyName, 'my-company-finetuned-llama3');

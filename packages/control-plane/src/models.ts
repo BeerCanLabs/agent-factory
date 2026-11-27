@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { formatModelDisplayLabel, type CatalogEntry } from '@beercanlabs/factory-executive';
+import { formatModelDisplayLabel, type CatalogEntry, type ServiceTier } from '@beercanlabs/factory-executive';
 
 /**
  * Dynamic Model Catalog & Persistence (§6.9 M1–M5, GAP-162, GAP-245).
@@ -16,6 +16,8 @@ export type ModelSeed = {
   region?: string;
   endpoint?: string;
   price?: { inputPerMTok: number; outputPerMTok: number };
+  /** Bedrock Converse service tier (#557). */
+  serviceTier?: ServiceTier;
   credentialMode?: 'api-key' | 'subscription';
   scope?: 'factory' | 'personal';
   ownerPrincipalId?: string;
@@ -36,6 +38,8 @@ export interface StoredModel {
     inputPerMTok: number;
     outputPerMTok: number;
   };
+  /** Bedrock Converse service tier the gatekeeper-egress requests for this entry (#557); its `price` is that tier's. */
+  serviceTier?: ServiceTier;
   /** M5(1): `'api-key'` (platform credential) or `'subscription'` (served on one subscription connection). */
   credentialMode?: 'api-key' | 'subscription';
   /** M5(1), (4): subscription entry scope (`'factory'` or `'personal'`). */
@@ -152,6 +156,7 @@ export class ModelStore {
           ...(m.region ? { region: m.region } : {}),
           ...(m.endpoint ? { endpoint: m.endpoint } : {}),
           price: m.price,
+          ...(m.serviceTier ? { serviceTier: m.serviceTier } : {}),
           credentialMode: isSub ? 'subscription' : 'api-key',
           ...(isSub ? { scope: m.scope ?? 'factory' } : {}),
           ...(isSub && m.scope === 'personal' && m.ownerPrincipalId ? { ownerPrincipalId: m.ownerPrincipalId } : {}),
@@ -179,8 +184,10 @@ export class ModelStore {
       const next: StoredModel = { ...m, id: s.id ?? name };
       delete next.region;
       delete next.endpoint;
+      delete next.serviceTier;
       if (s.region) next.region = s.region;
       if (s.endpoint) next.endpoint = s.endpoint;
+      if (s.serviceTier) next.serviceTier = s.serviceTier;
       if (JSON.stringify(next) !== JSON.stringify(m)) {
         this.models.set(name, next);
         changed = true;
@@ -284,6 +291,7 @@ export class ModelStore {
     vendorId?: string;
     region?: string;
     price?: { inputPerMTok: number; outputPerMTok: number };
+    serviceTier?: ServiceTier;
     actor?: string;
   }): StoredModel {
     let targetName = params.name;
@@ -310,6 +318,7 @@ export class ModelStore {
       vendorId: params.vendorId,
       region: params.region,
       price: params.price,
+      ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
       credentialMode: 'api-key',
       admittedAt: now,
       admittedBy: params.actor ?? 'admin',
@@ -449,6 +458,7 @@ export class ModelStore {
         ...(m.secret ? { secret: m.secret } : {}),
         ...(m.region ? { region: m.region } : {}),
         ...(m.price ? { price: m.price } : {}),
+        ...(m.serviceTier ? { serviceTier: m.serviceTier } : {}),
         ...(isSub
           ? {
               credentialMode: 'subscription',

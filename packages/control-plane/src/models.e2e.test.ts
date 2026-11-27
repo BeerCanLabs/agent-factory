@@ -414,6 +414,29 @@ describe('admitted models take provider, endpoint and credential from their vend
     });
   });
 
+  it('a Bedrock model admitted with a Flex service tier reaches the egress catalog with that tier and its own price (#557)', async () => {
+    const res = await call(port, '/api/v1/models/admit', 'POST', ADMIN, {
+      name: 'deepseek-v3.2-flex', id: 'deepseek.v3.2', provider: 'bedrock-converse', region: 'us-east-1', serviceTier: 'flex',
+      price: { inputPerMTok: 0.31, outputPerMTok: 0.925 },
+    });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.model.serviceTier, 'flex');
+    assert.deepEqual(state.modelStore!.toEgressCatalog()['deepseek-v3.2-flex'], {
+      provider: 'bedrock-converse', id: 'deepseek.v3.2', region: 'us-east-1', price: { inputPerMTok: 0.31, outputPerMTok: 0.925 }, serviceTier: 'flex',
+    });
+  });
+
+  it('a service tier is refused when it is unknown or the model is not on Bedrock (#557)', async () => {
+    const unknown = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'glm-5-cheap', id: 'zai.glm-5', provider: 'bedrock-converse', region: 'us-east-1', serviceTier: 'cheap' });
+    assert.equal(unknown.status, 400);
+    assert.equal(unknown.body.error, 'invalid_service_tier');
+    const notBedrock = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'gemini-flex', id: 'gemini-flex', vendorId: 'gemini', serviceTier: 'flex' });
+    assert.equal(notBedrock.status, 400);
+    assert.equal(notBedrock.body.error, 'invalid_service_tier');
+    assert.equal(state.modelStore!.getOffered('glm-5-cheap'), undefined);
+    assert.equal(state.modelStore!.getOffered('gemini-flex'), undefined);
+  });
+
   it('a built-in vendor model keeps the adapter default endpoint and carries the vendor credential', async () => {
     const res = await call(port, '/api/v1/models/admit', 'POST', ADMIN, { name: 'gemini-x', id: 'gemini-x', vendorId: 'gemini' });
     assert.equal(res.status, 201, JSON.stringify(res.body));
