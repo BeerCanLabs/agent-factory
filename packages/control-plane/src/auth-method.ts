@@ -1,4 +1,5 @@
 import type http from 'node:http';
+import type { KeyScopes } from '@beercanlabs/factory-auth';
 
 /**
  * Front-door Phase 0 (docs/design/front-door-auth.md §7): how a request authenticated, recorded from the credential the
@@ -6,7 +7,8 @@ import type http from 'node:http';
  * and every request can be logged by sign-in method. Carries no secret material.
  *
  * - `api-key`: a factory `fk_` key (person device key or `service:<name>` key; see `keyKind`)
- * - `oauth`: an `fk_at_` access token minted by the factory's OAuth 2.1 authorization server (MCP connectors)
+ * - `oauth`: a legacy `fk_at_` access token minted by the factory's OAuth 2.1 authorization server
+ * - `access-jwt`: an RFC 9068 JWT access token from `/token` (front-door Phase 1 Slice 2). Role claims in the token are hints only.
  * - `google` | `meta` | `cloudflare` | `oidc`: the factory's own login session, labelled by the IdP used at `/login`
  * - `static-token`: the legacy `FACTORY_TOKEN` bearer
  * - `oidc-bearer`: an external OIDC JWT verified via `FACTORY_OIDC_ISSUER`
@@ -18,6 +20,7 @@ import type http from 'node:http';
 export type AuthMethod =
   | 'api-key'
   | 'oauth'
+  | 'access-jwt'
   | 'google'
   | 'meta'
   | 'cloudflare'
@@ -39,6 +42,22 @@ export const requestAuthMethod = new WeakMap<http.IncomingMessage, AuthMethod>()
  * in-process requests that carry no Authorization header, so this is how they inherit the original caller's method.
  */
 export const principalAuthMethod = new WeakMap<object, AuthMethod>();
+
+/**
+ * A verified factory JWT access token (Slice 2). `roles` / `grants_v` / `agents` from the token are not stored here:
+ * identify() loads the subject's live grants and must not trust those hints (D-5; the unified check is Slice 5).
+ * `sid` is the OAuth key-store anchor Slice 3's revocation set replaces.
+ */
+export type AccessJwtContext = {
+  sub: string;
+  clientId: string;
+  sid: string;
+  jti: string;
+  scope?: string;
+  scopes?: KeyScopes;
+};
+
+export const requestAccessJwt = new WeakMap<http.IncomingMessage, AccessJwtContext>();
 
 /** Per request: non-secret detail about the key used, for the request log. */
 export const requestKeyInfo = new WeakMap<http.IncomingMessage, { keyId: string; keyKind: KeyKind; oauthClientId?: string }>();

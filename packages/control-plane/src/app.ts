@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { handleAuthMigration } from './auth-migration.js';
-import { apiKeyFromAuthorization } from '@beercanlabs/factory-auth';
+import { apiKeyFromAuthorization, canonicalAccessResource, isFactoryAccessJwt, verifyAccessToken } from '@beercanlabs/factory-auth';
 import { BREAK_GLASS_OWNER, type ApiKeyStore, type ApiKeyRecord } from '@beercanlabs/factory-bouncer';
 import {
   bearerAuthMethod,
@@ -8,6 +8,7 @@ import {
   keyAuthMethod,
   keyKindOf,
   principalAuthMethod,
+  requestAccessJwt,
   requestAuthMethod,
   requestKeyInfo,
   requestLogActor,
@@ -145,8 +146,8 @@ import {
 } from './mcp.js';
 export { handleMcp, handleAgentMcp, redactMcpResponse, SUPPORTED_MCP_PROTOCOL_VERSIONS } from './mcp.js';
 import { handleChannelApprovals } from './channel-approvals.js';
-import { handleMcpOAuthRoutes, McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
-import { handleAsDiscoveryRoutes } from './as-discovery.js';
+import { handleMcpOAuthRoutes, mapOAuthScopeToKeyScopes, McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
+import { allowedIssuerOrigins, ensureAsKeys, handleAsDiscoveryRoutes } from './as-discovery.js';
 export { McpOAuthStore, getOAuthIssuer } from './mcp-oauth.js';
 import { CONDUCTOR_SKILL, DELIVERY_ID, DeliveryLog, GITHUB_EVENT, OPS_SKILL, conductorEventFor, conductorInput, opsEventFor } from './github-webhooks.js';
 import { handleSystems, type SystemsStore } from './systems.js';
@@ -1733,6 +1734,14 @@ export async function identify(
   // Front-door Phase 0: the method comes from the credential verified here (or inherited with the principal an MCP tool
   // call dispatches in-process), never from which headers are present.
   let method: AuthMethod | undefined = base ? (principalAuthMethod.get(base) ?? requestAuthMethod.get(req)) : undefined;
+  const accessJwt = requestAccessJwt.get(req);
+  if (!base && accessJwt) {
+    // D-5: the token's role and grant claims are hints. Live grants are loaded from the principal, and the token
+    // scope only narrows them (the same rule as an fk_ key). Slice 5 replaces this with the unified verifier.
+    const owner = await resolveVerifiedPrincipal(state, { actor: accessJwt.sub, roles: [], emailVerified: true }, false);
+    base = { ...owner, keyId: accessJwt.sid, ...(accessJwt.scopes ? { keyScopes: structuredClone(accessJwt.scopes) } : {}) };
+    method = 'access-jwt';
+  }
   const key = requestApiKey.get(req);
   if (!base && key) {
     // S5: the key was verified before routing. Its owner's live grants decide; its scopes only narrow them.
@@ -3543,7 +3552,7 @@ export async function dispatchControlPlaneHttp(state: FactoryState, req: http.In
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
-  if (!verifyApiKeyBeforeRouting(state, req, res)) return;
+  if (!(await verifyApiKeyBeforeRouting(state, req, res))) return;
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
   wireSubscriptionRuntime(state);
@@ -3559,16 +3568,21 @@ async function route(state: FactoryState, req: http.IncomingMessage, res: http.S
 export const requestApiKey = new WeakMap<http.IncomingMessage, ApiKeyRecord>();
 
 /**
- * S5 / D23: an `fk_` key on /api/v1 or /mcp is checked before anything else, including body reads. An unknown, revoked
- * or expired key gets 401 here; a valid one is remembered for identify(). Requests without an fk_ key pass through.
+ * S5 / D23, front-door Slice 2: an `fk_` / `fk_at_` key, or a factory access JWT, on /api/v1 or /mcp is checked before
+ * anything else, including body reads. An unknown, revoked or expired credential gets 401 here; a valid one is
+ * remembered for identify(). Other bearers (static token, external OIDC, run token) pass through.
  */
-export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): boolean {
+export async function verifyApiKeyBeforeRouting(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
   const path = (req.url ?? '/').split('?')[0];
   const isMcp = path === '/mcp' || (path.startsWith('/mcp/') && !path.startsWith('/mcp/run'));
   // S16: health and metrics take a machine key too, so probes can present one.
   if (!(isMcp || path.startsWith('/api/v1/') || path === '/healthz' || path === '/' || path === '/metrics')) return true;
   const plaintext = apiKeyFromAuthorization(req.headers.authorization);
-  if (plaintext === undefined) return true;
+  if (plaintext === undefined) {
+    const bearer = bearerCredential(req.headers.authorization);
+    if (bearer && isFactoryAccessJwt(bearer)) return acceptFactoryAccessJwt(state, req, res, bearer, isMcp);
+    return true;
+  }
   const rec = plaintext && state.keys ? state.keys.verify(plaintext) : undefined;
   if (!rec) {
     if (isMcp) {
@@ -3607,6 +3621,75 @@ export function verifyApiKeyBeforeRouting(state: FactoryState, req: http.Incomin
     });
     void state.keys!.markUsed(rec.id).catch(() => undefined);
   }
+  return true;
+}
+
+function bearerCredential(authorization: string | undefined): string | undefined {
+  if (!authorization) return undefined;
+  const m = /^Bearer\s+(\S+)\s*$/.exec(authorization);
+  return m?.[1];
+}
+
+/**
+ * Accept one factory access JWT (RFC 9068) for this route's audience. Signature, issuer, expiry and `typ` are checked
+ * against the Slice 1 key set. The `sid` claim must still name an active OAuth key anchor, which is how consent
+ * revocation and refresh-token reuse keep killing the token until Slice 3's revocation set exists. Role claims are
+ * not copied onto the principal.
+ */
+async function acceptFactoryAccessJwt(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  bearer: string,
+  isMcp: boolean,
+): Promise<boolean> {
+  const issuer = getOAuthIssuer(state, req);
+  const fail = (error: 'invalid_token' | 'invalid_token_audience', message: string): false => {
+    if (isMcp) {
+      res.setHeader('www-authenticate', `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource/mcp"`);
+    }
+    json(res, 401, { error, message });
+    return false;
+  };
+  const configured = allowedIssuerOrigins(state);
+  const verdict = await verifyAccessToken(bearer, {
+    keys: await ensureAsKeys(state),
+    issuers: configured.length > 0 ? configured : [issuer],
+    audience: canonicalAccessResource(issuer, isMcp ? 'mcp' : 'api'),
+  });
+  if (!verdict.ok) {
+    if (verdict.reason === 'audience') {
+      return fail(
+        'invalid_token_audience',
+        isMcp ? 'Token audience does not match this resource' : 'Token audience does not permit direct API access',
+      );
+    }
+    return fail('invalid_token', 'Access token is invalid or expired');
+  }
+  const token = verdict.token;
+  const anchor = state.keys?.healthy ? state.keys.get(token.sid) : undefined;
+  const now = Date.now();
+  if (
+    !anchor ||
+    anchor.revokedAt ||
+    (anchor.expiresAt !== null && !(Date.parse(anchor.expiresAt) > now)) ||
+    anchor.owner !== token.sub ||
+    anchor.oauthClientId !== token.clientId
+  ) {
+    return fail('invalid_token', 'Access token is invalid or expired');
+  }
+  if (state.principals?.healthy && token.sub.startsWith('user:') && !state.principals.get(token.sub)) {
+    return fail('invalid_token', 'Access token is invalid or expired');
+  }
+  requestAccessJwt.set(req, {
+    sub: token.sub,
+    clientId: token.clientId,
+    sid: token.sid,
+    jti: token.jti,
+    ...(token.scope ? { scope: token.scope } : {}),
+    scopes: mapOAuthScopeToKeyScopes(token.scope),
+  });
+  requestKeyInfo.set(req, { keyId: token.sid, keyKind: 'oauth', oauthClientId: token.clientId });
   return true;
 }
 

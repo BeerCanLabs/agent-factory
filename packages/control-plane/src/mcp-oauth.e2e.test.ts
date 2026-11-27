@@ -97,6 +97,11 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
 
   const sessionCookieOf = (r: Response) => (r.headers.get('set-cookie') ?? '').split(';')[0];
 
+  function accessJwtHeader(token: string): { typ?: string; alg?: string; kid?: string } {
+    const part = token.split('.')[0] ?? '';
+    return JSON.parse(Buffer.from(part, 'base64url').toString()) as { typ?: string; alg?: string; kid?: string };
+  }
+
   function extractConsentForm(html: string): { nonce: string; csrfToken: string } {
     const nonce = html.match(/name="consent_nonce"\s+value="([^"]+)"/)?.[1] ?? '';
     const csrfToken = html.match(/name="csrf_token"\s+value="([^"]+)"/)?.[1] ?? '';
@@ -394,7 +399,7 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     assert.equal(mismatchBody.error, 'principal_mismatch');
   });
 
-  it('5. Full PKCE S256 flow (/login -> /authorize consent -> 302 with code, state, and RFC 9207 iss -> POST /token -> fk_at_ + fk_rt_)', async () => {
+  it('5. Full PKCE S256 flow (/login -> /authorize consent -> 302 with code, state, and RFC 9207 iss -> POST /token -> JWT access token + fk_rt_)', async () => {
     // Register client
     const reg = (await (await postJson('/api/v1/auth/register', {
       client_name: 'Full Flow Client',
@@ -452,10 +457,11 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     });
     assert.equal(tokenRes.status, 200);
     const tokens = (await tokenRes.json()) as any;
-    assert.ok(tokens.access_token.startsWith('fk_at_'), 'access_token must have fk_at_ prefix');
+    assert.equal(accessJwtHeader(tokens.access_token).typ, 'at+jwt');
+    assert.equal(accessJwtHeader(tokens.access_token).alg, 'ES256');
     assert.ok(tokens.refresh_token.startsWith('fk_rt_'), 'refresh_token must have fk_rt_ prefix');
     assert.equal(tokens.token_type, 'Bearer');
-    assert.equal(tokens.expires_in, 3600);
+    assert.equal(tokens.expires_in, 600);
   });
 
   it('6. Multi-client D14 test: connecting both Cursor (clientA) and Claude Desktop (clientB) for the same user issues two independent mcp:<client> keys that BOTH work simultaneously without clobbering each other', async () => {
@@ -692,7 +698,7 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     });
     assert.equal(rotDurRes.status, 200, 'Refresh token works after store reload');
     const nextTok = (await rotDurRes.json()) as any;
-    assert.ok(nextTok.access_token.startsWith('fk_at_'));
+    assert.equal(accessJwtHeader(nextTok.access_token).typ, 'at+jwt');
   });
 
   it('9. Revoking via DELETE /api/v1/oauth/consents/:clientId immediately invalidates fk_at_ on the very next POST /mcp call', async () => {
