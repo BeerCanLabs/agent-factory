@@ -51,19 +51,34 @@ const cache = new WeakMap<FactoryState, Map<string, Minted>>();
 const minting = new WeakMap<FactoryState, Map<string, Promise<MintResult>>>();
 /** #501: installation ids per agent, org and app id. Stable while the app stays installed; dropped on any refusal. */
 const installations = new WeakMap<FactoryState, Map<string, number>>();
+/**
+ * K3, GAP-269 (#504): one generation per agent for the minted-key cache above. Same rule as the property manager's
+ * secret generation (#503): a mint writes its key back only when this is still the generation it started with.
+ * It lives with that cache. It is not a second secret-cache counter and not another cache.
+ */
+const mintGenerations = new WeakMap<FactoryState, Map<string, number>>();
 /** #501: each GitHub call gets its own limit, so a stalled call ends instead of hanging the mint. */
 export const GITHUB_CALL_TIMEOUT_MS = 8_000;
 /** #501: how long the token route waits for a mint; under the gatekeeper-egress's 10 s call limit. */
 export const TOKEN_ROUTE_DEADLINE_MS = 8_000;
 
+function mintGeneration(state: FactoryState, agentId: string): number {
+  return mintGenerations.get(state)?.get(agentId) ?? 0;
+}
+
 /**
- * Jury #522 G3: forget an agent's cached keys (and installation ids), e.g. when one of its apps is created or replaced,
- * so a key minted from the old app is not served until it expires.
+ * K3, GAP-269 (#504): drop this agent's minted installation keys, installation ids and pending mints.
+ * A mint already in flight still returns its key to its own caller, and does not write that key (or its
+ * installation id) back. The next request mints from the app that is stored now.
  */
-export function forgetMintedKeys(state: FactoryState, agentId: string): void {
-  for (const m of [cache.get(state), installations.get(state)]) {
+export function invalidateGithubApp(state: FactoryState, agentId: string): void {
+  const gens = mintGenerations.get(state) ?? new Map<string, number>();
+  mintGenerations.set(state, gens);
+  gens.set(agentId, (gens.get(agentId) ?? 0) + 1);
+  const prefix = `${agentId}/`;
+  for (const m of [cache.get(state), installations.get(state), minting.get(state)]) {
     if (!m) continue;
-    for (const k of [...m.keys()]) if (k.startsWith(`${agentId}/`)) m.delete(k);
+    for (const k of [...m.keys()]) if (k.startsWith(prefix)) m.delete(k);
   }
 }
 
@@ -85,12 +100,18 @@ export async function mintInstallationToken(state: FactoryState, agentId: string
   const inFlight = mapOf(minting, state);
   const pending = inFlight.get(key);
   if (pending) return pending;
-  const p = mint(state, agentId, org, key).finally(() => inFlight.delete(key));
+  const p = mint(state, agentId, org, key).finally(() => {
+    // A replacement drops this entry and a newer mint may have taken it. Remove only this mint's own.
+    if (inFlight.get(key) === p) inFlight.delete(key);
+  });
   inFlight.set(key, p);
   return p;
 }
 
 async function mint(state: FactoryState, agentId: string, org: string, key: string): Promise<MintResult> {
+  // Captured before any await. A replacement during this mint bumps the generation and the write below is skipped.
+  const gen = mintGeneration(state, agentId);
+  const stillCurrent = () => mintGeneration(state, agentId) === gen;
   const t0 = Date.now();
   const phases: string[] = [];
   const lap = (name: string, since: number) => (phases.push(`${name} ${Date.now() - since} ms`), Date.now());
@@ -133,15 +154,19 @@ async function mint(state: FactoryState, agentId: string, org: string, key: stri
     const tok = await fetch(`${apiBase(state)}/app/installations/${id}/access_tokens`, { method: 'POST', headers, signal: AbortSignal.timeout(GITHUB_CALL_TIMEOUT_MS) });
     lap('token', t);
     if (tok.status !== 201) {
-      known.delete(instKey);
+      // A failed mint of the current app forgets a stale installation id. A mint of the app just replaced does not
+      // touch an id a newer mint may have stored under the same key.
+      if (stillCurrent()) known.delete(instKey);
       return done({ ok: false, status: 502, error: 'github_unavailable' });
     }
     const { token, expires_at } = (await tok.json()) as { token?: unknown; expires_at?: unknown };
     if (typeof token !== 'string' || typeof expires_at !== 'string') return done({ ok: false, status: 502, error: 'github_unavailable' });
-    known.set(instKey, id);
     state.secretValues.add(token);
     const minted = { token, expiresAt: expires_at };
-    mapOf(cache, state).set(key, minted);
+    if (stillCurrent()) {
+      known.set(instKey, id);
+      mapOf(cache, state).set(key, minted);
+    }
     return done({ ok: true, ...minted });
   } catch (err) {
     const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
@@ -152,6 +177,7 @@ async function mint(state: FactoryState, agentId: string, org: string, key: stri
 /**
  * #501: a mint bounded by the route deadline. A mint that outlasts it keeps running and caches its key, so the
  * caller's next request is served from the cache; this request gets a 504 the gatekeeper-egress logs.
+ * A replacement while it runs (#504) still lets this caller finish, and that key is not cached.
  */
 async function mintWithin(state: FactoryState, agentId: string, org: string, ms: number): Promise<MintResult> {
   let timer: NodeJS.Timeout | undefined;
