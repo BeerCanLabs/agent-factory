@@ -35,6 +35,7 @@ import {
   json,
   readJson,
   requirePrivilege,
+  unverifiedOidcEmailPrincipal,
   type FactoryState,
 } from './app.js';
 import { ownersOf } from './config-store.js';
@@ -139,25 +140,29 @@ export function getWhoami(
   }
 
   const targetActor = principal.onBehalfOf ?? principal.actor;
-  const grantRes = effectiveGrantsForActor(state, targetActor);
+  // #527: do not map an unverified oidc:<email> onto the principal-store user or that user's grants.
+  const unverifiedOidc = unverifiedOidcEmailPrincipal(principal);
+  const grantRes = unverifiedOidc
+    ? { ok: true as const, grants: state.grants ? ([] as EffectiveGrant[]) : undefined }
+    : effectiveGrantsForActor(state, targetActor);
   if (!grantRes.ok) {
     return { status: 503, body: { error: grantRes.error } };
   }
 
   let canonicalPrincipal = targetActor;
-  try {
-    canonicalPrincipal = normalizeActorToPrincipal(targetActor, state.principals);
-  } catch {
-    canonicalPrincipal = targetActor;
-  }
-
-  const extractedEmail = extractVerifiedEmailFromActor(targetActor);
-  const record: PrincipalRecord | undefined =
-    state.principals?.get(canonicalPrincipal) ??
-    (extractedEmail ? state.principals?.findByEmail(extractedEmail.email) : undefined);
-
-  if (record) {
-    canonicalPrincipal = record.id;
+  let extractedEmail: { idp: string; email: string } | undefined;
+  let record: PrincipalRecord | undefined;
+  if (!unverifiedOidc) {
+    try {
+      canonicalPrincipal = normalizeActorToPrincipal(targetActor, state.principals);
+    } catch {
+      canonicalPrincipal = targetActor;
+    }
+    extractedEmail = extractVerifiedEmailFromActor(targetActor);
+    record =
+      state.principals?.get(canonicalPrincipal) ??
+      (extractedEmail ? state.principals?.findByEmail(extractedEmail.email) : undefined);
+    if (record) canonicalPrincipal = record.id;
   }
 
   const emails = record
@@ -167,16 +172,18 @@ export function getWhoami(
       : [];
 
   const effectiveGrants = grantRes.grants ?? [];
-  const evalRoles = principal.onBehalfOf
-    ? rolesForSubjectActor(state, canonicalPrincipal, grantRes.grants)
-    : rolesForSubjectActor(state, canonicalPrincipal, grantRes.grants, principal.roles);
+  const evalRoles = unverifiedOidc
+    ? [...principal.roles]
+    : principal.onBehalfOf
+      ? rolesForSubjectActor(state, canonicalPrincipal, grantRes.grants)
+      : rolesForSubjectActor(state, canonicalPrincipal, grantRes.grants, principal.roles);
   const evalPrincipal: Principal = { actor: canonicalPrincipal, roles: evalRoles };
 
-  const ownsAny = checkOwnsAnyAgent(state, canonicalPrincipal);
-  const ownsPersonal = checkOwnsPersonalAgent(state, canonicalPrincipal);
-  const userGroupRoles = state.groups
-    ? state.groups.listUserGroups(canonicalPrincipal).flatMap((g) => g.roles)
-    : undefined;
+  const ownsAny = unverifiedOidc ? false : checkOwnsAnyAgent(state, canonicalPrincipal);
+  const ownsPersonal = unverifiedOidc ? false : checkOwnsPersonalAgent(state, canonicalPrincipal);
+  const userGroupRoles = unverifiedOidc || !state.groups
+    ? undefined
+    : state.groups.listUserGroups(canonicalPrincipal).flatMap((g) => g.roles);
 
   const fleetPrivileges: Privilege[] = [];
   for (const priv of PRIVILEGES) {
@@ -324,36 +331,47 @@ export function checkAuthz(
   const skillId = typeof query.skillId === 'string' && query.skillId.trim() ? query.skillId.trim() : undefined;
 
   const targetActor = principal.onBehalfOf ?? principal.actor;
-  const grantRes = effectiveGrantsForActor(state, targetActor);
+  const unverifiedOidc = unverifiedOidcEmailPrincipal(principal);
+  const grantRes = unverifiedOidc
+    ? { ok: true as const, grants: state.grants ? ([] as EffectiveGrant[]) : undefined }
+    : effectiveGrantsForActor(state, targetActor);
   if (!grantRes.ok) {
     return { status: 503, body: { error: grantRes.error } };
   }
 
   let canonicalActor = targetActor;
-  try {
-    canonicalActor = normalizeActorToPrincipal(targetActor, state.principals);
-  } catch {
-    canonicalActor = targetActor;
+  if (!unverifiedOidc) {
+    try {
+      canonicalActor = normalizeActorToPrincipal(targetActor, state.principals);
+    } catch {
+      canonicalActor = targetActor;
+    }
   }
 
-  const evalRoles = principal.onBehalfOf
-    ? rolesForSubjectActor(state, canonicalActor, grantRes.grants)
-    : rolesForSubjectActor(state, canonicalActor, grantRes.grants, principal.roles);
+  const evalRoles = unverifiedOidc
+    ? [...principal.roles]
+    : principal.onBehalfOf
+      ? rolesForSubjectActor(state, canonicalActor, grantRes.grants)
+      : rolesForSubjectActor(state, canonicalActor, grantRes.grants, principal.roles);
   const evalPrincipal: Principal = { actor: canonicalActor, roles: evalRoles };
 
   const sReg = skillRegistry(state);
   const skillVersions = skillId ? sReg.versions(skillId) : [];
   const skillRec = skillVersions.at(-1);
   const skillOwner = skillId ? resolveSkillContentOwner(state, skillId, skillRec) : undefined;
-  const ownsAny = targetPrivilege === 'skills.register' || targetPrivilege === 'mcp.use' || targetPrivilege === 'models.read'
-    ? checkOwnsAnyAgent(state, canonicalActor)
-    : false;
-  const ownsPersonal = targetPrivilege === 'subscriptions.own'
-    ? checkOwnsPersonalAgent(state, canonicalActor)
-    : undefined;
-  const userGroupRoles = state.groups
-    ? state.groups.listUserGroups(canonicalActor).flatMap((g) => g.roles)
-    : undefined;
+  const ownsAny = unverifiedOidc
+    ? false
+    : targetPrivilege === 'skills.register' || targetPrivilege === 'mcp.use' || targetPrivilege === 'models.read'
+      ? checkOwnsAnyAgent(state, canonicalActor)
+      : false;
+  const ownsPersonal = unverifiedOidc
+    ? undefined
+    : targetPrivilege === 'subscriptions.own'
+      ? checkOwnsPersonalAgent(state, canonicalActor)
+      : undefined;
+  const userGroupRoles = unverifiedOidc || !state.groups
+    ? undefined
+    : state.groups.listUserGroups(canonicalActor).flatMap((g) => g.roles);
 
   const resource: AuthorizeResource = {
     ...(agentId

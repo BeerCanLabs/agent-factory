@@ -4,6 +4,7 @@ import { hashApiKey, sameHash, type Principal, type KeyScopes } from '@beercanla
 import { MemoryDocBackend, snapshotSha256, type VersionedDocBackend } from '@beercanlabs/factory-bouncer';
 import { actorIsAdmin, identify, json, readBody, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import { sessionEmail } from './login.js';
+import { resolveAsIssuer } from './as-discovery.js';
 
 export type McpOAuthClientRecord = {
   clientId: string;
@@ -505,13 +506,7 @@ export class McpOAuthStore {
 }
 
 export function getOAuthIssuer(state: FactoryState, req?: http.IncomingMessage): string {
-  if (state.loginBaseUrl) return state.loginBaseUrl.replace(/\/$/, '');
-  if (state.publicBaseUrl) return state.publicBaseUrl.replace(/\/$/, '');
-  if (req?.headers.host) {
-    const proto = req.headers['x-forwarded-proto'] || 'http';
-    return `${proto}://${req.headers.host}`;
-  }
-  return 'http://localhost';
+  return resolveAsIssuer(state, req);
 }
 
 function sameOrigin(state: FactoryState, req: http.IncomingMessage): boolean {
@@ -558,23 +553,8 @@ export async function handleMcpOAuthRoutes(
     }), true;
   }
 
-  if (path === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
-    const issuer = getOAuthIssuer(state, req);
-    res.setHeader('cache-control', 'public, max-age=3600');
-    return json(res, 200, {
-      issuer,
-      authorization_endpoint: `${issuer}/authorize`,
-      token_endpoint: `${issuer}/token`,
-      registration_endpoint: `${issuer}/api/v1/auth/register`,
-      revocation_endpoint: `${issuer}/revoke`,
-      response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
-      code_challenge_methods_supported: ['S256'],
-      token_endpoint_auth_methods_supported: ['none'],
-      client_id_metadata_document_supported: true,
-      authorization_response_iss_parameter_supported: true,
-    }), true;
-  }
+  // Authorization-server metadata is served by handleAsDiscoveryRoutes (Phase 1 Slice 1)
+  // so it stays aligned with /jwks and /.well-known/openid-configuration.
 
   // 2. Client Registration (DCR)
   if ((path === '/api/v1/auth/register' || path === '/register') && req.method === 'POST') {
@@ -756,7 +736,7 @@ async function handleAuthorizeGet(
   }
 
   // User is signed in; resolve verified principal
-  const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [] }, false);
+  const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [], emailVerified: true }, false);
   if (!who.actor.startsWith('user:')) {
     res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' });
     res.end('<!doctype html><html><body><h1>Access Denied</h1><p>You are signed in, but this factory has not granted you access yet.</p></body></html>');
@@ -883,7 +863,7 @@ async function handleAuthorizePost(
     return json(res, 401, { error: 'unauthorized', message: 'Sign-in required' }), true;
   }
 
-  const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [] }, false);
+  const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [], emailVerified: true }, false);
   if (!who.actor.startsWith('user:')) {
     return json(res, 403, { error: 'forbidden', message: 'No factory grants' }), true;
   }

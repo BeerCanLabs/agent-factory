@@ -146,6 +146,7 @@ describe('oidc', () => {
     if (okRes.ok) {
       assert.equal(okRes.principal.actor, 'oidc:dale@example.com');
       assert.deepEqual(okRes.principal.roles, ['operator', 'admin']);
+      assert.equal(okRes.principal.emailVerified, true);
       assert.equal(okRes.claims, undefined);
     }
   });
@@ -224,5 +225,46 @@ describe('authFromEnv', () => {
 
   it('S11: FACTORY_TOKENS is no longer read, so it alone configures no auth', () => {
     assert.throws(() => authFromEnv({ FACTORY_TOKENS: JSON.stringify([{ name: 'x', token: 't', roles: ['admin'] }]) }), /no auth configured/);
+  });
+
+  it('#527 authFromEnv OIDC refuses missing, false, or non-boolean email_verified, and accepts email_verified: true', async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(jwks));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('no port');
+    const jwksUrl = `http://127.0.0.1:${addr.port}/jwks`;
+    try {
+      const auth = authFromEnv({
+        FACTORY_OIDC_ISSUER: ISS,
+        FACTORY_OIDC_AUDIENCE: AUD,
+        FACTORY_OIDC_JWKS_URL: jwksUrl,
+      });
+      assert.equal(auth.name, 'oidc');
+
+      for (const claims of [
+        { sub: 'u1', email: 'dale@example.com', roles: ['operator'] },
+        { sub: 'u1', email: 'dale@example.com', email_verified: false, roles: ['operator'] },
+        { sub: 'u1', email: 'dale@example.com', email_verified: 'true', roles: ['operator'] },
+        { sub: 'u1', email: 'dale@example.com', email_verified: 1, roles: ['operator'] },
+      ]) {
+        const r = await auth.verify(`Bearer ${await sign(claims)}`);
+        assert.deepEqual(r, { ok: false, reason: 'email not verified' }, JSON.stringify(claims));
+      }
+
+      const ok = await auth.verify(
+        `Bearer ${await sign({ sub: 'u1', email: 'dale@example.com', email_verified: true, roles: ['operator'] })}`,
+      );
+      assert.equal(ok.ok, true, JSON.stringify(ok));
+      if (ok.ok) {
+        assert.equal(ok.principal.actor, 'oidc:dale@example.com');
+        assert.equal(ok.principal.emailVerified, true);
+        assert.deepEqual(ok.principal.roles, ['operator']);
+      }
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 });

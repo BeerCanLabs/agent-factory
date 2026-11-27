@@ -61,9 +61,9 @@ export function createConsoleProbeServer(): http.Server {
 /**
  * The dashboard: static files plus a pass-through to the control plane.
  *
- * DESIGN_AUTHORITY.md §6.12 A2: the console adds no credential of its own. The caller's own credentials (the
- * identity-aware proxy's signed assertion in `cf-access-jwt-assertion` / the `CF_Authorization` cookie, or their own
- * bearer token) are forwarded unchanged, and the control plane verifies them, so every operator acts as themselves.
+ * DESIGN_AUTHORITY.md §6.12 A2: the console adds no credential of its own. The caller's factory session cookie,
+ * bearer token, or (legacy) Access assertion is forwarded unchanged, and the control plane verifies them, so every
+ * operator acts as themselves. The identity chip label comes from whoami `signedInWith`, never a guessed IdP.
  */
 /** #432: the label for how the current session signed in (from whoami's signedInWith), never a linked IdP. */
 export function providerLabel(signedInWith: unknown, access = false): string {
@@ -165,6 +165,9 @@ export function createConsoleServer(opts: ConsoleOptions): http.Server {
       pathname === '/login' ||
       pathname.startsWith('/.well-known/oauth-protected-resource') ||
       pathname === '/.well-known/oauth-authorization-server' ||
+      pathname === '/.well-known/openid-configuration' ||
+      pathname === '/.well-known/jwks.json' ||
+      pathname === '/jwks' ||
       pathname === '/authorize' ||
       pathname === '/token' ||
       pathname === '/revoke' ||
