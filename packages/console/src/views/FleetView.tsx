@@ -31,6 +31,17 @@ import {
   type BudgetFormData,
 } from '../components/models-model.js';
 
+/** Fleet state chips. ISOLATED is a stopped state the operator can resume (#492). */
+export const FLEET_STATE_FILTERS = ['ALL', 'RUNNING', 'SLEEPING', 'PAUSED', 'ISOLATED'] as const;
+
+/**
+ * Quarantine control on a fleet row. RESUME lifts PAUSED and ISOLATED
+ * (property-manager lifecycle, #490). Every other state still offers Pause.
+ */
+export function fleetQuarantineAction(state: AgentState): 'pause' | 'resume' {
+  return state === 'PAUSED' || state === 'ISOLATED' ? 'resume' : 'pause';
+}
+
 interface FleetViewProps {
   agents: AgentRecord[];
   catalogModels?: OfferedModel[];
@@ -453,7 +464,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
         </div>
 
         <div className="flex items-center space-x-1.5 self-start sm:self-auto overflow-x-auto w-full sm:w-auto">
-          {['ALL', 'RUNNING', 'SLEEPING', 'PAUSED'].map((st) => (
+          {FLEET_STATE_FILTERS.map((st) => (
             <button
               key={st}
               onClick={() => setFilterState(st)}
@@ -668,7 +679,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
                         </button>
                       )}
 
-                      {agent.state !== 'PAUSED' ? (
+                      {fleetQuarantineAction(agent.state) === 'pause' ? (
                         <button
                           onClick={() => handlePause(agent)}
                           disabled={!permissions.canPause}

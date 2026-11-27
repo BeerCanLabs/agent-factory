@@ -335,6 +335,82 @@ resource "aws_iam_role_policy" "agent" {
   })
 }
 
+# The most an agent role created by the control plane (packages/property-manager/src/aws/iam.ts) can ever do, whatever
+# inline policy it is given: the union of what iam.ts grants. Task role: its own mind prefix (MindPersistenceAccess).
+# Execution role: pull its image, write its logs (ECRAccess) and read its container secrets (SecretsAccess), never a
+# gatekeeper-held one (S1). The control plane may create, write or pass an agent role only with this boundary on it, so
+# a compromised control plane cannot mint an administrator (agent-factory #561).
+resource "aws_iam_policy" "agent_role_boundary" {
+  name        = "${local.name}-agent-role-boundary"
+  description = "Permissions boundary of every AgentTaskRole-* and AgentExecutionRole-* (control-plane-paas-orchestration)."
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "PullImagesAndWriteLogs"
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "*"
+      },
+      {
+        Sid      = "ReadFactorySecrets"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = "${local.secret_arn}/*"
+      },
+      {
+        Sid      = "NeverReadProviderKeys"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue"]
+        Resource = local.provider_secret_arns
+      },
+      {
+        # §6.11 K1/K3: OAuth, subscription grants and app credentials are read only by the control plane's Keymaster.
+        Sid      = "NeverReadKeymasterGrants"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue"]
+        Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
+      },
+      {
+        Sid      = "MindObjects"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"]
+        Resource = "${aws_s3_bucket.mind.arn}/*"
+      },
+      {
+        Sid      = "MindList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.mind.arn
+      },
+    ]
+  })
+}
+
+locals {
+  # The only roles the control plane creates, writes and passes (iam.ts taskRoleName / executionRoleName).
+  agent_role_arns = [
+    "arn:aws:iam::${var.account_id}:role/AgentTaskRole-*",
+    "arn:aws:iam::${var.account_id}:role/AgentExecutionRole-*",
+  ]
+  # The only CodeBuild projects the control plane starts and reads (codebuild.ts, skill-checker.ts).
+  factory_build_project_arns = [
+    aws_codebuild_project.factory_agent_builder.arn,
+    aws_codebuild_project.factory_skills_builder.arn,
+    aws_codebuild_project.factory_skill_checker.arn,
+  ]
+  # StartBuild overrides the control plane never sends. Any of them could turn a factory build into another job (its own
+  # commands, role, source or image), so a request carrying one is refused (one statement per key: Null keys in one
+  # block are ANDed).
+  denied_build_overrides = [
+    "codebuild:source.buildspec",
+    "codebuild:source.location",
+    "codebuild:serviceRole",
+    "codebuild:environment.image",
+    "codebuild:environment.privilegedMode",
+  ]
+}
+
 # Extruded policy for Factory PaaS native deployments
 resource "aws_iam_role_policy" "control_plane_paas" {
   name = "control-plane-paas-orchestration"
@@ -342,21 +418,54 @@ resource "aws_iam_role_policy" "control_plane_paas" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
-        Effect = "Allow"
-        Action = [
-          "iam:CreateRole",
-          "iam:GetRole",
-          "iam:PutRolePolicy",
-          "iam:PassRole",
-          "ecs:RegisterTaskDefinition",
-          "codebuild:StartBuild",
-          "codebuild:BatchGetBuilds",
-          "secretsmanager:DescribeSecret"
-        ]
+        # Neither action supports resource-level permissions (RegisterTaskDefinition) or needs them (metadata only).
+        # Passing a role into a task definition still needs iam:PassRole below.
+        Sid      = "RegisterAgentTaskDefinitions"
+        Effect   = "Allow"
+        Action   = ["ecs:RegisterTaskDefinition", "secretsmanager:DescribeSecret"]
         Resource = "*"
       },
+      {
+        # agent-factory #561: was iam:GetRole on "*".
+        Sid      = "ReadAgentRoles"
+        Effect   = "Allow"
+        Action   = ["iam:GetRole"]
+        Resource = local.agent_role_arns
+      },
+      {
+        # agent-factory #561: was iam:CreateRole and iam:PutRolePolicy on "*", which let the control plane write an
+        # administrator policy onto any role, its own included. Now only agent roles, and only while they carry the
+        # agent role boundary, so no policy written to them can grant more than the boundary.
+        Sid       = "WriteAgentRolesWithinBoundary"
+        Effect    = "Allow"
+        Action    = ["iam:CreateRole", "iam:PutRolePolicy", "iam:PutRolePermissionsBoundary"]
+        Resource  = local.agent_role_arns
+        Condition = { StringEquals = { "iam:PermissionsBoundary" = aws_iam_policy.agent_role_boundary.arn } }
+      },
+      {
+        # agent-factory #561: was iam:PassRole on "*". Agent roles go only into ECS task definitions.
+        Sid       = "PassAgentRolesToEcsTasks"
+        Effect    = "Allow"
+        Action    = ["iam:PassRole"]
+        Resource  = local.agent_role_arns
+        Condition = { StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" } }
+      },
+      {
+        # agent-factory #561: was codebuild:StartBuild and BatchGetBuilds on "*", which reached every project in the
+        # account. Now only the factory's own builders.
+        Sid      = "StartFactoryBuilds"
+        Effect   = "Allow"
+        Action   = ["codebuild:StartBuild", "codebuild:BatchGetBuilds"]
+        Resource = local.factory_build_project_arns
+      },
+      ], [for k in local.denied_build_overrides : {
+        Effect    = "Deny"
+        Action    = ["codebuild:StartBuild"]
+        Resource  = "*"
+        Condition = { Null = { (k) = "false" } }
+      }], [
       {
         # aws/iam.ts revokes an agent execution role's SecretsAccess when a redeploy no longer injects any secret
         # (its last one became gatekeeper-held, S1). aws/iam.ts names these roles AgentExecutionRole-<agent id>
@@ -445,6 +554,6 @@ resource "aws_iam_role_policy" "control_plane_paas" {
         ]
         Resource = aws_ecr_repository.dynamic_agents.arn
       }
-    ]
+    ])
   })
 }

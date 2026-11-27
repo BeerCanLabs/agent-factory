@@ -10,6 +10,7 @@ import {
   ListAttachedRolePoliciesCommand,
   ListRolePoliciesCommand,
   ListRolesCommand,
+  PutRolePermissionsBoundaryCommand,
   PutRolePolicyCommand,
 } from "@aws-sdk/client-iam";
 import { DescribeTaskDefinitionCommand, ECSClient } from "@aws-sdk/client-ecs";
@@ -24,6 +25,26 @@ const TASK_ROLE_PREFIX = "AgentTaskRole-";
 /** E5, M1 (GAP-263): model calls go through the gatekeeper-egress. Direct Bedrock grants, revoked on deploy and at start. */
 export const DIRECT_MODEL_INLINE_POLICIES = ["BedrockConverseAccess"];
 export const DIRECT_MODEL_MANAGED_POLICIES = ["AgentBedrockModelInvocation", "AmazonBedrockFullAccess", "AmazonBedrockLimitedAccess"];
+
+/**
+ * agent-factory #561: the permissions boundary every agent role carries (landing zone FACTORY_AGENT_ROLE_BOUNDARY_ARN).
+ * The control plane may create, write or pass an agent role only while it carries this boundary, so no inline policy
+ * written here can grant more than the boundary allows. Unset (compose, tests, an older landing zone): no boundary.
+ */
+export function agentRoleBoundaryArn(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = (env.FACTORY_AGENT_ROLE_BOUNDARY_ARN ?? "").trim();
+  if (!raw) return undefined;
+  if (!/^arn:aws[a-z-]*:iam::[0-9]{12}:policy\/[A-Za-z0-9+=,.@_\/-]+$/.test(raw)) {
+    throw new Error(`FACTORY_AGENT_ROLE_BOUNDARY_ARN is not an IAM policy ARN: ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+/** Puts the boundary on an existing role that lacks it, before any policy is written to it. */
+async function ensureBoundary(client: Pick<IAMClient, "send">, roleName: string, current: string | undefined, boundary: string | undefined): Promise<void> {
+  if (!boundary || current === boundary) return;
+  await client.send(new PutRolePermissionsBoundaryCommand({ RoleName: roleName, PermissionsBoundary: boundary }));
+}
 
 const isNoSuchEntity = (err: any) =>
   err?.name === "NoSuchEntityException" || err?.name === "NoSuchEntity" || err?.Code === "NoSuchEntity";
@@ -145,12 +166,13 @@ async function setMindAccess(client: IAMClient, roleName: string, memory: { buck
   );
 }
 
-async function roleExists(client: IAMClient, role: string): Promise<boolean> {
+/** The role's current permissions boundary, or `null` when the role does not exist. */
+async function roleBoundary(client: IAMClient, role: string): Promise<{ boundary?: string } | null> {
   try {
-    await client.send(new GetRoleCommand({ RoleName: role }));
-    return true;
+    const r = await client.send(new GetRoleCommand({ RoleName: role }));
+    return { boundary: r.Role?.PermissionsBoundary?.PermissionsBoundaryArn };
   } catch (err: any) {
-    if (isNoSuchEntity(err)) return false;
+    if (isNoSuchEntity(err)) return null;
     throw err;
   }
 }
@@ -167,7 +189,8 @@ export async function reconcileAgentTaskRole(
 ): Promise<{ role: string; outcome: ReconcileOutcome; revoked: string[]; detail?: string }> {
   const client = new IAMClient({});
   const role = `AgentTaskRole-${agentId}`;
-  if (!(await roleExists(client, role))) return { role, outcome: "no-role", revoked: [] };
+  const existing = await roleBoundary(client, role);
+  if (!existing) return { role, outcome: "no-role", revoked: [] };
   const prefix = opts.memoryPrefix ?? agentId;
   let outcome: ReconcileOutcome = "not-narrowed";
   let detail: string | undefined;
@@ -175,6 +198,7 @@ export async function reconcileAgentTaskRole(
     checkMindPrefix(prefix);
     const live = await (opts.probe ?? awsMindProbe()).liveMindPrefix(agentId);
     if (live.found && live.prefix === prefix) {
+      await ensureBoundary(client, role, existing.boundary, agentRoleBoundaryArn());
       await setMindAccess(client, role, { bucket: mindBucketName(), prefix });
       outcome = "updated";
     } else {
@@ -216,6 +240,7 @@ export async function provisionAgentRoles(
   opts: { memory?: boolean; memoryPrefix?: string; probe?: MindProbe } = {},
 ): Promise<{ taskRoleArn: string; executionRoleArn: string }> {
   const client = new IAMClient({});
+  const boundary = agentRoleBoundaryArn();
   // GAP-263: checked before anything is written.
   const mind = opts.memory === false ? false : { bucket: mindBucketName(), prefix: checkMindPrefix(opts.memoryPrefix ?? agentId) };
   if (mind) await assertMindPrefixOwned(agentId, mind.bucket, mind.prefix, opts.probe ?? awsMindProbe());
@@ -244,6 +269,7 @@ export async function provisionAgentRoles(
         RoleName: taskRoleName,
         AssumeRolePolicyDocument: assumeRolePolicyDocument,
         Description: `Task Role for Agent ${agentId}`,
+        ...(boundary ? { PermissionsBoundary: boundary } : {}),
       })
     );
     taskRoleArn = createTaskRoleResponse.Role?.Arn as string;
@@ -251,6 +277,7 @@ export async function provisionAgentRoles(
     if (err.name === "EntityAlreadyExistsException" || err.name === "EntityAlreadyExists" || err.Code === "EntityAlreadyExists") {
       const getRoleRes = await client.send(new GetRoleCommand({ RoleName: taskRoleName }));
       taskRoleArn = getRoleRes.Role?.Arn as string;
+      await ensureBoundary(client, taskRoleName, getRoleRes.Role?.PermissionsBoundary?.PermissionsBoundaryArn, boundary);
     } else {
       throw err;
     }
@@ -272,6 +299,7 @@ export async function provisionAgentRoles(
         RoleName: executionRoleName,
         AssumeRolePolicyDocument: assumeRolePolicyDocument,
         Description: `Execution Role for Agent ${agentId}`,
+        ...(boundary ? { PermissionsBoundary: boundary } : {}),
       })
     );
     executionRoleArn = createExecutionRoleResponse.Role?.Arn as string;
@@ -280,6 +308,7 @@ export async function provisionAgentRoles(
     if (err.name === "EntityAlreadyExistsException" || err.name === "EntityAlreadyExists" || err.Code === "EntityAlreadyExists") {
       const getRoleRes = await client.send(new GetRoleCommand({ RoleName: executionRoleName }));
       executionRoleArn = getRoleRes.Role?.Arn as string;
+      await ensureBoundary(client, executionRoleName, getRoleRes.Role?.PermissionsBoundary?.PermissionsBoundaryArn, boundary);
     } else {
       throw err;
     }
