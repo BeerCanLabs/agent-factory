@@ -430,6 +430,7 @@ describe('agent role permissions boundary and the control plane\'s IAM and CodeB
     for (const a of granted) assert.ok(allowed.has(a), `boundary lacks ${a}`);
     for (const a of allowed) assert.doesNotMatch(a, /^(iam|sts|bedrock|codebuild|ecs|kms):|\*/, a);
     assert.match(boundary, /Sid\s*=\s*"NeverReadProviderKeys"\s*\n\s*Effect\s*=\s*"Deny"[\s\S]*?Resource\s*=\s*local\.provider_secret_arns/);
+    assert.match(boundary, /Sid\s*=\s*"NeverReadKeymasterGrants"\s*\n\s*Effect\s*=\s*"Deny"[\s\S]*?Resource\s*=\s*concat\(local\.keymaster_grant_arns, local\.keymaster_app_arns\)/);
     assert.match(boundary, /Resource = "\$\{local\.secret_arn\}\/\*"/);
     assert.match(boundary, /Resource = "\$\{aws_s3_bucket\.mind\.arn\}\/\*"/);
   });

@@ -365,6 +365,13 @@ resource "aws_iam_policy" "agent_role_boundary" {
         Resource = local.provider_secret_arns
       },
       {
+        # §6.11 K1/K3: OAuth, subscription grants and app credentials are read only by the control plane's Keymaster.
+        Sid      = "NeverReadKeymasterGrants"
+        Effect   = "Deny"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue"]
+        Resource = concat(local.keymaster_grant_arns, local.keymaster_app_arns)
+      },
+      {
         Sid      = "MindObjects"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"]
