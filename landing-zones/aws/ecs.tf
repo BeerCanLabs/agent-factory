@@ -407,11 +407,13 @@ resource "aws_ecs_task_definition" "console" {
       name         = "console"
       image        = var.console_image
       essential    = true
-      portMappings = [{ containerPort = 3000, protocol = "tcp" }]
+      # 3001: private probe listener (front-door Phase 0, R17). The ALB health-checks it; no listener rule routes to it.
+      portMappings = [{ containerPort = 3000, protocol = "tcp" }, { containerPort = 3001, protocol = "tcp" }]
       environment = [
         { name = "NODE_ENV", value = "production" },
         { name = "FACTORY_CONTROL_PLANE_URL", value = "http://control-plane.factory.internal:8088" },
-        { name = "PORT", value = "3000" }
+        { name = "PORT", value = "3000" },
+        { name = "FACTORY_CONSOLE_INTERNAL_HEALTH_PORT", value = "3001" }
       ]
       # §6.12 A2: no secrets. The console forwards each caller's own Access assertion; it holds no factory token.
       logConfiguration = {

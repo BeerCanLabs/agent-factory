@@ -160,6 +160,7 @@ locals {
     cp_from_alb       = [aws_security_group.control_plane.id, 8088, aws_security_group.alb.id, "API via ALB"]
     cp_probe_alb      = [aws_security_group.control_plane.id, 8089, aws_security_group.alb.id, "S16 private health probe"]
     garrison_from_alb = [aws_security_group.control_plane.id, 3000, aws_security_group.alb.id, "Garrison via ALB"]
+    console_probe_alb = [aws_security_group.control_plane.id, 3001, aws_security_group.alb.id, "console private health probe"]
     cp_from_cp        = [aws_security_group.control_plane.id, 8088, aws_security_group.control_plane.id, "control plane from garrison/internal"]
     cp_from_ag        = [aws_security_group.control_plane.id, 8088, aws_security_group.agents.id, "run input/result/heartbeat"]
     cp_from_gw        = [aws_security_group.control_plane.id, 8088, aws_security_group.gatekeeper_egress.id, "gatekeeper-egress run context + ledger"]
