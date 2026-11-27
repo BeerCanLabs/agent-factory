@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { discoverVendorModels, resolveModelReference, REFERENCE_MODEL_PRICING } from './discovery.js';
+import { discoverVendorModels, resolveModelReference, REFERENCE_MODEL_PRICING, BEDROCK_FLEX_REFERENCE_PRICING } from './discovery.js';
 
 describe('Executive Model Discovery & Reference Pricing', () => {
   it('resolves reference pricing and friendly name for known models', () => {
@@ -36,12 +36,46 @@ describe('Executive Model Discovery & Reference Pricing', () => {
   });
 
   it('prices Bedrock us. geo inference profiles at the regional rate and resolves the newest Claude ids first (#557)', () => {
-    assert.deepEqual(resolveModelReference('us.anthropic.claude-haiku-4-5-20251001-v1:0').price, { inputPerMTok: 1.1, outputPerMTok: 5.5 });
-    assert.deepEqual(resolveModelReference('us.anthropic.claude-opus-4-6-v1').price, { inputPerMTok: 5.5, outputPerMTok: 27.5 });
-    assert.deepEqual(resolveModelReference('claude-haiku-4-5-20251001').price, { inputPerMTok: 1.0, outputPerMTok: 5.0 });
-    assert.deepEqual(resolveModelReference('claude-opus-5-5').price, { inputPerMTok: 4.0, outputPerMTok: 20.0 });
-    assert.deepEqual(resolveModelReference('claude-opus-5').price, { inputPerMTok: 5.0, outputPerMTok: 25.0 });
-    assert.deepEqual(resolveModelReference('models/gemini-3.8-flash').price, { inputPerMTok: 0.75, outputPerMTok: 3.75 });
+    const before = new Date('2026-11-27T00:00:00.000Z');
+    assert.deepEqual(resolveModelReference('us.anthropic.claude-haiku-4-5-20251001-v1:0', before).price, { inputPerMTok: 1.1, outputPerMTok: 5.5 });
+    assert.deepEqual(resolveModelReference('us.anthropic.claude-sonnet-4-5-20250929-v1:0', before).price, { inputPerMTok: 3.3, outputPerMTok: 16.5 });
+    assert.deepEqual(resolveModelReference('us.anthropic.claude-sonnet-4-6', before).price, { inputPerMTok: 3.3, outputPerMTok: 16.5 });
+    assert.deepEqual(resolveModelReference('us.anthropic.claude-opus-4-6-v1', before).price, { inputPerMTok: 5.5, outputPerMTok: 27.5 });
+    assert.deepEqual(resolveModelReference('openai.gpt-oss-20b-1:0', before).price, { inputPerMTok: 0.07, outputPerMTok: 0.3 });
+    assert.deepEqual(resolveModelReference('claude-haiku-4-5-20251001', before).price, { inputPerMTok: 1.0, outputPerMTok: 5.0 });
+    assert.deepEqual(resolveModelReference('claude-opus-5-5', before).price, { inputPerMTok: 4.0, outputPerMTok: 20.0 });
+    assert.deepEqual(resolveModelReference('claude-opus-5', before).price, { inputPerMTok: 5.0, outputPerMTok: 25.0 });
+    assert.deepEqual(resolveModelReference('claude-haiku-5-5', before).price, { inputPerMTok: 0.1, outputPerMTok: 0.5 });
+    assert.deepEqual(resolveModelReference('claude-sonnet-5-5', before).price, { inputPerMTok: 2.0, outputPerMTok: 10.0 });
+    assert.deepEqual(resolveModelReference('claude-fable-5-1', before).price, { inputPerMTok: 10.0, outputPerMTok: 50.0 });
+    assert.deepEqual(resolveModelReference('grok-4.7', before).price, { inputPerMTok: 2.0, outputPerMTok: 6.0 });
+    assert.deepEqual(resolveModelReference('grok-build-0.1', before).price, { inputPerMTok: 1.0, outputPerMTok: 2.0 });
+    assert.deepEqual(resolveModelReference('models/gemini-3.8-flash', before).price, { inputPerMTok: 0.75, outputPerMTok: 3.75 });
+    assert.deepEqual(resolveModelReference('gemini-3.1-pro-preview', before).price, { inputPerMTok: 2.0, outputPerMTok: 12.0 });
+  });
+
+  it('applies the scheduled Gemini list-price changes and keeps the Flex tier at half (#557)', () => {
+    const beforeArgon = new Date('2026-11-30T23:59:59.000Z');
+    const afterArgon = new Date('2026-12-01T00:00:00.000Z');
+    assert.deepEqual(resolveModelReference('gemini-4-argon', beforeArgon).price, { inputPerMTok: 2.0, outputPerMTok: 10.0 });
+    assert.deepEqual(resolveModelReference('gemini-4-argon', afterArgon).price, { inputPerMTok: 4.0, outputPerMTok: 20.0 });
+    const beforeFlash = new Date('2026-12-31T23:59:59.000Z');
+    const afterFlash = new Date('2027-01-01T00:00:00.000Z');
+    assert.deepEqual(resolveModelReference('gemini-3.8-flash', beforeFlash).price, { inputPerMTok: 0.75, outputPerMTok: 3.75 });
+    assert.deepEqual(resolveModelReference('models/gemini-3.8-flash', afterFlash).price, { inputPerMTok: 1.5, outputPerMTok: 7.5 });
+    assert.deepEqual(BEDROCK_FLEX_REFERENCE_PRICING, {
+      'deepseek-v3.2': { inputPerMTok: 0.31, outputPerMTok: 0.925 },
+      'minimax-m2.5': { inputPerMTok: 0.15, outputPerMTok: 0.6 },
+      'kimi-k2.5': { inputPerMTok: 0.3, outputPerMTok: 1.5 },
+      'glm-5': { inputPerMTok: 0.5, outputPerMTok: 1.6 },
+      'qwen3-coder-next': { inputPerMTok: 0.25, outputPerMTok: 0.6 },
+      'gpt-oss-120b': { inputPerMTok: 0.075, outputPerMTok: 0.3 },
+      'gpt-oss-20b': { inputPerMTok: 0.035, outputPerMTok: 0.15 },
+    });
+    for (const name of Object.keys(BEDROCK_FLEX_REFERENCE_PRICING)) {
+      const standard = REFERENCE_MODEL_PRICING[Object.keys(REFERENCE_MODEL_PRICING).find((id) => REFERENCE_MODEL_PRICING[id].friendlyName === name)!];
+      assert.ok(standard.price.inputPerMTok > BEDROCK_FLEX_REFERENCE_PRICING[name].inputPerMTok, name);
+    }
   });
 
   it('every reference price is a finite non-negative pair', () => {

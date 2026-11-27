@@ -29,6 +29,8 @@ export interface ModelReference {
  * the AWS Pricing API (`AmazonBedrock`, `AmazonBedrockFoundationModels`, us-east-1), docs.anthropic.com, docs.x.ai and
  * ai.google.dev. Bedrock `us.` (geo) inference profiles bill the regional rate, 10% above the global rate. Longer keys
  * come before shorter ones in each family because `resolveModelReference` takes the first prefix match.
+ * The table stores the price in effect on that date. `resolveModelReference` applies `SCHEDULED_PRICE_CHANGES`
+ * once each effective instant has passed, so a one-click admission suggests the price the vendor is billing then.
  * The legacy entries further down predate this check and are kept for older vendor ids.
  */
 export const REFERENCE_MODEL_PRICING: Record<string, { friendlyName: string; price: ModelPricing }> = {
@@ -63,10 +65,10 @@ export const REFERENCE_MODEL_PRICING: Record<string, { friendlyName: string; pri
   'grok-4.20-0309-reasoning': { friendlyName: 'grok-4.20-0309-reasoning', price: { inputPerMTok: 1.25, outputPerMTok: 2.5 } },
   'grok-4.20-0309-non-reasoning': { friendlyName: 'grok-4.20-0309-non-reasoning', price: { inputPerMTok: 1.25, outputPerMTok: 2.5 } },
   'grok-build-0.1': { friendlyName: 'grok-build-0.1', price: { inputPerMTok: 1.0, outputPerMTok: 2.0 } },
-  // Google Gemini API (output includes thinking tokens)
-  // gemini-4-argon is $2 / $10 through 2026-11-30 and $4 / $20 from 2026-12-01; the later price is recorded.
-  'gemini-4-argon': { friendlyName: 'gemini-4-argon', price: { inputPerMTok: 4.0, outputPerMTok: 20.0 } },
-  // gemini-3.8-flash rises to $1.50 / $7.50 on 2027-01-01.
+  // Google Gemini API (output includes thinking tokens).
+  // gemini-4-argon is $2 / $10 through 2026-11-30 and $4 / $20 from 2026-12-01 (see SCHEDULED_PRICE_CHANGES).
+  'gemini-4-argon': { friendlyName: 'gemini-4-argon', price: { inputPerMTok: 2.0, outputPerMTok: 10.0 } },
+  // gemini-3.8-flash is $0.75 / $3.75 through 2026-12-31 and $1.50 / $7.50 from 2027-01-01.
   'gemini-3.8-flash': { friendlyName: 'gemini-3.8-flash', price: { inputPerMTok: 0.75, outputPerMTok: 3.75 } },
   'gemini-3.1-pro-preview': { friendlyName: 'gemini-3.1-pro-preview', price: { inputPerMTok: 2.0, outputPerMTok: 12.0 } },
   'gemini-2.5-pro': { friendlyName: 'gemini-2.5-pro', price: { inputPerMTok: 1.25, outputPerMTok: 10.0 } },
@@ -107,12 +109,40 @@ export const REFERENCE_MODEL_PRICING: Record<string, { friendlyName: string; pri
   'models/gemini-1.5-flash': { friendlyName: 'gemini-1.5-flash', price: { inputPerMTok: 0.075, outputPerMTok: 0.3 } },
 };
 
-/** Normalize a raw model id to look up reference pricing and assign a friendly default name. */
-export function resolveModelReference(rawModelId: string): ModelReference {
+/**
+ * Bedrock Flex list price (us-east-1, on-demand) for the seven open-weight models that accept
+ * `serviceTier: flex`. The provider model id is the same as the standard entry; the catalog name
+ * carries the tier, and this price is that tier's price (about half the standard rate).
+ */
+export const BEDROCK_FLEX_REFERENCE_PRICING: Record<string, ModelPricing> = {
+  'deepseek-v3.2': { inputPerMTok: 0.31, outputPerMTok: 0.925 },
+  'minimax-m2.5': { inputPerMTok: 0.15, outputPerMTok: 0.6 },
+  'kimi-k2.5': { inputPerMTok: 0.3, outputPerMTok: 1.5 },
+  'glm-5': { inputPerMTok: 0.5, outputPerMTok: 1.6 },
+  'qwen3-coder-next': { inputPerMTok: 0.25, outputPerMTok: 0.6 },
+  'gpt-oss-120b': { inputPerMTok: 0.075, outputPerMTok: 0.3 },
+  'gpt-oss-20b': { inputPerMTok: 0.035, outputPerMTok: 0.15 },
+};
+
+/** List-price changes that take effect at `effective` (UTC). The table above holds the price before then. */
+const SCHEDULED_PRICE_CHANGES: Record<string, { effective: string; after: ModelPricing }> = {
+  'gemini-4-argon': { effective: '2026-12-01T00:00:00.000Z', after: { inputPerMTok: 4.0, outputPerMTok: 20.0 } },
+  'gemini-3.8-flash': { effective: '2027-01-01T00:00:00.000Z', after: { inputPerMTok: 1.5, outputPerMTok: 7.5 } },
+};
+
+function priceAt(id: string, price: ModelPricing, now: Date): ModelPricing {
+  const change = SCHEDULED_PRICE_CHANGES[id];
+  if (!change || now.getTime() < Date.parse(change.effective)) return price;
+  return change.after;
+}
+
+/** Normalize a raw model id to look up reference pricing and assign a friendly default name.
+ * `now` selects a scheduled list price (default: the current time). */
+export function resolveModelReference(rawModelId: string, now: Date = new Date()): ModelReference {
   const cleanId = rawModelId.trim();
   const direct = REFERENCE_MODEL_PRICING[cleanId];
   if (direct) {
-    return { friendlyName: direct.friendlyName, price: direct.price };
+    return { friendlyName: direct.friendlyName, price: priceAt(cleanId, direct.price, now) };
   }
 
   // Strip prefix like "models/" or dates like "-20241022" or "-2024-08-06"
@@ -122,7 +152,7 @@ export function resolveModelReference(rawModelId: string): ModelReference {
   });
 
   if (prefixMatch) {
-    return { friendlyName: prefixMatch[1].friendlyName, price: prefixMatch[1].price };
+    return { friendlyName: prefixMatch[1].friendlyName, price: priceAt(prefixMatch[0], prefixMatch[1].price, now) };
   }
 
   // Fallback: derive friendly name by kebab-casing without trailing date
