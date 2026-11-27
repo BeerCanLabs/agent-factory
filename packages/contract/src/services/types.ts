@@ -119,6 +119,7 @@ export const FACTORY_SERVICES: Record<FactoryServiceName, FactoryServiceMetadata
       'packages/control-plane/src/subscription-caps.ts',
       'packages/control-plane/src/skill-training.ts',
       'packages/control-plane/src/aws/accountant.ts',
+      'packages/control-plane/src/aws/data-export.ts',
       'packages/control-plane/src/gcp/accountant.ts',
       'packages/control-plane/src/spend-accounts.ts',
     ],

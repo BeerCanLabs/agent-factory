@@ -38,8 +38,13 @@ output "event_bus" {
 }
 
 output "accountant_role_arn" {
-  description = "The Accountant IAM role for Cost Explorer and ECS inventory."
+  description = "The Accountant IAM role for Cost Explorer, ECS inventory, and the Data Export prefix."
   value       = aws_iam_role.accountant.arn
+}
+
+output "data_export_uri" {
+  description = "S3 URI for the AWS Data Export (CSV, gzip, resource IDs, cost-allocation tags). The accountant reads this prefix only."
+  value       = "s3://${aws_s3_bucket.data_exports.bucket}/exports"
 }
 
 output "cloudflare_access_aud" {

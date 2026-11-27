@@ -16,6 +16,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   attributeCompute,
+  beerCanLabsFallback,
   budgetCrossings,
   buildSpendReport,
   HOURS_PER_MONTH,
@@ -27,6 +28,7 @@ import {
   type CloudCostSource,
   type CloudSummary,
   type ComputeSource,
+  type CostAllocation,
   type FactoryBudgets,
   type Period,
   type RunInterval,
@@ -88,11 +90,13 @@ export class FactoryBudgetStore {
 }
 
 /** The Accountant's wiring: its landing-zone sources (absent on a zone with no adapter) and its budget store. */
+type CachedBill = { summary: CloudSummary; allocation?: CostAllocation };
+
 export type Treasury = {
   cloud?: CloudCostSource;
   compute?: ComputeSource;
   budgets: FactoryBudgetStore;
-  cache: TtlCache<CloudSummary>;
+  cache: TtlCache<CachedBill>;
   agentTaskSize?: TaskSize;
 };
 
@@ -142,26 +146,36 @@ export async function spendReport(state: FactoryState, period: Period, now = new
   const t = state.treasury;
   const window = periodWindow(now, period);
   let cloud: CloudSummary | { unavailable: string };
+  let allocation: CostAllocation | undefined;
   if (!t?.cloud) {
     cloud = { unavailable: 'no cloud cost source on this landing zone' };
   } else {
     const source = t.cloud;
     try {
-      cloud = await t.cache.get(`${source.provider}:${window.start}:${window.end}`, async () => summarizeCloud(await source.costs({ start: window.start, end: window.end })));
+      const bill = await t.cache.get(`${source.provider}:${window.start}:${window.end}`, async () => {
+        const snap = await source.costs({ start: window.start, end: window.end });
+        const summary = summarizeCloud(snap);
+        return { summary, allocation: snap.allocation ?? beerCanLabsFallback(summary, snap.exportNote) };
+      });
+      cloud = bill.summary;
+      allocation = bill.allocation;
     } catch (err) {
       console.error(`[accountant] cloud cost read failed: ${err instanceof Error ? err.message : String(err)}`);
       cloud = { unavailable: 'the cloud cost source did not answer' };
     }
   }
   const size = t?.agentTaskSize ?? DEFAULT_AGENT_TASK_SIZE;
-  return buildSpendReport({
-    window,
-    aiByAgent: state.spend.monthByAgent(window.month),
-    cloud,
-    computeByAgent: attributeCompute(runIntervals(state), window, () => size, now),
-    budgets: t?.budgets.current()?.budgets ?? {},
-    asOf: now.toISOString(),
-  });
+  return {
+    ...buildSpendReport({
+      window,
+      aiByAgent: state.spend.monthByAgent(window.month),
+      cloud,
+      computeByAgent: attributeCompute(runIntervals(state), window, () => size, now),
+      budgets: t?.budgets.current()?.budgets ?? {},
+      asOf: now.toISOString(),
+    }),
+    ...(allocation ? { allocation } : {}),
+  };
 }
 
 /**

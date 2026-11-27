@@ -39,6 +39,7 @@ import { seedBuiltinAiProviders } from './ai-providers.js';
 import { syncPlatformCredentials } from './credentials.js';
 import { checkFactoryBudgets, createTreasury } from './spend.js';
 import { AwsComputeSource, AwsCostSource } from './aws/accountant.js';
+import { dataExportLocationFromEnv } from './aws/data-export.js';
 import { GcpComputeSource, GcpCostSource } from './gcp/accountant.js';
 import { ModelStore } from './models.js';
 import { loadSharedRuntime } from './agent-creation.js';
@@ -474,7 +475,9 @@ let cloudSource: CloudCostSource | undefined;
 let computeSource: ComputeSource | undefined;
 if (accountantRoleArn) {
   try {
-    cloudSource = AwsCostSource.fromRole(accountantRoleArn);
+    const dataExport = dataExportLocationFromEnv();
+    if (!dataExport.ok && dataExport.error) console.error(`[accountant] ${dataExport.error}; Cost Explorer remains the spend source`);
+    cloudSource = AwsCostSource.fromRole(accountantRoleArn, dataExport.ok ? dataExport.location : undefined);
     if (ecsCluster) {
       computeSource = AwsComputeSource.fromRole(accountantRoleArn, ecsCluster);
     }

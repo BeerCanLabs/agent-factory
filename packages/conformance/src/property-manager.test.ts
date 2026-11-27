@@ -17,7 +17,8 @@ import { files, read } from './support.js';
 //    run-token rule meet a request there; the budget and the console's view are the Accountant's and the console's).
 //  - It does NOT guard `FactoryState`. It stays in `app.ts` and is assignable to the Property Manager's `PropertyManagerState`.
 //  - It does NOT guard the CodeBuild SDK as a whole: the Registrar's skill-check runner
-//    (`control-plane/src/aws/skill-checker.ts`) and the Accountant's `aws/accountant.ts` use it (ECS, Cost Explorer, STS).
+//    (`control-plane/src/aws/skill-checker.ts`) and the Accountant's `aws/accountant.ts` use it (ECS, Cost Explorer, STS, and
+//    S3 reads of the Data Export prefix). `client-s3` is the Accountant's, not a Property Manager SDK.
 //  - One exception to the Secrets Manager SDK rule (K6, TSK-350): the Keymaster's `secrets-bind` (`packages/secrets-bind/src/`)
 //    may import `@aws-sdk/client-secrets-manager`, and nothing else does. `allowedImport` says so; no other SDK is exempt.
 
@@ -101,6 +102,7 @@ describe('Property Manager: one copy of the compute lifecycle, and the dependenc
       "import { CodeBuildClient } from '@aws-sdk/client-codebuild';",
       "import { CostExplorerClient } from '@aws-sdk/client-cost-explorer';",
       "import { ECSClient } from '@aws-sdk/client-ecs';",
+      "import { S3Client } from '@aws-sdk/client-s3';",
     ];
     for (const line of allowed) assert.deepEqual(matches(line, SECOND_COPY), [], `should allow: ${line}`);
 

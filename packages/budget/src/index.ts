@@ -68,7 +68,25 @@ export {
   budgetStatus,
   buildSpendReport,
   hourlyUsd,
+  isCloudCredit,
   periodWindow,
   summarizeCloud,
   validateFactoryBudgets,
 } from './cloud.js';
+export type {
+  AllocationTag,
+  CostAllocation,
+  ExportRow,
+  ExportTags,
+  TagBackfillProposal,
+  TagBackfillReason,
+} from './data-export.js';
+export {
+  BEERCANLABS_COST_CENTER,
+  UNTAGGED_SUB_CENTER,
+  allocationTag,
+  beerCanLabsFallback,
+  parseCsv,
+  rowsFromDataExport,
+  snapshotFromRows,
+} from './data-export.js';

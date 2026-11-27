@@ -6,6 +6,9 @@
  * plane's task role; the control-plane role may assume that one role and holds no billing permission itself, so
  * CloudTrail attributes every billing read to the Accountant. Agents never reach this: they read the Accountant's report
  * through `/api/v1/spend/*`.
+ *
+ * When `FACTORY_AWS_DATA_EXPORT_URI` is set, a CSV Data Export under that prefix is preferred for the month. Cost
+ * Explorer remains the source until an object for the month has landed, and again when the export cannot be read.
  */
 import { CostExplorerClient, GetCostAndUsageCommand, type GetCostAndUsageCommandInput, type ResultByTime } from '@aws-sdk/client-cost-explorer';
 import {
@@ -32,6 +35,7 @@ import type {
   CostLine,
   UsageLine,
 } from '@beercanlabs/factory-budget';
+import { DataExportReader, dataExportClient, type DataExportLocation } from './data-export.js';
 
 type Creds = { accessKeyId: string; secretAccessKey: string; sessionToken?: string; expiration?: Date };
 type CredProvider = () => Promise<Creds>;
@@ -63,13 +67,38 @@ const num = (v: string | undefined) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+function safeError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/AKIA|secret|Signature|Credential/i.test(message)) return 'request failed';
+  return message.slice(0, 200);
+}
+
 /** Cost Explorer. Its API lives in us-east-1 for every account. Two calls per window (each costs $0.01). */
 export class AwsCostSource implements CloudCostSource {
   readonly provider = 'aws';
-  constructor(private readonly ce: Pick<CostExplorerClient, 'send'>) {}
+  constructor(
+    private readonly ce: Pick<CostExplorerClient, 'send'>,
+    private readonly dataExport?: DataExportReader,
+  ) {}
 
-  static fromRole(roleArn: string): AwsCostSource {
-    return new AwsCostSource(new CostExplorerClient({ region: 'us-east-1', credentials: accountantCredentials(roleArn, { region: process.env.AWS_REGION }) }));
+  static fromRole(roleArn: string, dataExport?: DataExportLocation): AwsCostSource {
+    const credentials = accountantCredentials(roleArn, { region: process.env.AWS_REGION });
+    const reader = dataExport ? new DataExportReader(dataExportClient(credentials), dataExport) : undefined;
+    return new AwsCostSource(new CostExplorerClient({ region: 'us-east-1', credentials }), reader);
+  }
+
+  /** The Data Export when an object for the month has landed; otherwise Cost Explorer. */
+  async costs(window: { start: string; end: string }): Promise<CloudCostSnapshot> {
+    if (this.dataExport) {
+      try {
+        const snap = await this.dataExport.load(window);
+        if (snap) return snap;
+      } catch (err) {
+        console.error(`[accountant] data export read failed: ${safeError(err)}; using Cost Explorer`);
+        return { ...(await this.fromCostExplorer(window)), exportNote: 'The Data Export could not be read. Totals are Cost Explorer.' };
+      }
+    }
+    return this.fromCostExplorer(window);
   }
 
   private async all(input: GetCostAndUsageCommandInput): Promise<ResultByTime[]> {
@@ -83,7 +112,7 @@ export class AwsCostSource implements CloudCostSource {
     return out;
   }
 
-  async costs(window: { start: string; end: string }): Promise<CloudCostSnapshot> {
+  private async fromCostExplorer(window: { start: string; end: string }): Promise<CloudCostSnapshot> {
     const TimePeriod = { Start: window.start, End: window.end };
     const [byRecord, byUsage] = await Promise.all([
       this.all({
