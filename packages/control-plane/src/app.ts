@@ -156,7 +156,7 @@ import { decisionDelivery, handleDecisionHolds, holdDecider, parseCapUsd } from 
 import { dropOpsAgent, handleFleetState, isOpsAgent, resumeFleetWakes, setFleetOpsState, type FleetStateStore } from './fleet-state.js';
 import { accountForWake, bindRun, chargeAccount, settleRun, type SpendAccountStore } from './spend-accounts.js';
 import { AI_PROVIDER_TEMPLATES, LEGACY_ARCHETYPES, canonicalArchetype, platformCredentialName } from '@beercanlabs/factory-contract';
-import { formatModelDisplayLabel, resolveModelReference, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
+import { formatModelDisplayLabel, isServiceTier, resolveModelReference, SERVICE_TIERS, type CatalogEntry, type DiscoveredModel } from '@beercanlabs/factory-executive';
 import { ModelCatalogError, ModelStore, type EnrichedModelView, type StoredModel, type StagedModel } from './models.js';
 
 /**
@@ -2952,6 +2952,8 @@ export type AdmitInput = {
   endpoint?: string;
   region?: string;
   price?: { inputPerMTok?: number; outputPerMTok?: number; inputPer1M?: number; outputPer1M?: number };
+  /** Bedrock Converse service tier (#557); only `bedrock-converse` entries take one, and `price` is that tier's price. */
+  serviceTier?: string;
   credentialMode?: 'api-key' | 'subscription';
   connection?: string;
   scope?: 'factory' | 'personal';
@@ -3020,6 +3022,14 @@ export function admitModel(state: FactoryState, input: AdmitInput, actor: string
     }
     normalizedPrice = parsedPrice.price;
   }
+  if (input.serviceTier !== undefined) {
+    if (!isServiceTier(input.serviceTier)) {
+      return { ok: false, status: 400, error: 'invalid_service_tier', message: `serviceTier must be one of ${SERVICE_TIERS.join(', ')}` };
+    }
+    if (input.provider !== 'bedrock-converse') {
+      return { ok: false, status: 400, error: 'invalid_service_tier', message: 'serviceTier applies only to bedrock-converse models' };
+    }
+  }
   const cloud = Boolean(input.provider && CLOUD_PROVIDERS.has(input.provider));
   let vendorId = cloud ? undefined : input.vendorId;
   if (!vendorId && input.provider && API_KEY_PROVIDER_VENDOR[input.provider]) {
@@ -3038,7 +3048,15 @@ export function admitModel(state: FactoryState, input: AdmitInput, actor: string
     fields = { provider: input.provider, ...(input.region ? { region: input.region } : {}) };
   }
   try {
-    const model = state.modelStore.admit({ name: input.name, id: input.id, ...fields, vendorId: vendorId ?? input.vendorId, price: normalizedPrice, actor });
+    const model = state.modelStore.admit({
+      name: input.name,
+      id: input.id,
+      ...fields,
+      vendorId: vendorId ?? input.vendorId,
+      price: normalizedPrice,
+      ...(isServiceTier(input.serviceTier) ? { serviceTier: input.serviceTier } : {}),
+      actor,
+    });
     syncModelCatalogFromStore(state);
     state.ledger.append({
       action: 'MODEL_ADMITTED',

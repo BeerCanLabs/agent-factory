@@ -21,6 +21,7 @@ import { activeRun, callbackPolicyFromEnv, checkHealth, cloudRunRuntime, createR
 import { fireScheduledAction, scheduleRunOptions } from './schedules.js';
 import { initTelemetry } from '@beercanlabs/factory-telemetry';
 import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
+import { isServiceTier } from '@beercanlabs/factory-executive';
 import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { McpOAuthStore, type McpOAuthDoc } from './mcp-oauth.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
@@ -177,7 +178,7 @@ if (deployProviderType === 'aws') {
 function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatalog'] {
   if (!json?.trim()) return {};
   try {
-    const raw = JSON.parse(json) as Record<string, { provider?: unknown; id?: unknown; region?: unknown; endpoint?: unknown; price?: { inputPerMTok?: unknown; outputPerMTok?: unknown } }>;
+    const raw = JSON.parse(json) as Record<string, { provider?: unknown; id?: unknown; region?: unknown; endpoint?: unknown; serviceTier?: unknown; price?: { inputPerMTok?: unknown; outputPerMTok?: unknown } }>;
     const out: NonNullable<FactoryState['modelCatalog']> = {};
     for (const [name, m] of Object.entries(raw ?? {})) {
       if (!m || typeof m.provider !== 'string') continue;
@@ -189,6 +190,7 @@ function modelCatalogFromEnv(json: string | undefined): FactoryState['modelCatal
         id: typeof m.id === 'string' && m.id ? m.id : name,
         ...(typeof m.region === 'string' ? { region: m.region } : {}),
         ...(typeof m.endpoint === 'string' ? { endpoint: m.endpoint } : {}),
+        ...(isServiceTier(m.serviceTier) ? { serviceTier: m.serviceTier } : {}),
         ...(p && typeof p.inputPerMTok === 'number' && typeof p.outputPerMTok === 'number' ? { price: { inputPerMTok: p.inputPerMTok, outputPerMTok: p.outputPerMTok } } : {}),
       };
     }

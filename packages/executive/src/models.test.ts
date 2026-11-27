@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { ModelUpstreamError, bedrockConverse, fromConverse, parseModelCatalog, toConverse, type CatalogEntry, type ChatRequest } from './models.js';
+import { ModelUpstreamError, bedrockConverse, formatModelDisplayLabel, fromConverse, parseModelCatalog, toConverse, type CatalogEntry, type ChatRequest } from './models.js';
 import { signV4 } from './sigv4.js';
 
 describe('model catalog and translation', () => {
@@ -1438,3 +1438,45 @@ describe('Gemini thought signatures across tool-call turns (GAP-213, M1, M2, M3)
   });
 });
 
+
+describe('Bedrock service tier (#557)', () => {
+  const CREDS = { accessKeyId: 'AKIDTIER', secretAccessKey: 'tier-secret-key' };
+  const REQ: ChatRequest = { messages: [{ role: 'user', content: 'hello' }], maxTokens: 64 };
+  const OK = { output: { message: { content: [{ text: 'Hi.' }] } }, stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 1 }, serviceTier: { type: 'flex' } };
+  const sentBody = async (entry: CatalogEntry) => {
+    const bodies: unknown[] = [];
+    const f = (async (_url: URL, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify(OK), { status: 200 });
+    }) as unknown as typeof fetch;
+    const result = await bedrockConverse({ credentials: async () => CREDS, endpoint: (r) => `https://bedrock.test/${r}/`, fetch: f }).complete(entry, REQ);
+    assert.deepEqual(result, { content: 'Hi.', finishReason: 'stop', usage: { input: 5, output: 1 } });
+    return bodies[0] as Record<string, unknown>;
+  };
+
+  it('toConverse sends the catalog service tier and omits it when unset', () => {
+    assert.deepEqual(toConverse(REQ, 'deepseek.v3.2', 'flex').serviceTier, { type: 'flex' });
+    assert.deepEqual(toConverse(REQ, 'deepseek.v3.2', 'priority').serviceTier, { type: 'priority' });
+    assert.equal('serviceTier' in toConverse(REQ, 'deepseek.v3.2'), false);
+  });
+
+  it('the adapter requests the entry tier, so a -flex entry is served (and priced) as Flex', async () => {
+    const flex = await sentBody({ provider: 'bedrock-converse', id: 'minimax.minimax-m2.5', region: 'us-east-1', serviceTier: 'flex' });
+    assert.deepEqual(flex.serviceTier, { type: 'flex' });
+    const standard = await sentBody({ provider: 'bedrock-converse', id: 'minimax.minimax-m2.5', region: 'us-east-1' });
+    assert.equal('serviceTier' in standard, false);
+  });
+
+  it('parseModelCatalog keeps a valid tier and rejects an unknown one', () => {
+    const c = parseModelCatalog(
+      '{"glm-5-flex":{"provider":"bedrock-converse","id":"zai.glm-5","region":"us-east-1","serviceTier":"flex","price":{"inputPerMTok":0.5,"outputPerMTok":1.6}},"glm-5":{"provider":"bedrock-converse","id":"zai.glm-5","region":"us-east-1"}}',
+    );
+    assert.equal(c['glm-5-flex'].serviceTier, 'flex');
+    assert.equal('serviceTier' in c['glm-5'], false);
+    assert.throws(() => parseModelCatalog('{"x":{"provider":"bedrock-converse","id":"zai.glm-5","serviceTier":"cheap"}}'), /serviceTier must be one of default, flex, priority/);
+  });
+
+  it('labels bedrock-converse entries as Bedrock', () => {
+    assert.equal(formatModelDisplayLabel({ id: 'deepseek.v3.2', provider: 'bedrock-converse' }), 'deepseek.v3.2 · Bedrock');
+  });
+});

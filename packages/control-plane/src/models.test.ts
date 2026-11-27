@@ -34,6 +34,24 @@ describe('ModelStore', () => {
     }
   });
 
+  it('keeps a seeded Bedrock service tier and resyncs it from the landing zone (#557)', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'modelstore-test-'));
+    const file = join(tmp, 'catalog.json');
+    try {
+      const seed = {
+        'kimi-k2.5-flex': { provider: 'bedrock-converse', id: 'moonshotai.kimi-k2.5', region: 'us-east-1', serviceTier: 'flex' as const, price: { inputPerMTok: 0.3, outputPerMTok: 1.5 } },
+      };
+      const store = new ModelStore(file, seed);
+      assert.equal(store.getOffered('kimi-k2.5-flex')?.serviceTier, 'flex');
+      assert.equal(store.toEgressCatalog()['kimi-k2.5-flex'].serviceTier, 'flex');
+      // A later landing zone without the tier drops it from the bootstrapped entry.
+      const reloaded = new ModelStore(file, { 'kimi-k2.5-flex': { provider: 'bedrock-converse', id: 'moonshotai.kimi-k2.5', region: 'us-east-1' } });
+      assert.equal(reloaded.getOffered('kimi-k2.5-flex')?.serviceTier, undefined);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('stages discovered models, admits, updates pricing and retires', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'modelstore-test-'));
     const file = join(tmp, 'catalog.json');

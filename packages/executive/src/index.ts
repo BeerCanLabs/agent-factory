@@ -26,6 +26,8 @@ export {
   modelCapabilities,
   fromConverse,
   ModelUpstreamError,
+  SERVICE_TIERS,
+  isServiceTier,
 } from './models.js';
 export type {
   BedrockConverseOptions,
@@ -39,6 +41,7 @@ export type {
   ModelAdapter,
   ModelCapabilities,
   ModelCatalog,
+  ServiceTier,
 } from './models.js';
 export {
   discoverVendorModels,

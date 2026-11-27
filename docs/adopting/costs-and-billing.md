@@ -24,12 +24,17 @@ Where prices *do* appear:
 
 - The AWS landing zone’s default **factory model catalog** (Bedrock Converse) in `landing-zones/aws/variables.tf` (`model_catalog`):
 
-  | Factory name | Adapter | Listed price (USD / million tokens) |
-  |---|---|---|
-  | `claude-sonnet-4-5` | bedrock-converse | input $3, output $15 |
-  | `claude-haiku-4-5` | bedrock-converse | input $1, output $5 |
-  | `claude-sonnet-4-6` | bedrock-converse | input $3, output $15 |
-  | `claude-opus-4-6` | bedrock-converse | input $5, output $25 |
+  | Factory name | Bedrock model id | Standard (USD / million tokens) | `-flex` entry (USD / million tokens) |
+  |---|---|---|---|
+  | `deepseek-v3.2` | `deepseek.v3.2` | input $0.62, output $1.85 | input $0.31, output $0.925 |
+  | `minimax-m2.5` | `minimax.minimax-m2.5` | input $0.30, output $1.20 | input $0.15, output $0.60 |
+  | `kimi-k2.5` | `moonshotai.kimi-k2.5` | input $0.60, output $3.00 | input $0.30, output $1.50 |
+  | `glm-5` | `zai.glm-5` | input $1.00, output $3.20 | input $0.50, output $1.60 |
+  | `qwen3-coder-next` | `qwen.qwen3-coder-next` | input $0.50, output $1.20 | input $0.25, output $0.60 |
+  | `gpt-oss-120b` | `openai.gpt-oss-120b-1:0` | input $0.15, output $0.60 | input $0.075, output $0.30 |
+  | `gpt-oss-20b` | `openai.gpt-oss-20b-1:0` | input $0.07, output $0.30 | input $0.035, output $0.15 |
+
+  Prices are the AWS us-east-1 on-demand list prices, checked on 2026-11-27. Each `-flex` entry sends Bedrock `serviceTier: { type: "flex" }`: about half the price, with slower responses when Bedrock is busy. It suits scheduled and background runs better than live chat. These models also accept `serviceTier: "priority"` (about 1.75x the standard price); no priority entries are seeded. Claude on Bedrock does not offer Flex. Claude is not seeded on Bedrock because the Anthropic API vendor serves newer, cheaper Claude models (for example `claude-haiku-5-5` at $0.10 / $0.50). Bedrock `us.` geo inference profiles for Claude bill 10% above the global rate.
 
 - Unpriced models are **refused** (`landing-zones/aws/README.md`, `gatekeeper_egress_prices`). That is a safety feature, not a discount.
 
@@ -265,6 +270,6 @@ None of these programs remove the need for a human owner of the cloud account, a
 1. Do not stand up a dedicated AWS reference landing zone for a first pilot unless credits, a sponsor, or a hosted operator will cover the **~$140–220/month** floor.
 2. If a pilot factory is stood up, set **per-agent `budgetUsd.perDay` and `perMonth` immediately** (start stricter than you think, for example $2/day and $20/month on a Haiku-default agent). **Status: works today.**
 3. Set factory `aiMonthUsd` / `infraMonthUsd` / `totalMonthUsd` for *visibility*, and add an **AWS billing alarm**. Do not rely on factory budgets to stop infrastructure spend. **Status: alerts work today; hard cap on infra is not possible yet.**
-4. Prefer cheaper models (`claude-haiku-4-5`) as the default; treat Sonnet/Opus as an exception. Unpriced models will simply fail, which is good.
+4. Prefer cheaper models (`claude-haiku-5-5`, or an open-weight Bedrock model such as `minimax-m2.5`) as the default; treat Sonnet/Opus as an exception. Unpriced models will simply fail, which is good.
 5. Start nonprofit applications early; verification takes days to weeks and can fail for church and chapter structures.
 6. Keep a named human as the AWS account root/email owner. The factory will not be the legal customer of AWS on the adopter’s behalf unless a hosted-for-you contract says so.

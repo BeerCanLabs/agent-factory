@@ -15,6 +15,11 @@ export type CatalogEntry = {
   region?: string;
   secret?: string;
   price?: Price;
+  /**
+   * Bedrock Converse service tier (#557). `flex` trades latency for a lower price on the models that offer it; the entry's
+   * `price` must be that tier's price. Unset sends no tier, which Bedrock serves as `default`.
+   */
+  serviceTier?: ServiceTier;
   /** M5(1): `api-key` (a platform credential, the default) or `subscription` (served on one subscription connection). */
   credentialMode?: 'api-key' | 'subscription';
   /** M5(1), (4): subscription scope (`'factory'` or `'personal'`). */
@@ -32,12 +37,20 @@ export type CatalogEntry = {
 };
 export type ModelCatalog = Record<string, CatalogEntry>;
 
+/** Bedrock Converse service tiers (#557). */
+export const SERVICE_TIERS = ['default', 'flex', 'priority'] as const;
+export type ServiceTier = (typeof SERVICE_TIERS)[number];
+export function isServiceTier(v: unknown): v is ServiceTier {
+  return typeof v === 'string' && (SERVICE_TIERS as readonly string[]).includes(v);
+}
+
 const PROVIDER_DISPLAY_LABELS: Record<string, string> = {
   xai: 'xAI API',
   openai: 'OpenAI API',
   anthropic: 'Anthropic API',
   google: 'Google API',
   bedrock: 'Bedrock',
+  'bedrock-converse': 'Bedrock',
   vertex: 'Vertex AI',
   'vertex-anthropic': 'Vertex Anthropic',
   deepseek: 'DeepSeek API',
@@ -163,6 +176,10 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
     if (p !== undefined && (typeof p.inputPerMTok !== 'number' || typeof p.outputPerMTok !== 'number')) {
       throw new Error(`FACTORY_MODEL_CATALOG.${name}.price needs inputPerMTok and outputPerMTok`);
     }
+    const rawTier = (e as any).serviceTier;
+    if (rawTier !== undefined && !isServiceTier(rawTier)) {
+      throw new Error(`FACTORY_MODEL_CATALOG.${name}.serviceTier must be one of ${SERVICE_TIERS.join(', ')}`);
+    }
     const rawScope = (e as any).scope;
     const rawOwner = (e as any).ownerPrincipalId;
     const validSubScope =
@@ -182,6 +199,7 @@ export function parseModelCatalog(json: string | undefined): ModelCatalog {
       ...(typeof (e as any).secret === 'string' ? { secret: (e as any).secret } : {}),
       ...(e.region ? { region: e.region } : {}),
       ...(p ? { price: p } : {}),
+      ...(rawTier !== undefined ? { serviceTier: rawTier } : {}),
       ...(isSub
         ? {
             credentialMode: 'subscription' as const,
@@ -337,6 +355,7 @@ type ConverseBody = {
     }>;
     toolChoice?: Record<string, unknown>;
   };
+  serviceTier?: { type: ServiceTier };
 };
 
 /** What a model accepts from the factory model API (GAP-171, GAP-175). */
@@ -378,8 +397,11 @@ export function claudeAcceptsSampling(modelId: string): boolean {
   return /claude/.test(modelId) && modelCapabilities(modelId).sampling;
 }
 
-/** OpenAI messages → Bedrock Converse request. Consecutive same-role turns merge (Converse requires alternation). */
-export function toConverse(req: ChatRequest, modelId?: string): ConverseBody {
+/**
+ * OpenAI messages → Bedrock Converse request. Consecutive same-role turns merge (Converse requires alternation).
+ * `serviceTier` (#557) comes from the catalog entry, never from the agent's request.
+ */
+export function toConverse(req: ChatRequest, modelId?: string, serviceTier?: ServiceTier): ConverseBody {
   const caps: ModelCapabilities = modelId ? modelCapabilities(modelId) : { sampling: true, forcedToolChoice: true };
   const sampling = caps.sampling;
   const system = req.messages.filter((m) => m.role === 'system').map((m) => ({ text: m.content }));
@@ -469,6 +491,7 @@ export function toConverse(req: ChatRequest, modelId?: string): ConverseBody {
     ...(system.length ? { system } : {}),
     ...(Object.keys(inferenceConfig).length ? { inferenceConfig } : {}),
     ...(toolConfig ? { toolConfig } : {}),
+    ...(serviceTier ? { serviceTier: { type: serviceTier } } : {}),
   };
 }
 
@@ -550,7 +573,7 @@ export function bedrockConverse(opts: BedrockConverseOptions = {}): ModelAdapter
         throw new ModelUpstreamError(503, 'provider_credentials_unavailable', 'gatekeeper-egress has no cloud credentials');
       }
       const url = new URL(`${endpoint(region).replace(/\/$/, '')}/model/${encodeURIComponent(entry.id)}/converse`);
-      const body = JSON.stringify(toConverse(req, entry.id));
+      const body = JSON.stringify(toConverse(req, entry.id, entry.serviceTier));
       const headers = signV4({ method: 'POST', url, headers: { 'content-type': 'application/json', accept: 'application/json' }, body }, c, { region, service: 'bedrock' }, new Date(), { contentSha256Header: true });
       delete headers['host'];
       let res: Response;

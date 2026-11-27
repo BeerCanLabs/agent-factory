@@ -114,37 +114,111 @@ variable "gatekeeper_egress_prices" {
 }
 
 variable "model_catalog" {
-  description = "Models the factory model API offers (§6.9 M3): neutral name -> provider adapter, provider model id, region, and USD per million tokens. Passed to the gatekeeper-egress as FACTORY_MODEL_CATALOG."
+  description = "Models the factory model API offers (§6.9 M3): neutral name -> provider adapter, provider model id, region, optional Bedrock service tier, and USD per million tokens. Passed to the gatekeeper-egress as FACTORY_MODEL_CATALOG. Prices are the AWS list price for us-east-1 on-demand (checked 2026-11-27 against the AWS Pricing API). Claude is not seeded on Bedrock: the factory serves Claude through the Anthropic API vendor, where the current models are newer and cheaper (#557)."
   type = map(object({
-    provider = string
-    id       = string
-    region   = optional(string)
-    price    = object({ inputPerMTok = number, outputPerMTok = number })
+    provider    = string
+    id          = string
+    region      = optional(string)
+    serviceTier = optional(string)
+    price       = object({ inputPerMTok = number, outputPerMTok = number })
   }))
+  validation {
+    condition     = alltrue([for m in values(var.model_catalog) : m.serviceTier == null || (m.provider == "bedrock-converse" && contains(["default", "flex", "priority"], coalesce(m.serviceTier, "default")))])
+    error_message = "serviceTier must be default, flex or priority, and only on bedrock-converse models."
+  }
   default = {
-    "claude-sonnet-4-5" = {
+    # Open-weight models on Bedrock (on-demand standard, us-east-1). They take no inference profile prefix.
+    "deepseek-v3.2" = {
       provider = "bedrock-converse"
-      id       = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      id       = "deepseek.v3.2"
       region   = "us-east-1"
-      price    = { inputPerMTok = 3, outputPerMTok = 15 }
+      price    = { inputPerMTok = 0.62, outputPerMTok = 1.85 }
     }
-    "claude-haiku-4-5" = {
+    "minimax-m2.5" = {
       provider = "bedrock-converse"
-      id       = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+      id       = "minimax.minimax-m2.5"
       region   = "us-east-1"
-      price    = { inputPerMTok = 1, outputPerMTok = 5 }
+      price    = { inputPerMTok = 0.3, outputPerMTok = 1.2 }
     }
-    "claude-sonnet-4-6" = {
+    "kimi-k2.5" = {
       provider = "bedrock-converse"
-      id       = "us.anthropic.claude-sonnet-4-6"
+      id       = "moonshotai.kimi-k2.5"
       region   = "us-east-1"
-      price    = { inputPerMTok = 3, outputPerMTok = 15 }
+      price    = { inputPerMTok = 0.6, outputPerMTok = 3 }
     }
-    "claude-opus-4-6" = {
+    "glm-5" = {
       provider = "bedrock-converse"
-      id       = "us.anthropic.claude-opus-4-6-v1"
+      id       = "zai.glm-5"
       region   = "us-east-1"
-      price    = { inputPerMTok = 5, outputPerMTok = 25 }
+      price    = { inputPerMTok = 1, outputPerMTok = 3.2 }
+    }
+    "qwen3-coder-next" = {
+      provider = "bedrock-converse"
+      id       = "qwen.qwen3-coder-next"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 0.5, outputPerMTok = 1.2 }
+    }
+    "gpt-oss-120b" = {
+      provider = "bedrock-converse"
+      id       = "openai.gpt-oss-120b-1:0"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 0.15, outputPerMTok = 0.6 }
+    }
+    "gpt-oss-20b" = {
+      provider = "bedrock-converse"
+      id       = "openai.gpt-oss-20b-1:0"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 0.07, outputPerMTok = 0.3 }
+    }
+    # Bedrock Flex tier (serviceTier = "flex"): about half price, slower under load. For background runs, not live chat.
+    "deepseek-v3.2-flex" = {
+      provider    = "bedrock-converse"
+      id          = "deepseek.v3.2"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.31, outputPerMTok = 0.925 }
+    }
+    "minimax-m2.5-flex" = {
+      provider    = "bedrock-converse"
+      id          = "minimax.minimax-m2.5"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.15, outputPerMTok = 0.6 }
+    }
+    "kimi-k2.5-flex" = {
+      provider    = "bedrock-converse"
+      id          = "moonshotai.kimi-k2.5"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.3, outputPerMTok = 1.5 }
+    }
+    "glm-5-flex" = {
+      provider    = "bedrock-converse"
+      id          = "zai.glm-5"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.5, outputPerMTok = 1.6 }
+    }
+    "qwen3-coder-next-flex" = {
+      provider    = "bedrock-converse"
+      id          = "qwen.qwen3-coder-next"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.25, outputPerMTok = 0.6 }
+    }
+    "gpt-oss-120b-flex" = {
+      provider    = "bedrock-converse"
+      id          = "openai.gpt-oss-120b-1:0"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.075, outputPerMTok = 0.3 }
+    }
+    "gpt-oss-20b-flex" = {
+      provider    = "bedrock-converse"
+      id          = "openai.gpt-oss-20b-1:0"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.035, outputPerMTok = 0.15 }
     }
   }
 }
