@@ -66,8 +66,12 @@ function decodeObject(key: string, bytes: Uint8Array): string {
   let raw: Uint8Array = bytes;
   if (gz) {
     try {
-      raw = gunzipSync(bytes);
-    } catch {
+      // Cap inflation here. Checking the output length after a full gunzip lets a small gzip bomb allocate without bound.
+      raw = gunzipSync(bytes, { maxOutputLength: MAX_OBJECT_BYTES });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw new DataExportReadError(`export object exceeds ${MAX_OBJECT_BYTES} bytes uncompressed`);
+      }
       throw new DataExportReadError('export object is not gzip');
     }
   }

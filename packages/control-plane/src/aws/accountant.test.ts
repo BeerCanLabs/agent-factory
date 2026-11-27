@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { AwsCostSource } from './accountant.js';
-import { DataExportReader, dataExportLocationFromEnv, keysForMonth, type DataExportClient } from './data-export.js';
+import { DataExportReadError, DataExportReader, dataExportLocationFromEnv, keysForMonth, type DataExportClient } from './data-export.js';
 
 const WINDOW = { start: '2026-11-01', end: '2026-12-01' };
 const fixture = readFileSync(fileURLToPath(new URL('../../../../packages/budget/src/fixtures/aws-data-export-cur2.csv', import.meta.url)), 'utf8');
@@ -102,6 +102,22 @@ describe('Accountant reads a fixture export and falls back to Cost Explorer', ()
     assert.ok(snap.allocation?.backfill.every((p) => p.applied === false));
     assert.equal(JSON.stringify(snap).includes('secretAccessKey'), false);
     assert.equal(JSON.stringify(snap).includes('AKIA'), false);
+  });
+
+  it('rejects a gzip payload whose inflated size exceeds the cap, and does not call it invalid gzip', async () => {
+    const inflated = Buffer.alloc(32 * 1024 * 1024 + 64);
+    const body = gzipSync(inflated);
+    assert.ok(body.length < 32 * 1024 * 1024, 'the compressed bomb stays under the download cap');
+    const s3 = fakeS3({ 'exports/part.csv.gz': { body } });
+    await assert.rejects(
+      () => new DataExportReader(s3, location).load(WINDOW),
+      (err: unknown) => {
+        assert.ok(err instanceof DataExportReadError);
+        assert.match(err.message, /33554432 bytes uncompressed/);
+        assert.doesNotMatch(err.message, /not gzip/);
+        return true;
+      },
+    );
   });
 
   it('uses Cost Explorer when the prefix has no data file for the month', async () => {
