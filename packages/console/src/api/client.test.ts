@@ -3,6 +3,24 @@ import { it } from 'node:test';
 import assert from 'node:assert/strict';
 import { factoryApi, signOut } from './client.js';
 
+it('#519 adoption request and approval send redeploy, defaulting to true', async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ ok: true, apply: { status: 'started' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  await factoryApi.requestAdoption('higgins', 'conductor', '0.3.1');
+  await factoryApi.requestAdoption('higgins', 'conductor', '0.3.1', 'batch', false);
+  await factoryApi.approveAdoption('higgins', 'conductor');
+  await factoryApi.approveAdoption('higgins', 'conductor', 'now', false);
+  assert.equal(calls[0].url, '/api/v1/agents/higgins/skills');
+  assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { skillId: 'conductor', version: '0.3.1', redeploy: true });
+  assert.deepEqual(JSON.parse(String(calls[1].init?.body)), { skillId: 'conductor', version: '0.3.1', reason: 'batch', redeploy: false });
+  assert.equal(calls[2].url, '/api/v1/agents/higgins/skills/conductor/adoption/approve');
+  assert.deepEqual(JSON.parse(String(calls[2].init?.body)), { redeploy: true });
+  assert.deepEqual(JSON.parse(String(calls[3].init?.body)), { reason: 'now', redeploy: false });
+});
+
 it('S9: people, grants and keys calls are prefixed with /api/v1 exactly once', async () => {
   const seen: string[] = [];
   globalThis.fetch = (async (url: string) => {

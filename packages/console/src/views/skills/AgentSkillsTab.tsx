@@ -5,9 +5,9 @@ import { ApiError, factoryApi } from '../../api/client.js';
 import { useAuth } from '../../auth/CloudflareAuth.js';
 import { usePermissions } from '../../auth/usePermissions.js';
 import { Dialog } from '../../components/Dialog.js';
-import { AdoptionDialog, type AdoptionAction } from './dialogs.js';
+import { AdoptionDialog, RedeployChoice, type AdoptionAction } from './dialogs.js';
 import { VisibilityBadge } from './StatusBadge.js';
-import { agentSkillRows, choosableVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText, type Rebuild } from './agent-skills-model.js';
+import { adoptionApplyText, agentSkillRows, applyOf, choosableVersions, defaultVersion, isOwnerOf, isRollBack, permsFor, rebuildState, rebuildText, type Rebuild } from './agent-skills-model.js';
 import { errorText, when } from './skills-model.js';
 import { btnDanger, btnPrimary, btnQuiet, card, input, label } from './ui.js';
 
@@ -45,6 +45,7 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
   const [versions, setVersions] = useState<string[] | null>(null);
   const [version, setVersion] = useState('');
   const [reason, setReason] = useState('');
+  const [redeploy, setRedeploy] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,26 +69,29 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
   // Until a version is chosen the dialog does not say upgrade or roll back: it does not know which it is.
   const verb = !ask.current ? 'Adopt' : !version ? 'Change' : back ? 'Roll back' : 'Upgrade';
   const text = reason.trim() || undefined;
+  const redeployWhen = !ask.current ? 'request' : back ? 'request' : 'upgrade';
 
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
-      const requested = await factoryApi.requestAdoption(agentId, ask.skillId, version, text);
+      const requested = await factoryApi.requestAdoption(agentId, ask.skillId, version, text, redeploy);
       // The control plane says when a new request replaced one that was waiting; the person is told, not left to find out.
       const replaced = (requested as { replacedRequest?: { version?: string; requestedBy?: string } }).replacedRequest;
       const replacedNote = replaced ? ` It replaced the request for ${ask.skillId}@${replaced.version ?? '?'}${replaced.requestedBy ? ` that ${replaced.requestedBy} had made` : ''}.` : '';
+      const later = redeploy ? 'It will be redeployed when approved.' : 'The running image will be left as it is until a later redeploy.';
       if (!canDecide) {
-        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}. An admin decides it; nothing changes until then.${replacedNote}`, replaced ? 'warn' : 'ok');
+        onDone(`Asked for ${ask.skillId}@${version} for ${agentId}. An admin decides it; nothing changes until then. ${later}${replacedNote}`, replaced ? 'warn' : 'ok');
         return;
       }
+      let approved: Record<string, unknown>;
       try {
-        await factoryApi.approveAdoption(agentId, ask.skillId, text);
+        approved = await factoryApi.approveAdoption(agentId, ask.skillId, text, redeploy);
       } catch (err) {
         onDone(`Asked for ${ask.skillId}@${version} for ${agentId}, but approving it failed (${errorText(err)}). The request is still waiting under Pending, and nothing has changed on ${agentId}.${replacedNote}`, 'warn');
         return;
       }
-      onDone(`${agentId} is being rebuilt with ${ask.skillId}@${version}.${replacedNote}`, replaced ? 'warn' : 'ok');
+      onDone(`${adoptionApplyText(agentId, applyOf(approved))}${replacedNote}`, replaced ? 'warn' : 'ok');
     } catch (err) {
       const body = err instanceof ApiError ? err.body : null;
       setError(body?.error === 'already_adopted' ? `${agentId} already runs ${ask.skillId}@${version}.` : body?.error === 'skill_retired' ? 'This skill is retired, so it can no longer be adopted.' : errorText(err));
@@ -135,10 +139,11 @@ const RequestDialog: React.FC<{ agentId: string; ask: Ask; canDecide: boolean; o
       )}
       <p>
         {canDecide
-          ? `This asks for the version and approves it in one step. ${agentId}’s configuration gets a new version and ${agentId} is rebuilt; the factory does this, with no change to any repository.`
-          : `An admin decides this. Adopting a skill adds access, so the request waits for them; ${agentId} is rebuilt only once it is approved.`}
+          ? `This asks for the version and approves it in one step. ${agentId}’s configuration gets a new version; the factory does this, with no change to any repository.`
+          : `An admin decides this. Adopting a skill adds access, so the request waits for them.`}
       </p>
       {back && <p className="text-amber-700 dark:text-amber-400">This goes back to an older version.</p>}
+      <RedeployChoice checked={redeploy} onChange={setRedeploy} disabled={busy} when={redeployWhen} />
       <label className="block space-y-1">
         <span className={label}>Reason (optional)</span>
         <textarea className={`${input} h-16`} value={reason} maxLength={2000} onChange={(e) => setReason(e.target.value)} placeholder="Recorded in the ledger" />
@@ -206,7 +211,7 @@ const Section: React.FC<{ title: string; count: number; hint?: string; children:
 
 export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => void | Promise<void> }> = ({ agent, onRefresh }) => {
   const { user } = useAuth();
-  const { canDecideAdoptions } = usePermissions();
+  const { canDecideAdoptions, canDeploy } = usePermissions();
   const [data, setData] = useState<AgentSkills | null>(null);
   const [owners, setOwners] = useState<string[]>([]);
   const latest = useRef({ load: async () => {}, onRefresh: (() => {}) as () => void | Promise<void> });
@@ -215,6 +220,7 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
   const [refreshing, setRefreshing] = useState(false);
   const [notice, setNotice] = useState<{ text: string; tone: NoticeTone } | null>(null);
   const [ownersError, setOwnersError] = useState<string | null>(null);
+  const [redeploying, setRedeploying] = useState(false);
   const [ask, setAsk] = useState<Ask | null>(null);
   const [adoption, setAdoption] = useState<AdoptionAction | null>(null);
   const [cancel, setCancel] = useState<{ skillId: string; version: string } | null>(null);
@@ -298,6 +304,19 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
   };
 
   const banner = rebuildText(rebuild);
+  const redeployNow = async () => {
+    setRedeploying(true);
+    try {
+      await factoryApi.deployAgent(agent.id);
+      setNotice({ text: `${agent.name} is being redeployed from its current configuration.`, tone: 'ok' });
+      void load();
+      void onRefresh();
+    } catch (err) {
+      setNotice({ text: errorText(err), tone: 'warn' });
+    } finally {
+      setRedeploying(false);
+    }
+  };
   // The dialogs say things that depend on the skill (a private skill's removal is not undone by a new version), so they are
   // opened with the skill's own record, not the agent's list, which leaves out a skill that is retired or not approved.
   const openAdoption = async (kind: AdoptionAction['kind'], skillId: string, adopter: AdoptionAction['adopter']) => {
@@ -324,7 +343,13 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
       {banner && (
         <div className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${rebuild.kind === 'rebuilding' ? 'bg-sky-50 text-sky-900 border-sky-300 dark:bg-sky-950/40 dark:text-sky-200 dark:border-sky-800' : 'bg-amber-50 text-amber-900 border-amber-300 dark:bg-amber-950/30 dark:text-amber-200 dark:border-amber-800'}`} role="status">
           {rebuild.kind === 'rebuilding' ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> : <Clock className="w-3.5 h-3.5 shrink-0" />}
-          {banner}
+          <span className="flex-1">{banner}</span>
+          {rebuild.kind === 'waiting' && canDeploy && (
+            <button className={btnPrimary} onClick={() => void redeployNow()} disabled={redeploying}>
+              {redeploying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+              Redeploy
+            </button>
+          )}
         </div>
       )}
       {notice && (
@@ -385,11 +410,12 @@ export const AgentSkillsTab: React.FC<{ agent: AgentRecord; onRefresh: () => voi
                       asked by {p.requestedBy ?? 'unknown'}
                       {p.requestedAt ? ` · ${when(p.requestedAt)}` : ''}
                       {p.reason ? ` · “${p.reason}”` : ''}
+                      {p.redeploy === false ? ' · will not redeploy until asked' : ' · redeploy when approved'}
                     </div>
                   </div>
                   <div className="flex gap-2">
                     {p.offer.approve && (
-                      <button className={btnPrimary} onClick={() => void openAdoption('approve', p.skillId, { agentId: agent.id, version: p.version, state: 'requested', ...(p.requestedBy ? { requestedBy: p.requestedBy } : {}) })}>
+                      <button className={btnPrimary} onClick={() => void openAdoption('approve', p.skillId, { agentId: agent.id, version: p.version, state: 'requested', ...(p.requestedBy ? { requestedBy: p.requestedBy } : {}), ...(p.redeploy === false ? { redeploy: false } : {}) })}>
                         Approve
                       </button>
                     )}

@@ -16,7 +16,7 @@ import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 import { signConsentState, verifyConsentState } from './connections.js';
 import { invalidateCredentials } from './credentials.js';
 import { invalidateSecret, readSecret } from './app-setup-providers.js';
-import { forgetMintedKeys } from './github-app-install.js';
+import { invalidateGithubApp } from './github-app-install.js';
 import { OWNER, legacyOrgs, readAppRecord, writeAppRecord, type OwnerType } from './github-app-owners.js';
 
 const STATE_TTL_MS = 10 * 60_000;
@@ -30,6 +30,17 @@ export function githubAppSecretNames(agentId: string, owner?: string) {
   const a = `GITHUB_APP_${agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
   const p = owner ? `${a}__OWNER_${owner.toUpperCase().replace(/[^A-Z0-9]/g, '_')}` : a;
   return { id: `${p}_ID`, slug: `${p}_SLUG`, privateKey: `${p}_PRIVATE_KEY`, webhookSecret: `${p}_WEBHOOK_SECRET` };
+}
+
+/**
+ * The app id and private key are what a minted installation key is signed with. The slug and webhook secret are not.
+ * Owner apps use the same two suffixes on their own prefix. Used to decide which credential writes drop minted keys.
+ */
+export function isGithubAppKeyMaterial(agentId: string, name: string): boolean {
+  const base = `GITHUB_APP_${agentId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  if (!name.startsWith(base)) return false;
+  const rest = name.slice(base.length);
+  return rest === '_ID' || rest === '_PRIVATE_KEY' || /^__OWNER_[A-Z0-9_]+_(ID|PRIVATE_KEY)$/.test(rest);
 }
 
 const base = (s: FactoryState) => s.publicBaseUrl?.replace(/\/$/, '') || undefined;
@@ -268,8 +279,9 @@ async function callback(state: FactoryState, res: http.ServerResponse, url: URL)
     if (!writeAppRecord(state, parsed.agentId, rec)) console.error(`[keymaster] ${parsed.agentId}: no registry dir; the ${owner} app is stored but not recorded`);
   }
   invalidateCredentials(state);
-  // Jury #522 G3: a key minted from the app this one replaces is not served from the cache.
-  forgetMintedKeys(state, parsed.agentId);
+  // K3, GAP-269 (#504): a key minted from the app this one replaces is not served, and a mint already in
+  // flight does not write that key back.
+  invalidateGithubApp(state, parsed.agentId);
   state.ledger.append({ timestamp: new Date().toISOString(), agentId: parsed.agentId, type: 'action', action: 'GITHUB_APP_CREATED', actor: parsed.actor, appSlug: app.slug, ...(owner ? { owner } : {}), ...(owner && parsed.migrate === true ? { migrated: true } : {}) });
   page(res, 200, `GitHub App ready for ${state.agents.get(parsed.agentId)?.name ?? parsed.agentId}`, 'The app key is stored with the Keymaster. You can close this window.');
 }

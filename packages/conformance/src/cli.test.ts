@@ -54,7 +54,8 @@ describe('§6.17 CL2 the manager is house staff, not a platform service (SV1, L2
 });
 
 describe('§6.17 CL5 the CLI adds no interface', () => {
-  const cp = ['app.ts', 'spend.ts', 'stream.ts'].map((f) => read(`packages/control-plane/src/${f}`)).join('\n');
+  // Skill adoption lives in skills.ts (SK3). The CLI's adopt and approve commands call those routes (#519).
+  const cp = ['app.ts', 'spend.ts', 'stream.ts', 'skills.ts'].map((f) => read(`packages/control-plane/src/${f}`)).join('\n');
 
   it('CL5 every path the CLI names is built from segments the control plane has (a coarse check; tools.test.ts and the e2e test cover the real routes)', () => {
     const missing: string[] = [];

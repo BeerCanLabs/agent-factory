@@ -18,6 +18,8 @@ import { requirePrivilege, json, type FactoryState } from './app.js';
 import { BUILTIN_AGENT_IDS, declaredCredentials, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { consentUnavailable, getConnections } from './connections.js';
 import { invalidateSecret } from './app-setup-providers.js';
+import { isGithubAppKeyMaterial } from './github-app-setup.js';
+import { invalidateGithubApp } from './github-app-install.js';
 
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,127}$/;
 const MAX_VALUE = 64 * 1024;
@@ -213,6 +215,9 @@ async function writeCredential(state: FactoryState, req: http.IncomingMessage, r
     return noStore(res, 502, { error: 'write_failed', name });
   }
   invalidateSecret(state, name);
+  // K3, GAP-269 (#504): rotating the app id or private key drops keys minted from the previous one.
+  // The slug, the webhook secret, and an OAuth client (submitProviderClient) are not this call.
+  if (isGithubAppKeyMaterial(agentId, name)) invalidateGithubApp(state, agentId);
   invalidateCredentials(state);
   const action = existed ? 'CREDENTIAL_ROTATED' : 'CREDENTIAL_SET';
   const at = new Date().toISOString();
