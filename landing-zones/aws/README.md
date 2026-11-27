@@ -77,7 +77,7 @@ terraform apply \
 
 Agents call models at `${FACTORY_MODEL_BASE_URL}/chat/completions` (OpenAI Chat Completions format). The gatekeeper-egress's `models` route translates each call to Bedrock Converse and signs it with the gatekeeper-egress task role, which is allowed `bedrock:InvokeModel` on foundation models and this account's inference profiles; agents hold no AWS credentials.
 
-1. Set `model_catalog` to the models this factory offers (default: six open-weight Bedrock models, each also offered as a cheaper `-flex` entry; see `variables.tf`). Enable model access for them in the Bedrock console.
+1. Set `model_catalog` to the models this factory offers (default: seven open-weight Bedrock models, each also offered as a cheaper `-flex` entry; see `variables.tf`). Enable model access for them in the Bedrock console.
 2. `PUT /api/v1/agents/<id>/policy {"routes":["models"], "models":["minimax-m2.5"], "budgetUsd":{"perDay":5}}`.
 
 ## Operator identity (Cloudflare Access)

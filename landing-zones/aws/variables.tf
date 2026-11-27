@@ -164,6 +164,12 @@ variable "model_catalog" {
       region   = "us-east-1"
       price    = { inputPerMTok = 0.15, outputPerMTok = 0.6 }
     }
+    "gpt-oss-20b" = {
+      provider = "bedrock-converse"
+      id       = "openai.gpt-oss-20b-1:0"
+      region   = "us-east-1"
+      price    = { inputPerMTok = 0.07, outputPerMTok = 0.3 }
+    }
     # Bedrock Flex tier (serviceTier = "flex"): about half price, slower under load. For background runs, not live chat.
     "deepseek-v3.2-flex" = {
       provider    = "bedrock-converse"
@@ -206,6 +212,13 @@ variable "model_catalog" {
       region      = "us-east-1"
       serviceTier = "flex"
       price       = { inputPerMTok = 0.075, outputPerMTok = 0.3 }
+    }
+    "gpt-oss-20b-flex" = {
+      provider    = "bedrock-converse"
+      id          = "openai.gpt-oss-20b-1:0"
+      region      = "us-east-1"
+      serviceTier = "flex"
+      price       = { inputPerMTok = 0.035, outputPerMTok = 0.15 }
     }
   }
 }

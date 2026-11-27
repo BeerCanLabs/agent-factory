@@ -421,6 +421,7 @@ describe('admitted models take provider, endpoint and credential from their vend
     });
     assert.equal(res.status, 201, JSON.stringify(res.body));
     assert.equal(res.body.model.serviceTier, 'flex');
+    assert.equal(state.ledger.query().filter((e: any) => e.action === 'MODEL_ADMITTED' && e.model === 'deepseek-v3.2-flex').length, 1);
     assert.deepEqual(state.modelStore!.toEgressCatalog()['deepseek-v3.2-flex'], {
       provider: 'bedrock-converse', id: 'deepseek.v3.2', region: 'us-east-1', price: { inputPerMTok: 0.31, outputPerMTok: 0.925 }, serviceTier: 'flex',
     });

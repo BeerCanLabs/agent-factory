@@ -32,8 +32,9 @@ Where prices *do* appear:
   | `glm-5` | `zai.glm-5` | input $1.00, output $3.20 | input $0.50, output $1.60 |
   | `qwen3-coder-next` | `qwen.qwen3-coder-next` | input $0.50, output $1.20 | input $0.25, output $0.60 |
   | `gpt-oss-120b` | `openai.gpt-oss-120b-1:0` | input $0.15, output $0.60 | input $0.075, output $0.30 |
+  | `gpt-oss-20b` | `openai.gpt-oss-20b-1:0` | input $0.07, output $0.30 | input $0.035, output $0.15 |
 
-  Prices are the AWS us-east-1 on-demand list prices, checked on 2026-11-27. Each `-flex` entry sends Bedrock `serviceTier: { type: "flex" }`: about half the price, with slower responses when Bedrock is busy. It suits scheduled and background runs better than live chat. Claude on Bedrock does not offer Flex. Claude is not seeded on Bedrock because the Anthropic API vendor serves newer, cheaper Claude models (for example `claude-haiku-5-5` at $0.10 / $0.50). Bedrock `us.` geo inference profiles for Claude bill 10% above the global rate.
+  Prices are the AWS us-east-1 on-demand list prices, checked on 2026-11-27. Each `-flex` entry sends Bedrock `serviceTier: { type: "flex" }`: about half the price, with slower responses when Bedrock is busy. It suits scheduled and background runs better than live chat. These models also accept `serviceTier: "priority"` (about 1.75x the standard price); no priority entries are seeded. Claude on Bedrock does not offer Flex. Claude is not seeded on Bedrock because the Anthropic API vendor serves newer, cheaper Claude models (for example `claude-haiku-5-5` at $0.10 / $0.50). Bedrock `us.` geo inference profiles for Claude bill 10% above the global rate.
 
 - Unpriced models are **refused** (`landing-zones/aws/README.md`, `gatekeeper_egress_prices`). That is a safety feature, not a discount.
 

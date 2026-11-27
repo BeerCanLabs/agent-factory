@@ -3066,7 +3066,6 @@ export function admitModel(state: FactoryState, input: AdmitInput, actor: string
       credentialMode: 'api-key',
       vendorId: model.vendorId,
       price: model.price,
-      ...(model.serviceTier ? { serviceTier: model.serviceTier } : {}),
       timestamp: new Date().toISOString(),
     });
     return { ok: true, model };
