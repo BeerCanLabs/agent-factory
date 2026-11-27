@@ -12,6 +12,7 @@
  * secret store only; a provider never returns one.
  */
 import http from 'node:http';
+import { bumpSecretGeneration, secretGeneration } from '@beercanlabs/factory-property-manager';
 import { requirePrivilege, json, readJson, type FactoryState } from './app.js';
 
 export type SetupAction =
@@ -62,16 +63,15 @@ export function isPublicSecretName(name: string): boolean {
   return /^GITHUB_APP_[A-Z0-9_]+_(ID|SLUG)$/.test(name);
 }
 const reading = new WeakMap<FactoryState, Map<string, Promise<string | undefined>>>();
-const generations = new WeakMap<FactoryState, Map<string, number>>();
 
 /**
  * Forgets a secret's cached value after a setup flow stores a new one. A read in flight at this point will not be
  * cached: its caller still gets the value it read, but the next read of the name does a fresh provider read.
+ * The generation is the property manager's (`bumpSecretGeneration`), the same counter pre-flight checks, so a
+ * pre-flight read in flight here does not write the old value back either (GAP-269, #503).
  */
 export function invalidateSecret(state: FactoryState, name: string): void {
-  const gens = generations.get(state) ?? new Map<string, number>();
-  generations.set(state, gens);
-  gens.set(name, (gens.get(name) ?? 0) + 1);
+  bumpSecretGeneration(state, name);
   state.secretCache?.delete(name);
   reading.get(state)?.delete(name);
 }
@@ -90,11 +90,11 @@ export async function readSecretCached(state: FactoryState, name: string, ttlMs 
   reading.set(state, inFlight);
   const pending = inFlight.get(name);
   if (pending) return pending;
-  const gen = generations.get(state)?.get(name) ?? 0;
+  const gen = secretGeneration(state, name);
   const p = readSecret(state, name)
     .then((v) => {
       // A value read before an invalidation is returned to this caller but not cached.
-      if (v && (generations.get(state)?.get(name) ?? 0) === gen) {
+      if (v && secretGeneration(state, name) === gen) {
         cache.set(name, { value: v, at: Date.now() });
         if (v.length >= 4 && !isPublicSecretName(name)) state.secretValues.add(v);
       }
