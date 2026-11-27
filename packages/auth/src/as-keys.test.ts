@@ -125,6 +125,37 @@ describe('AS signing keys (front-door Phase 1 Slice 1)', () => {
     assert.equal(ephemeral.ephemeral, true);
   });
 
+  it('fails closed when a configured signing-key secret cannot be read', async () => {
+    const missing: SecretReader = { async get() { return undefined; } };
+    await assert.rejects(
+      loadAsKeySetFromEnv({ FACTORY_AS_SIGNING_KEY_SECRET: 'as/current' }, [missing]),
+      /FACTORY_AS_SIGNING_KEY_SECRET is configured \(as\/current\) but could not be read: SecretReader returned no value/,
+    );
+    await assert.rejects(
+      loadAsKeySetFromEnv({ FACTORY_AS_SIGNING_KEY_SECRET: 'as/current' }),
+      /FACTORY_AS_SIGNING_KEY_SECRET is configured \(as\/current\) but could not be read/,
+    );
+    const throwing: SecretReader = {
+      async get() {
+        throw new Error('access denied');
+      },
+    };
+    await assert.rejects(
+      loadAsKeySetFromEnv({ FACTORY_AS_SIGNING_KEY_SECRET: 'as/current' }, [throwing]),
+      /FACTORY_AS_SIGNING_KEY_SECRET is configured \(as\/current\) but could not be read: access denied/,
+    );
+    await assert.rejects(
+      loadAsKeySetFromEnv(
+        { FACTORY_AS_SIGNING_KEY: pemPair(), FACTORY_AS_PREVIOUS_SIGNING_KEY_SECRET: 'as/previous' },
+        [missing],
+      ),
+      /FACTORY_AS_PREVIOUS_SIGNING_KEY_SECRET is configured \(as\/previous\) but could not be read/,
+    );
+
+    const stillEphemeral = await loadAsKeySetFromEnv({});
+    assert.equal(stillEphemeral.ephemeral, true);
+  });
+
   it('parseIssuerAliases splits, trims, and strips trailing slashes', () => {
     assert.deepEqual(parseIssuerAliases('https://auth.example.com/, https://factory-dashboard.example.com'), [
       'https://auth.example.com',

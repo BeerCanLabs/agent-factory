@@ -66,7 +66,7 @@ export const KeysView: React.FC = () => {
       <div className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 p-4">
         <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Factory issuer</h2>
         <p className="text-slate-500 dark:text-slate-400">
-          The factory authorization server publishes OpenID and JWKS discovery so MCP and OIDC clients can verify factory-issued tokens. Existing API keys and connected-app tokens stay valid during the Phase 1 dual-run.
+          The factory authorization server publishes its signing keys, the JWKS endpoint, and OpenID discovery. API keys and connected-app tokens are the credentials clients use in this slice. Short-lived JWT issuance comes in the next slice.
         </p>
         <dl className="grid gap-2 sm:grid-cols-1 font-mono text-[11px]">
           <div>
@@ -89,7 +89,7 @@ export const KeysView: React.FC = () => {
         <div>
           <h1 className="text-lg font-semibold text-slate-900 dark:text-white">Your API keys</h1>
           <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">
-            Static API keys issued for CLI, scripts, and local developer automation. A new secret is shown once and never stored unhashed. These keys remain valid while the factory also begins issuing short-lived JWTs.
+            Static API keys issued for CLI, scripts, and local developer automation. A new secret is shown once and never stored unhashed. Short-lived JWTs are issued in the next slice; these keys are what the factory issues now.
           </p>
         </div>
 

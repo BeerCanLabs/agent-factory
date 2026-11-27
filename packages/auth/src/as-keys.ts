@@ -142,24 +142,33 @@ export async function loadAsKeySet(opts: {
  *   FACTORY_AS_KMS_KEY_ID — reserved; if set without PEM/JWK material, this throws (inject a signer or provide PEM)
  *
  * When nothing is configured, an ephemeral P-256 key is generated (dev/test). Callers should warn.
+ * A configured signing-key secret that cannot be read fails closed: it does not fall back to an ephemeral key.
  */
 export async function loadAsKeySetFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   secrets: readonly SecretReader[] = [],
 ): Promise<AsKeySet> {
-  const readSecret = async (name: string | undefined): Promise<string | undefined> => {
+  const readSecret = async (label: string, name: string | undefined): Promise<string | undefined> => {
     const trimmed = name?.trim();
     if (!trimmed) return undefined;
     for (const provider of secrets) {
-      const value = await provider.get(trimmed);
-      if (value?.trim()) return value;
+      let value: string | undefined;
+      try {
+        value = await provider.get(trimmed);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`${label} is configured (${trimmed}) but could not be read: ${detail}`);
+      }
+      if (typeof value === 'string' && value.trim()) return value;
     }
-    return undefined;
+    throw new Error(`${label} is configured (${trimmed}) but could not be read: SecretReader returned no value`);
   };
 
-  const currentMaterial = env.FACTORY_AS_SIGNING_KEY?.trim() || (await readSecret(env.FACTORY_AS_SIGNING_KEY_SECRET));
+  const currentMaterial =
+    env.FACTORY_AS_SIGNING_KEY?.trim() || (await readSecret('FACTORY_AS_SIGNING_KEY_SECRET', env.FACTORY_AS_SIGNING_KEY_SECRET));
   const previousMaterial =
-    env.FACTORY_AS_PREVIOUS_SIGNING_KEY?.trim() || (await readSecret(env.FACTORY_AS_PREVIOUS_SIGNING_KEY_SECRET));
+    env.FACTORY_AS_PREVIOUS_SIGNING_KEY?.trim() ||
+    (await readSecret('FACTORY_AS_PREVIOUS_SIGNING_KEY_SECRET', env.FACTORY_AS_PREVIOUS_SIGNING_KEY_SECRET));
   const kmsKeyId = env.FACTORY_AS_KMS_KEY_ID?.trim();
   if (kmsKeyId && !currentMaterial) {
     throw new Error(

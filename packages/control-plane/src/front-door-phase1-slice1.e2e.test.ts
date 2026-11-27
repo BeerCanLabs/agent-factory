@@ -21,13 +21,20 @@ import {
   FileDocBackend,
   GrantStore,
   PrincipalStore,
+  authorize,
   type GrantsDoc,
   type PrincipalsDoc,
 } from '@beercanlabs/factory-bouncer';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
-import { createFactoryServer, resolveVerifiedPrincipal, type FactoryState } from './app.js';
+import {
+  authorizationGrantsFor,
+  createFactoryServer,
+  effectiveGrantsForActor,
+  resolveVerifiedPrincipal,
+  type FactoryState,
+} from './app.js';
 
 const ISS = 'https://idp.example';
 const AUD = 'factory';
@@ -256,6 +263,95 @@ describe('front-door Phase 1 Slice 1: JWKS, OIDC discovery, and #527', { concurr
       );
       assert.equal(verified.actor, 'user:dale.sackrider');
       assert.ok(verified.roles.includes('admin'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('#527 requirePrivilege and authorize deny live principal-store grants for an unverified oidc:<email>', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'phase1-527-authz-'));
+    try {
+      const principals = await PrincipalStore.open(new FileDocBackend<PrincipalsDoc>(join(dir, 'principals.json')));
+      await principals.create({
+        id: 'user:dale.sackrider',
+        displayName: 'Dale',
+        emails: ['dale@example.com'],
+        by: 'user:admin',
+      });
+      const grants = await GrantStore.open(new FileDocBackend<GrantsDoc>(join(dir, 'grants.json')), { principals });
+      await grants.grant({
+        subject: 'user:dale.sackrider',
+        scope: { kind: 'fleet' },
+        role: 'admin',
+        by: 'user:admin',
+        granterIsAdmin: true,
+      });
+
+      const unverified = { actor: 'oidc:dale@example.com', roles: [] as const };
+      const state = baseState({ principals, grants });
+      const leaked = effectiveGrantsForActor(state, unverified.actor);
+      assert.equal(leaked.ok, true);
+      assert.equal(leaked.ok && leaked.grants?.some((eg) => !eg.readOnly && eg.grant.role === 'admin'), true);
+
+      const gated = authorizationGrantsFor(state, unverified);
+      assert.equal(gated.ok, true);
+      assert.deepEqual(gated.ok ? gated.grants : undefined, []);
+      assert.equal(
+        authorize({
+          principal: { actor: unverified.actor, roles: [] },
+          privilege: 'grants.manage',
+          resource: { grants: gated.ok ? gated.grants : [] },
+        }).allowed,
+        false,
+      );
+      assert.equal(
+        authorize({
+          principal: { actor: unverified.actor, roles: [] },
+          privilege: 'grants.manage',
+          resource: { grants: leaked.ok ? leaked.grants : [] },
+        }).allowed,
+        true,
+      );
+
+      const { port, close } = await listen(
+        baseState({
+          principals,
+          grants,
+          ledger: state.ledger,
+          auth: {
+            name: 'test-oidc',
+            async verify(authorization) {
+              if (authorization === 'Bearer verified') {
+                return { ok: true, principal: { actor: 'oidc:dale@example.com', roles: [], emailVerified: true } };
+              }
+              if (authorization === 'Bearer unverified') {
+                return { ok: true, principal: { actor: 'oidc:dale@example.com', roles: [] } };
+              }
+              return { ok: false, reason: 'no credential' };
+            },
+          },
+        }),
+      );
+      try {
+        const denied = await call(port, '/api/v1/principals', { authorization: 'Bearer unverified' });
+        assert.equal(denied.status, 403, JSON.stringify(denied.body));
+        const who = await call(port, '/api/v1/whoami', { authorization: 'Bearer unverified' });
+        assert.equal(who.status, 200, JSON.stringify(who.body));
+        assert.equal(who.body.actor, 'oidc:dale@example.com');
+        assert.equal(who.body.principal, 'oidc:dale@example.com');
+        assert.equal(who.body.roles.includes('admin'), false);
+        assert.deepEqual(who.body.grants, []);
+        assert.equal(who.body.materialized, false);
+
+        const allowed = await call(port, '/api/v1/principals', { authorization: 'Bearer verified' });
+        assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
+        const verifiedWho = await call(port, '/api/v1/whoami', { authorization: 'Bearer verified' });
+        assert.equal(verifiedWho.status, 200, JSON.stringify(verifiedWho.body));
+        assert.equal(verifiedWho.body.principal, 'user:dale.sackrider');
+        assert.equal(verifiedWho.body.roles.includes('admin'), true);
+      } finally {
+        await close();
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

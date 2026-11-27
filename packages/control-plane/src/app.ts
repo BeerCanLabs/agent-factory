@@ -602,6 +602,29 @@ export function effectiveGrantsForActor(
   }
 }
 
+/**
+ * #527 / A2: an `oidc:<email>` actor is a verified email only when the IdP attested `email_verified`.
+ * Until then, authorization must not join that actor to a principal-store user or that user's grants.
+ */
+export function unverifiedOidcEmailPrincipal(principal: { actor: string; emailVerified?: boolean }): boolean {
+  const extracted = extractVerifiedEmailFromActor(principal.actor);
+  return extracted?.idp === 'oidc' && principal.emailVerified !== true;
+}
+
+/**
+ * Grants an authorization decision may use. An unverified `oidc:<email>` principal receives none,
+ * including when `normalizeActorToPrincipal` would otherwise map the email onto a store user.
+ */
+export function authorizationGrantsFor(
+  state: FactoryState,
+  principal: { actor: string; emailVerified?: boolean },
+): { ok: true; grants?: EffectiveGrant[]; canonicalSubject?: string } | { ok: false; status: 503; error: string } {
+  if (unverifiedOidcEmailPrincipal(principal)) {
+    return { ok: true, grants: state.grants ? [] : undefined };
+  }
+  return effectiveGrantsForActor(state, principal.actor);
+}
+
 export function resolvePrincipalCaller(
   state: FactoryState,
   principal: Principal,
@@ -609,7 +632,10 @@ export function resolvePrincipalCaller(
   privilege: Privilege,
 ): { ok: true; caller: AuthenticatedCaller } | { ok: false; status: 503; error: string } {
   const subjectActor = principal.onBehalfOf ?? principal.actor;
-  const callerGrantRes = effectiveGrantsForActor(state, subjectActor);
+  const callerGrantRes =
+    !principal.onBehalfOf && unverifiedOidcEmailPrincipal(principal)
+      ? { ok: true as const, grants: state.grants ? ([] as EffectiveGrant[]) : undefined }
+      : effectiveGrantsForActor(state, subjectActor);
   if (!callerGrantRes.ok) {
     return { ok: false, status: 503, error: callerGrantRes.error };
   }
@@ -1557,7 +1583,11 @@ export async function resolveVerifiedPrincipal(
     }
   }
 
-  return { actor, roles: [...roleSet] };
+  return {
+    actor,
+    roles: [...roleSet],
+    ...(verified.emailVerified === true ? { emailVerified: true as const } : {}),
+  };
 }
 
 export function resolveActAsForPrincipal(
@@ -1571,7 +1601,7 @@ export function resolveActAsForPrincipal(
   if (state.grants && !state.grants.healthy) {
     return { ok: false, status: 503, body: { error: 'grant_store_unavailable', message: 'grant store is unhealthy' } };
   }
-  const grantRes = effectiveGrantsForActor(state, principal.actor);
+  const grantRes = authorizationGrantsFor(state, principal);
   if (!grantRes.ok) {
     return { ok: false, status: 503, body: { error: grantRes.error } };
   }
@@ -1844,21 +1874,26 @@ export async function requirePrivilege(
     return result.principal;
   }
 
-  const grantRes = effectiveGrantsForActor(state, result.principal.actor);
+  const grantRes = authorizationGrantsFor(state, result.principal);
   if (!grantRes.ok) {
     json(res, 503, { error: grantRes.error });
     return null;
   }
 
+  const storeGrantsDenied = unverifiedOidcEmailPrincipal(result.principal);
   const ownsAny =
-    privilege === 'skills.register' || privilege === 'mcp.use' || privilege === 'models.read'
-      ? checkOwnsAnyAgent(state, result.principal.actor)
-      : false;
+    storeGrantsDenied
+      ? false
+      : privilege === 'skills.register' || privilege === 'mcp.use' || privilege === 'models.read'
+        ? checkOwnsAnyAgent(state, result.principal.actor)
+        : false;
   const ownsPersonal =
-    privilege === 'subscriptions.own'
-      ? checkOwnsPersonalAgent(state, result.principal.actor)
-      : undefined;
-  const computedGroupRoles = resource?.groupId && state.groups
+    storeGrantsDenied
+      ? undefined
+      : privilege === 'subscriptions.own'
+        ? checkOwnsPersonalAgent(state, result.principal.actor)
+        : undefined;
+  const computedGroupRoles = !storeGrantsDenied && resource?.groupId && state.groups
     ? (state.groups.getGroup(resource.groupId)?.members.some((m) => {
         try {
           return normalizeActorToPrincipal(m, state.principals) === normalizeActorToPrincipal(result.principal.actor, state.principals);
@@ -1869,7 +1904,7 @@ export async function requirePrivilege(
         ? state.groups.getGroup(resource.groupId)?.roles
         : [])
     : undefined;
-  const userGroupRoles = privilege === 'skills.register' && state.groups
+  const userGroupRoles = !storeGrantsDenied && privilege === 'skills.register' && state.groups
     ? state.groups.listUserGroups(result.principal.actor).flatMap((g) => g.roles)
     : undefined;
   const normalizedOwners = resource?.agentId
