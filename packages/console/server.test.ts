@@ -184,6 +184,18 @@ describe('A2 console forwards the caller, adds no credential', () => {
     assert.equal(disc2.status, 200);
     assert.equal(((await disc2.json()) as { path: string }).path, '/.well-known/oauth-authorization-server');
 
+    const oidc = await fetch(`http://127.0.0.1:${port}/.well-known/openid-configuration`);
+    assert.equal(oidc.status, 200);
+    assert.equal(((await oidc.json()) as { path: string }).path, '/.well-known/openid-configuration');
+
+    const jwks = await fetch(`http://127.0.0.1:${port}/jwks`);
+    assert.equal(jwks.status, 200);
+    assert.equal(((await jwks.json()) as { path: string }).path, '/jwks');
+
+    const jwksAlias = await fetch(`http://127.0.0.1:${port}/.well-known/jwks.json`);
+    assert.equal(jwksAlias.status, 200);
+    assert.equal(((await jwksAlias.json()) as { path: string }).path, '/.well-known/jwks.json');
+
     // 2. Authorize redirect preservation (302 + Location)
     const auth = await fetch(`http://127.0.0.1:${port}/authorize?client_id=test&response_type=code`, { redirect: 'manual' });
     assert.equal(auth.status, 302);

@@ -558,6 +558,9 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       '/.well-known/oauth-protected-resource',
       '/.well-known/oauth-protected-resource/mcp',
       '/.well-known/oauth-authorization-server',
+      '/.well-known/openid-configuration',
+      '/.well-known/jwks.json',
+      '/jwks',
     ]) {
       const r = await call(port, 'GET', path, 'none');
       assert.equal(r.status, 200, `${path} unauthenticated discovery`);

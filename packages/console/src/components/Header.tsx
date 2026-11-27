@@ -117,7 +117,7 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing, updateC
         </button>
       </div>
 
-      {/* Cloudflare Access Identity & Role Switcher */}
+      {/* Identity chip (whoami signedInWith) and role switcher */}
       <div className="flex items-center space-x-3">
         {/* Role Selector (Simulate/Switch) */}
         <div className="flex items-center bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg p-1 text-xs">

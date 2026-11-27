@@ -16,6 +16,22 @@ export {
 } from './access.js';
 
 export { API_KEY_PREFIX, apiKeyFromAuthorization, generateApiKey, hashApiKey, sameHash } from './keys.js';
+export {
+  AS_SIGNING_ALG,
+  JWKS_CACHE_CONTROL,
+  asKeyFromMaterial,
+  generateEphemeralAsKey,
+  loadAsKeySet,
+  loadAsKeySetFromEnv,
+  parseIssuerAliases,
+  publicJwksOf,
+  stripTrailingSlash,
+  type AsKey,
+  type AsKeySet,
+  type AsPublicJwk,
+  type ExternalAsSigner,
+  type SecretReader,
+} from './as-keys.js';
 
 export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
@@ -23,7 +39,7 @@ export type Role = (typeof ROLES)[number];
 /** S5: scopes a factory API key narrows its owner's live grants to (absent = no narrowing). */
 export type KeyScopes = { privileges?: string[]; agents?: string[] };
 
-export type Principal = { actor: string; roles: Role[]; onBehalfOf?: string; keyId?: string; keyScopes?: KeyScopes };
+export type Principal = { actor: string; roles: Role[]; onBehalfOf?: string; keyId?: string; keyScopes?: KeyScopes; emailVerified?: boolean };
 
 export type OidcIdentityClaims = { email: string; emailVerified: true; sub: string };
 
@@ -208,7 +224,11 @@ export function oidcAuth(opts: OidcOptions): AuthProvider {
       }
       return {
         ok: true,
-        principal: { actor: `oidc:${email ?? payload.sub}`, roles },
+        principal: {
+          actor: `oidc:${email ?? payload.sub}`,
+          roles,
+          ...(payload.email_verified === true ? { emailVerified: true } : {}),
+        },
       };
     },
   };
@@ -268,6 +288,8 @@ export function authFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProvider 
         jwksUrl: env.FACTORY_OIDC_JWKS_URL || undefined,
         rolesClaim: env.FACTORY_OIDC_ROLES_CLAIM || undefined,
         roleMap: env.FACTORY_OIDC_ROLE_MAP ? (JSON.parse(env.FACTORY_OIDC_ROLE_MAP) as Record<string, Role>) : undefined,
+        // #527 / R13: a correctly signed token is not enough; the IdP must attest email_verified.
+        requireEmailVerified: true,
       }),
     );
   }
