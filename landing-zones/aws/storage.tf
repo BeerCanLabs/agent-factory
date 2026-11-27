@@ -148,6 +148,80 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "skill_packages" {
   }
 }
 
+# §6.15, issue #457: AWS Data Exports land here. The accountant reads exports/ only.
+# Dale creates the export in Billing; this bucket does not call the billing API.
+# SSE-S3 so the accountant needs no kms:Decrypt. ACLs stay off; the bucket owner owns delivered objects.
+resource "aws_s3_bucket" "data_exports" {
+  bucket        = "agent-factory-data-exports-${var.environment}-${random_id.suffix.hex}"
+  force_destroy = false
+}
+
+resource "aws_s3_bucket_versioning" "data_exports" {
+  bucket = aws_s3_bucket.data_exports.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "data_exports" {
+  bucket                  = aws_s3_bucket.data_exports.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "data_exports" {
+  bucket = aws_s3_bucket.data_exports.id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "data_exports" {
+  bucket = aws_s3_bucket.data_exports.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "data_exports" {
+  bucket = aws_s3_bucket.data_exports.id
+  rule {
+    id     = "abort-incomplete-multipart"
+    status = "Enabled"
+    filter {}
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
+# The statement AWS requires before a Data Export can be created. PutObject only, from this account's exports.
+# https://docs.aws.amazon.com/cur/latest/userguide/dataexports-s3-bucket.html
+resource "aws_s3_bucket_policy" "data_exports" {
+  bucket = aws_s3_bucket.data_exports.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableAWSDataExportsToWriteToS3"
+        Effect    = "Allow"
+        Principal = { Service = "bcm-data-exports.amazonaws.com" }
+        Action    = ["s3:PutObject"]
+        Resource  = "${aws_s3_bucket.data_exports.arn}/*"
+        Condition = {
+          ArnLike      = { "aws:SourceArn" = "arn:aws:bcm-data-exports:us-east-1:${var.account_id}:export/*" }
+          StringEquals = { "aws:SourceAccount" = var.account_id }
+        }
+      }
+    ]
+  })
+  depends_on = [aws_s3_bucket_public_access_block.data_exports]
+}
+
 # Hot ledger + runs + policies + approvals. One writer (control plane desired_count = 1).
 resource "aws_efs_file_system" "ledger" {
   encrypted = true

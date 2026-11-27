@@ -164,6 +164,8 @@ A **Compose host** or a **hosted-for-you** shared platform (not built) would cha
 
 The AWS (or GCP) bill is read through a landing-zone adapter (`packages/control-plane/src/aws/accountant.ts`, `packages/budget/src/cloud.ts`). The Accountant splits **gross** vs **credits** vs **net**, and AI (Bedrock / Vertex / Gemini on the cloud bill) vs infrastructure. Cloud AI billed by AWS and the model ledger should be compared, never added together (`summarizeCloud` comments in `cloud.ts`). Cloud bill reads are cached for an hour because they can themselves cost money (`CLOUD_CACHE_MS`).
 
+On AWS, a Data Export (CSV, gzip) under the landing-zone prefix is preferred once an object for the month has landed. The report's `allocation` maps every dollar to cost center `beercanlabs` (sub-center = the `project` tag, or `untagged`) and queues tag backfill for the operator without applying it. The checklist is `docs/aws-data-exports.md`. Cost Explorer remains the source until then. The GCP accountant already reads the BigQuery billing export; that path is unchanged.
+
 **Status: needs the factory team** to attach the cloud-bill adapter and to teach a treasurer how to read FinOps. There is no “email me a PDF invoice” or parent-friendly digest.
 
 ---

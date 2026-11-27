@@ -7,6 +7,7 @@ The Accountant decides whether an agent is inside its budget. Nothing else in th
 - `validateBudgetLimits(raw)`: the rules for a policy's `budgetUsd` (an object of non-negative numbers over the three windows).
 - `SpendTracker`, `spendDetail`: spend rebuilt from the Auditor's ledger `llm` rows, per run, UTC day and UTC month, grouped by model.
 - `priceFor`, `costUsd`: price a model call from per-model rates. The rates are operations data passed in; this package holds none (M3).
+- `rowsFromDataExport`, `snapshotFromRows`, `beerCanLabsFallback`: map an AWS Data Export (or a tag-less Cost Explorer summary) onto cost center `beercanlabs`. The `project` tag is the sub-center. Untagged and foreign cost-center values are sub-center `untagged`, with a backfill proposal that is not applied (issue #457).
 
 Who asks, and who acts on the answer:
 

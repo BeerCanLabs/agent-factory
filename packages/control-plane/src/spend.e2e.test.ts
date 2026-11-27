@@ -5,7 +5,7 @@ import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth, RunTokens } from '@beercanlabs/factory-auth';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
-import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercanlabs/factory-budget';
+import { SpendTracker, type CloudCostSource, type ComputeSource, type CostAllocation } from '@beercanlabs/factory-budget';
 import { ApprovalStore } from '@beercanlabs/factory-bouncer';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { createTreasury } from './spend.js';
@@ -148,6 +148,7 @@ describe('Treasurer endpoints (/report, /compute, /budgets) (DESIGN_AUTHORITY §
   const ledger = new MemoryLedger();
   const runTokens = new RunTokens(KEY);
 
+  let attachedAllocation: CostAllocation | undefined;
   const mockCloud: CloudCostSource = {
     provider: 'aws',
     costs: async (window) => ({
@@ -163,6 +164,7 @@ describe('Treasurer endpoints (/report, /compute, /budgets) (DESIGN_AUTHORITY §
         { service: 'Amazon Elastic Compute Cloud - Compute', usageType: 'BoxUsage:t4g.small', usd: 40, quantity: 720 },
         { service: 'Amazon Bedrock Edition', usageType: 'BedrockUsage', usd: 10, quantity: 100 },
       ],
+      ...(attachedAllocation ? { allocation: attachedAllocation } : {}),
     }),
   };
 
@@ -233,9 +235,58 @@ describe('Treasurer endpoints (/report, /compute, /budgets) (DESIGN_AUTHORITY §
     assert.equal(r.body.totals.creditsUsd, -50);
     assert.equal(r.body.totals.netUsd, -10);
     assert.ok(r.body.budgets);
+    assert.equal(r.body.allocation.costCenter, 'beercanlabs');
+    assert.equal(r.body.allocation.source, 'cost-explorer-fallback');
+    assert.equal(r.body.allocation.totalUsd, 50);
+    assert.equal(r.body.allocation.untaggedUsd, 50);
+    assert.equal(r.body.allocation.taggedUsd, 0);
+    assert.deepEqual(r.body.allocation.bySubCenter, [{ subCenter: 'untagged', usd: 50 }]);
+    assert.deepEqual(r.body.allocation.backfill, []);
+    assert.equal(r.text.includes('secretAccessKey'), false);
+    assert.equal(r.text.includes('AKIA'), false);
 
     const log = ledger.query().find((e) => e.action === 'SPEND_REPORT_READ');
     assert.ok(log, 'SPEND_REPORT_READ not logged');
+  });
+
+  it('passes a Data Export allocation through and does not mark a backfill applied', async () => {
+    attachedAllocation = {
+      costCenter: 'beercanlabs',
+      source: 'aws-data-export',
+      totalUsd: 6.5,
+      taggedUsd: 2,
+      untaggedUsd: 4.5,
+      taggedFraction: 0.3077,
+      centerCoverage: 1,
+      bySubCenter: [{ subCenter: 'agent-factory', usd: 2 }, { subCenter: 'untagged', usd: 4.5 }],
+      byService: [{ service: 'Amazon Elastic Container Service', usd: 2, taggedUsd: 2, untaggedUsd: 0 }],
+      byProject: [{ project: 'agent-factory', usd: 2 }],
+      byTag: { 'cost-center': [{ value: 'beercanlabs', usd: 2 }], project: [], env: [], owner: [] },
+      backfill: [{
+        status: 'proposed',
+        applied: false,
+        queuedFor: 'dale',
+        reason: 'missing-cost-center',
+        service: 'Amazon Virtual Private Cloud',
+        resourceId: null,
+        observedCostCenter: null,
+        proposedTags: { 'cost-center': 'beercanlabs' },
+        usd: 4,
+      }],
+      backfillTruncated: false,
+      notes: ['Every dollar is mapped to cost center beercanlabs.'],
+    };
+    try {
+      const r = await call(port, '/api/v1/spend/report?period=last', 'GET', VIEWER);
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.body.allocation.source, 'aws-data-export');
+      assert.equal(r.body.allocation.byProject[0].project, 'agent-factory');
+      assert.equal(r.body.allocation.backfill[0].applied, false);
+      assert.equal(r.body.allocation.backfill[0].queuedFor, 'dale');
+      assert.equal(r.text.includes('secretAccessKey'), false);
+    } finally {
+      attachedAllocation = undefined;
+    }
   });
 
   it('GET /api/v1/spend/report?period=last queries previous month', async () => {

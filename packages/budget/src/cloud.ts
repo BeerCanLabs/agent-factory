@@ -1,3 +1,5 @@
+import type { CostAllocation } from './data-export.js';
+
 /**
  * Accountant: the factory's cloud spend (DESIGN_AUTHORITY §6.15 Accountant).
  *
@@ -15,7 +17,17 @@ export type CostLine = { recordType: string; service: string; usd: number };
 /** Usage-type detail, gross usage only. */
 export type UsageLine = { service: string; usageType: string; usd: number; quantity: number };
 
-export type CloudCostSnapshot = { provider: string; start: string; end: string; lines: CostLine[]; usage: UsageLine[] };
+export type CloudCostSnapshot = {
+  provider: string;
+  start: string;
+  end: string;
+  lines: CostLine[];
+  usage: UsageLine[];
+  /** Set when the landing-zone adapter attributed tags. Absent on a Cost Explorer read. */
+  allocation?: CostAllocation;
+  /** Why the adapter kept Cost Explorer after a Data Export was configured. */
+  exportNote?: string;
+};
 
 /** The landing zone's cloud bill. `start` inclusive, `end` exclusive (YYYY-MM-DD). */
 export interface CloudCostSource {
@@ -64,6 +76,11 @@ export const HOURS_PER_MONTH = 730;
 
 /** Bill lines that reduce the bill rather than add to it. */
 const CREDIT_TYPES = new Set(['Credit', 'Refund', 'Discount', 'BundledDiscount', 'SavingsPlanNegation', 'PrivateRateDiscount']);
+
+/** A line that reduces the bill. Credits are reported and never counted as gross usage. */
+export function isCloudCredit(recordType: string, usd: number): boolean {
+  return CREDIT_TYPES.has(recordType) || usd < 0;
+}
 
 /** Cloud services that are model inference: AI spend, already metered per agent by the model ledger. */
 export const MODEL_SERVICE = /bedrock|vertex ai|gemini api|generative language/i;
@@ -118,7 +135,7 @@ export function summarizeCloud(s: CloudCostSnapshot, top = 10): CloudSummary {
   const infra = new Map<string, number>();
   for (const l of s.lines) {
     if (!Number.isFinite(l.usd)) continue;
-    if (CREDIT_TYPES.has(l.recordType) || l.usd < 0) {
+    if (isCloudCredit(l.recordType, l.usd)) {
       credits += l.usd;
       continue;
     }

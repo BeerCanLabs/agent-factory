@@ -209,8 +209,9 @@ resource "aws_iam_role_policy" "control_plane" {
   })
 }
 
-# §6.15 Accountant: read-only access to Cost Explorer and ECS inventory.
-# The control plane assumes this role; agents never hold credentials or reach Cost Explorer directly.
+# §6.15 Accountant: read-only Cost Explorer, ECS inventory, and the Data Export prefix (issue #457).
+# The control plane assumes this role; agents never hold credentials or reach Cost Explorer or the export bucket.
+# Cost Explorer has no resource-level ARN, so that one statement stays on "*". Everything else names one bucket or one cluster.
 resource "aws_iam_role" "accountant" {
   name = "${local.name}-accountant"
   assume_role_policy = jsonencode({
@@ -258,6 +259,63 @@ resource "aws_iam_role_policy" "accountant" {
             "ecs:cluster" = aws_ecs_cluster.factory.arn
           }
         }
+      },
+      {
+        # List only the export prefix. The bucket itself is not readable outside exports/.
+        Sid      = "DataExportList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.data_exports.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["exports/", "exports/*"]
+          }
+        }
+      },
+      {
+        Sid      = "DataExportRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.data_exports.arn}/exports/*"
+      },
+      {
+        # AC2: default deny already blocks every other action. This statement is the review of the ones that must stay impossible.
+        Sid    = "NeverModifyBillingPaymentsOrResources"
+        Effect = "Deny"
+        Action = [
+          "bcm-data-exports:*",
+          "billing:*",
+          "payments:*",
+          "invoicing:*",
+          "tax:*",
+          "aws-portal:ModifyAccount",
+          "aws-portal:ModifyBilling",
+          "aws-portal:ModifyPaymentMethods",
+          "budgets:ModifyBudget",
+          "ce:Create*",
+          "ce:Update*",
+          "ce:Delete*",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
+          "s3:PutBucketPolicy",
+          "s3:DeleteBucket",
+          "ecs:CreateService",
+          "ecs:UpdateService",
+          "ecs:DeleteService",
+          "ecs:RegisterTaskDefinition",
+          "ecs:DeregisterTaskDefinition",
+          "ecs:RunTask",
+          "ecs:StartTask",
+          "ecs:StopTask",
+          "ec2:RunInstances",
+          "ec2:StartInstances",
+          "ec2:StopInstances",
+          "ec2:TerminateInstances",
+          "iam:*",
+          "sts:AssumeRole",
+        ]
+        Resource = "*"
       }
     ]
   })
