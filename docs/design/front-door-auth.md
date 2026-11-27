@@ -139,8 +139,8 @@ Cloudflare **1010/403** on `/api/v1/*` but not on `/mcp`. No rate-limiting rules
            └───────────────────────────────────────────────────────────────────────────────┘
                                              │
    factory.<domain> web shell ────┐          ▼
-    (Console, Garrison, Web Chat, ├─▶ https://auth.<domain>   Front door / Authorization Server
-     Connect page)                │     /login  /authorize  /token  /device  /register  /revoke  /jwks
+    (Console, Garrison (3D), 2D   ├─▶ https://auth.<domain>   Front door / Authorization Server
+     game, Web Chat, Connect)     │     /login  /authorize  /token  /device  /register  /revoke  /jwks
    Third-party console (any origin)┤    IdPs: Google · Meta · Cloudflare · OIDC  (identity only, D1)
    Claude / Cursor MCP client ────┤              │ access token (JWT, ~10 min)
    CLI (loopback + PKCE) ─────────┤              ▼
@@ -162,12 +162,13 @@ example, not part of the product name.
 | `api.<domain>` | `api.dalesackrider.com` | The headless neck. Hosts `/api/v1/*`, `/mcp`, `/mcp/agents/:id`, `/api/v1/agents/:id/conversation`, and webhooks. Every head — browser, CLI, MCP client, device — talks to this neck with a factory-issued Bearer token. |
 | `factory.<domain>` | `factory.dalesackrider.com` | First-party browser shell for all web-enabled heads, under one top nav switcher (name not yet vetted; "head switcher" is a placeholder). Authenticates against `auth.<domain>` and talks only to `api.<domain>`. |
 
-The four first-party heads on `factory.<domain>` (tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559)):
+The first-party heads on `factory.<domain>` (tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559)):
 
 1. **Web Console** — operations/admin UI.
-2. **Garrison** — gaming interface (moves here from a separate `garrison.<domain>` public host).
-3. **Web Chat** — chat with any factory agent in the browser via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only.
-4. **Connect / non-web heads page** — instructions for connecting AI apps (Grok Bot, Claude, Cursor, and similar) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI.
+2. **Garrison (3D)** — the existing 3D gaming interface (moves here from a separate `garrison.<domain>` public host). Garrison stays the 3D interface; it is not replaced by the 2D game.
+3. **2D game interface (Zelda-style)** — a planned additional game head, separate from Garrison, under the same top nav switcher. Name and layout still to be designed (loop in UX Design).
+4. **Web Chat** — chat with any factory agent in the browser via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only.
+5. **Connect / non-web heads page** — instructions for connecting AI apps (Grok Bot, Claude, Cursor, and similar) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI.
 
 `factory-dashboard.<domain>` remains an issuer/resource alias until phase 3 (D-1) so existing MCP connectors keep working, then redirects to the new hosts. `agent-factory.beercanlabs.com` is retired as a public advertised host. This topology is design authority only: it does not itself change live DNS, Cloudflare, AWS, or production UI.
 
@@ -317,7 +318,7 @@ All 220 privileged `/api/v1/*` routes, identity probes (`whoami`, `authz/check`,
 grants, consents, transfers, speak-as, `/mcp`, health (R17: a probe token or the private health port).
 
 ### 5.3 First-party web shell on `factory.<domain>`
-The first-party shell (Console, Garrison, Web Chat, Connect) lives on `factory.<domain>`, authenticates against
+The first-party shell (Console, Garrison (3D), 2D game, Web Chat, Connect) lives on `factory.<domain>`, authenticates against
 `auth.<domain>`, and calls only `api.<domain>` with Bearer tokens. A tiny backend-for-frontend on the factory origin
 is the recommended way to hold the refresh token (IETF "OAuth 2.0 for Browser-Based Apps" BCP). The session cookie
 stays on the issuer origin (`auth.<domain>`) and is never an API credential. (Phase 2 may keep accepting the cookie on
@@ -451,7 +452,7 @@ days.
 | # | Decision | Effect on this design |
 |---|---|---|
 | D-7 | **Three public hostnames.** The generic product shape is `auth.<domain>`, `api.<domain>`, and `factory.<domain>`. The concrete running instance uses `dalesackrider.com`. | See §4.0. `auth.dalesackrider.com` is the issuer (already D-1). `api.dalesackrider.com` is the headless neck (`/api/v1/*`, `/mcp`, `/mcp/agents/:id`, `/api/v1/agents/:id/conversation`, webhooks). `factory.dalesackrider.com` is the first-party browser shell. This supersedes the earlier "one public host + one auth host" framing. `agent-factory.beercanlabs.com` is retired as a public advertised host. First-party Garrison moves under `factory.<domain>` rather than remaining a separate public host at `garrison.dalesackrider.com`. `factory-dashboard.dalesackrider.com` remains an issuer/resource alias until phase 3 (D-1), then redirects to the new hosts. Design only — no live DNS, Cloudflare, AWS, or production UI change in this update. |
-| — | **First-party web heads live on `factory.<domain>`**, under one top nav switcher (name not yet vetted; "head switcher" is a placeholder). | The shell hosts: (1) Web Console (operations/admin UI); (2) Garrison (gaming interface); (3) Web Chat with any factory agent via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only; (4) a Connect / non-web heads page with instructions for AI apps (Grok Bot, Claude, Cursor) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI. The shell authenticates against `auth.<domain>` and talks only to `api.<domain>` (the same neck as every other head). Loop in the factory UX Design agent to name the switcher and design the shell layout. Tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). |
+| — | **First-party web heads live on `factory.<domain>`**, under one top nav switcher (name not yet vetted; "head switcher" is a placeholder). | The shell hosts: (1) Web Console (operations/admin UI); (2) Garrison (3D gaming interface — Garrison stays the 3D head); (3) a planned 2D Zelda-style game interface, separate from Garrison, under the same top nav switcher; (4) Web Chat with any factory agent via the neck's `/api/v1/agents/:id/conversation`, so agents are not Discord-only; (5) a Connect / non-web heads page with instructions for AI apps (Grok Bot, Claude, Cursor) via MCP at `https://api.<domain>/mcp`, and for downloading, installing, and authenticating the Factory CLI. The 2D game head was added 27 Nov 2026 (Dale, t376u). The shell authenticates against `auth.<domain>` and talks only to `api.<domain>` (the same neck as every other head). Loop in the factory UX Design agent to name the switcher and design the shell layout. Tracked in [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). |
 
 **Still open:** D-4 (session and refresh lifetimes), D-5 (roles in the token: hints with live checks vs trusted for the token's lifetime), D-6 (break-glass), D-9 (speak-as hardening timing).
 
@@ -483,7 +484,7 @@ days.
 24. **Conformance test: one credential type per route class** — fail CI on any new auth path.
 25. **Demo third-party console on `mygarrison.dalesackrider.com`** — proves the any-origin story end to end.
 26. **Docs: "Connect a console or device to the factory" how-to** — for adopting orgs without IT staff. The first-party Connect page on `factory.<domain>` (#559) is the in-product version of this how-to (MCP at `https://api.<domain>/mcp`, plus CLI download/install/auth).
-27. **Unified first-party web shell on `factory.<domain>`** — shared top nav switcher for Console, Garrison, Web Chat, and the Connect/CLI page; shell authenticates at `auth.<domain>` and talks only to `api.<domain>`. See [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). Design and UX first; no live infra or production UI until an implementation PR is approved.
+27. **Unified first-party web shell on `factory.<domain>`** — shared top nav switcher for Console, Garrison (3D), a planned 2D Zelda-style game interface, Web Chat, and the Connect/CLI page; shell authenticates at `auth.<domain>` and talks only to `api.<domain>`. See [#559](https://github.com/BeerCanLabs/agent-factory/issues/559). Design and UX first; no live infra or production UI until an implementation PR is approved.
 
 ## 11. References
 
