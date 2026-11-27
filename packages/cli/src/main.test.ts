@@ -359,7 +359,7 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
   });
 
   it('factory skill adopt and approve send redeploy, defaulting to true (#519)', async () => {
-    assert.deepEqual(parseSkillAdoptionArgs(['donna', 'conductor', '0.3.1']), { positional: ['donna', 'conductor', '0.3.1'], redeploy: true });
+    assert.deepEqual(parseSkillAdoptionArgs(['donna', 'conductor', '0.3.1']), { positional: ['donna', 'conductor', '0.3.1'] });
     assert.deepEqual(parseSkillAdoptionArgs(['donna', 'conductor', '--no-redeploy', '--reason', 'batch']), { positional: ['donna', 'conductor'], redeploy: false, reason: 'batch' });
     assert.equal(parseSkillAdoptionArgs(['--redeploy', 'maybe']).error, '--redeploy must be true or false');
     assert.deepEqual(parseSkillAdoptionArgs(['--redeploy=false', 'donna', 'conductor']), { positional: ['donna', 'conductor'], redeploy: false });
@@ -372,13 +372,14 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
           return { status: 201, body: { state: 'requested', skillId: parsed.skillId, version: parsed.version, redeploy: parsed.redeploy } };
         }
         if (path === '/api/v1/agents/flow/skills/conductor/adoption/approve') {
+          const redeploy = Object.prototype.hasOwnProperty.call(parsed, 'redeploy') ? parsed.redeploy === true : true;
           return {
             status: 200,
             body: {
               version: '0.3.1',
               configVersion: 42,
-              redeploy: parsed.redeploy,
-              apply: parsed.redeploy ? { status: 'started' } : { status: 'skipped', reason: 'redeploy_declined' },
+              redeploy,
+              apply: redeploy ? { status: 'started' } : { status: 'skipped', reason: 'redeploy_declined' },
             },
           };
         }
@@ -401,6 +402,7 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
 
       const approved = await factory(home, ['skill', 'approve', 'flow', 'conductor'], env(srv.url));
       assert.equal(approved.code, 0, approved.err);
+      assert.deepEqual(JSON.parse(srv.seen.filter((s) => s.path.endsWith('/adoption/approve')).at(-1)!.body), {});
       assert.match(approved.out, /Approved conductor@0\.3\.1 for flow \(configuration v42; redeploy: yes\)\. Apply: started\./);
       const declined = await factory(home, ['skill', 'approve', 'flow', 'conductor', '--redeploy', 'false'], env(srv.url));
       assert.equal(declined.code, 0, declined.err);
@@ -409,6 +411,46 @@ describe('§6.17 CL11 commands as subcommands, for scripts', () => {
       const usage = await factory(home, ['skill', 'adopt', 'flow'], env(srv.url));
       assert.equal(usage.code, 1);
       assert.match(usage.err, /usage: factory skill adopt/);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it('factory skill approve omits redeploy unless the flag is passed (#519)', async () => {
+    const srv = await fakeServer(['admin'], {
+      onJson: (method, path, body) => {
+        if (method !== 'POST' || path !== '/api/v1/agents/flow/skills/conductor/adoption/approve') return undefined;
+        const parsed = body ? JSON.parse(body) as { redeploy?: boolean } : {};
+        const explicit = Object.prototype.hasOwnProperty.call(parsed, 'redeploy');
+        // A pending request stored redeploy: false. The API keeps that unless the body says otherwise.
+        const redeploy = explicit ? parsed.redeploy === true : false;
+        return {
+          status: 200,
+          body: {
+            version: '0.3.1',
+            configVersion: 7,
+            redeploy,
+            apply: redeploy ? { status: 'started' } : { status: 'skipped', reason: 'redeploy_declined' },
+          },
+        };
+      },
+    });
+    try {
+      const home = await mkdtemp(join(tmpdir(), 'cli-skill-approve-'));
+      const bare = await factory(home, ['skill', 'approve', 'flow', 'conductor'], env(srv.url));
+      assert.equal(bare.code, 0, bare.err);
+      assert.deepEqual(JSON.parse(srv.seen.filter((s) => s.method === 'POST').at(-1)!.body), {});
+      assert.match(bare.out, /redeploy: no/);
+
+      const on = await factory(home, ['skill', 'approve', 'flow', 'conductor', '--redeploy', 'true'], env(srv.url));
+      assert.equal(on.code, 0, on.err);
+      assert.deepEqual(JSON.parse(srv.seen.filter((s) => s.method === 'POST').at(-1)!.body), { redeploy: true });
+      assert.match(on.out, /redeploy: yes/);
+
+      const off = await factory(home, ['skill', 'approve', 'flow', 'conductor', '--no-redeploy'], env(srv.url));
+      assert.equal(off.code, 0, off.err);
+      assert.deepEqual(JSON.parse(srv.seen.filter((s) => s.method === 'POST').at(-1)!.body), { redeploy: false });
+      assert.match(off.out, /redeploy: no/);
     } finally {
       await srv.close();
     }

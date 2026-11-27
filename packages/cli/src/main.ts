@@ -31,7 +31,7 @@ const USAGE = `factory ${version}
   factory skill adopt <agent> <skill> <version> [--redeploy true|false] [--reason <text>]
                                ask to adopt a skill (redeploy on approval defaults to true; --no-redeploy opts out)
   factory skill approve <agent> <skill> [--redeploy true|false] [--reason <text>]
-                               approve a pending adoption and, by default, redeploy the agent
+                               approve a pending adoption. Omitting the flag honors the request (redeploy when it did not say)
   factory --manager <id>          use a manager agent with another id for this run
   factory <command> --as user:<id>  (admins) run one command on behalf of a person; ledgered
   factory grants|grant|revoke-grant|principals   people and role grants
@@ -85,11 +85,13 @@ export type MainOptions = {
 
 /**
  * #519: flags for `factory skill adopt` and `factory skill approve`.
- * `--redeploy true|false` (or `--redeploy=true|false`); `--no-redeploy` opts out. The default is to redeploy.
+ * `--redeploy true|false` (or `--redeploy=true|false`); `--no-redeploy` opts out.
+ * `redeploy` is absent when neither flag was passed: adopt then sends true, and approve omits the field
+ * so the API keeps the choice stored on the request.
  */
-export function parseSkillAdoptionArgs(argv: string[]): { positional: string[]; redeploy: boolean; reason?: string } | { error: string } {
+export function parseSkillAdoptionArgs(argv: string[]): { positional: string[]; redeploy?: boolean; reason?: string } | { error: string } {
   const positional: string[] = [];
-  let redeploy = true;
+  let redeploy: boolean | undefined;
   let reason: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -112,7 +114,7 @@ export function parseSkillAdoptionArgs(argv: string[]): { positional: string[]; 
     if (a.startsWith('-')) return { error: `unknown flag ${a}` };
     positional.push(a);
   }
-  return { positional, redeploy, ...(reason ? { reason } : {}) };
+  return { positional, ...(redeploy !== undefined ? { redeploy } : {}), ...(reason ? { reason } : {}) };
 }
 
 /** Writes, and returns once the data has been handed on. A pipe takes it in pieces; exiting before then cuts the output off. */
@@ -442,17 +444,25 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const session = makeSession(kind, instance, { store });
       const client = new FactoryClient({ baseUrl: instance, credential: (refresh) => session.credential(refresh) });
       const [agentId, skillId, version] = parsed.positional;
-      const body = { redeploy: parsed.redeploy, ...(parsed.reason ? { reason: parsed.reason } : {}), ...(sub === 'adopt' ? { skillId, version } : {}) };
+      // Adopt records a choice, defaulting to redeploy. Approve sends the field only when the flag was passed,
+      // so an omitted flag leaves a stored `redeploy: false` in place (decideAdoption).
+      const redeploy = sub === 'adopt' ? parsed.redeploy !== false : parsed.redeploy;
+      const body = {
+        ...(redeploy !== undefined ? { redeploy } : {}),
+        ...(parsed.reason ? { reason: parsed.reason } : {}),
+        ...(sub === 'adopt' ? { skillId, version } : {}),
+      };
       const path = sub === 'adopt'
         ? `/api/v1/agents/${encodeURIComponent(agentId)}/skills`
         : `/api/v1/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(skillId)}/adoption/approve`;
       const r = await client.request('POST', path, body);
-      const b = r.body as { error?: string; message?: string; version?: string; configVersion?: number; apply?: { status?: string; reason?: string }; state?: string };
+      const b = r.body as { error?: string; message?: string; version?: string; configVersion?: number; redeploy?: boolean; apply?: { status?: string; reason?: string }; state?: string };
       if (r.status >= 300) {
         streams.stderr.write(`${sub === 'adopt' ? 'Adoption request' : 'Approval'} failed (HTTP ${r.status}): ${b?.message ?? b?.error ?? JSON.stringify(b)}\n`);
         return 1;
       }
-      const choice = parsed.redeploy ? 'yes' : 'no';
+      const resolved = typeof b?.redeploy === 'boolean' ? b.redeploy : redeploy;
+      const choice = resolved === false ? 'no' : 'yes';
       if (sub === 'adopt') {
         await writeAll(streams.stdout, `Requested ${skillId}@${version} for ${agentId} (redeploy on approval: ${choice}) (HTTP ${r.status})\n`);
         return 0;
