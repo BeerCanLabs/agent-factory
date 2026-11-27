@@ -125,17 +125,77 @@ export async function fetchLatestRelease(
 }
 
 /**
+ * Cartridge SemVer fields (update lifecycle). A configuration-hosted agent runs the pinned shared
+ * runtime, so these fields are not its version source. Leftovers from a converted cartridge
+ * (for example Chuck / `finley` still advertising SM-finley 1.1.0) are cleared, not fetched.
+ */
+export const CARTRIDGE_RELEASE_METADATA_KEYS = [
+  'installedVersion',
+  'updateAvailable',
+  'offeredVersion',
+  'offeredCommit',
+  'releaseNotes',
+  'publishedAt',
+  'lastCheckedAt',
+  'stagedVersion',
+  'stagedCommit',
+  'pendingDrain',
+] as const satisfies readonly (keyof AgentRecord)[];
+
+export type CartridgeReleaseMetadataKey = (typeof CARTRIDGE_RELEASE_METADATA_KEYS)[number];
+
+/** True when this agent was created or converted onto the shared runtime and has no cartridge release. */
+export function isConfigurationHostedAgent(agent: Pick<AgentRecord, 'createdFrom'>): boolean {
+  return agent.createdFrom === 'configuration';
+}
+
+/**
+ * Deletes cartridge release fields from `agent`. Returns the keys that were set.
+ * Does not change `repo`, `commit`, `deployedRuntime`, policy, or skills.
+ */
+export function clearCartridgeReleaseMetadata(agent: AgentRecord): CartridgeReleaseMetadataKey[] {
+  const cleared: CartridgeReleaseMetadataKey[] = [];
+  for (const key of CARTRIDGE_RELEASE_METADATA_KEYS) {
+    if (agent[key] !== undefined) {
+      delete agent[key];
+      cleared.push(key);
+    }
+  }
+  return cleared;
+}
+
+/**
+ * Idempotent cleanup for agents already converted before release metadata was dropped.
+ * Skips repository agents and in-memory helper runs. `persist` is called only when a field was removed.
+ */
+export function migrateConfigurationReleaseMetadata(
+  agents: Iterable<AgentRecord>,
+  persist: (agent: AgentRecord) => void,
+): string[] {
+  const cleaned: string[] = [];
+  for (const agent of agents) {
+    if (!isConfigurationHostedAgent(agent) || agent.ephemeral) continue;
+    if (clearCartridgeReleaseMetadata(agent).length === 0) continue;
+    persist(agent);
+    cleaned.push(agent.id);
+  }
+  return cleaned;
+}
+
+/**
  * Checks for updates on a specific AgentRecord against GitHub releases.
+ * Configuration-hosted agents are not checked: a leftover `repo` (including an archived
+ * cartridge such as `BeerCanLabs/SM-finley`) is not a release source.
  */
 export async function checkAgentUpdate(
-  agent: Pick<AgentRecord, 'id' | 'repo' | 'installedVersion' | 'deployedCommit'>,
+  agent: Pick<AgentRecord, 'id' | 'repo' | 'installedVersion' | 'deployedCommit' | 'createdFrom'>,
   token?: string,
   fetchFn: typeof fetch = globalThis.fetch
 ): Promise<UpdateCheckResult> {
   const now = new Date().toISOString();
   const installedVersion = agent.installedVersion ?? '0.1.0';
 
-  if (!agent.repo) {
+  if (isConfigurationHostedAgent(agent) || !agent.repo) {
     return {
       updateAvailable: false,
       installedVersion,

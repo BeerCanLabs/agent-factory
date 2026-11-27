@@ -47,6 +47,7 @@ export {
   discoverVendorModels,
   resolveModelReference,
   REFERENCE_MODEL_PRICING,
+  BEDROCK_FLEX_REFERENCE_PRICING,
 } from './discovery.js';
 export type {
   DiscoveredModel,

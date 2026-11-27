@@ -57,6 +57,7 @@ import {
   wireGrantStoreKindLookup,
   type FactoryState,
 } from './app.js';
+import { clearCartridgeReleaseMetadata } from './updates.js';
 import { applyConfig, buildSkillsFor, runDeploy } from './apply.js';
 import { changeReason, configOf, ledgerVersion, ownersOf, parseOwners, recordConfig, removeConfig } from './config-store.js';
 import { ownerContactsFor } from './owner-contacts.js';
@@ -1541,6 +1542,9 @@ export async function handleConvertAgent(state: FactoryState, req: http.Incoming
     delete agent.skillRoutes;
     delete agent.roles;
     delete agent.admission;
+    // A converted agent runs the pinned runtime. Leftover cartridge release fields (installed version,
+    // offered release, notes) are not its source of versions and must not keep pointing at the old repo.
+    clearCartridgeReleaseMetadata(agent);
     agent.state = 'SLEEPING';
     registryOf(state).save(agent);
 

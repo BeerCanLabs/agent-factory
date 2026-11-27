@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
 import { bearerAuth } from '@beercanlabs/factory-auth';
-import { MemoryRunStore } from '@beercanlabs/factory-property-manager';
+import { bumpSecretGeneration, MemoryRunStore, secretGeneration } from '@beercanlabs/factory-property-manager';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
 import { invalidateSecret, isPublicSecretName, readSecretCached } from './app-setup-providers.js';
@@ -220,6 +220,33 @@ describe('GitHub App token latency (#501)', { concurrency: false }, () => {
     } finally {
       restore();
       cleanupSecrets([C], ['old-value-c', 'new-value-c']);
+    }
+  });
+
+  it('AC4: readSecretCached uses the property-manager generation, the same counter pre-flight checks (#503)', async () => {
+    const A = 'LATENCY_TEST_SHARED_GEN';
+    stored.set(A, 'old-shared');
+    const restore = useSnapshotProvider();
+    try {
+      const before = secretGeneration(state, A);
+      invalidateSecret(state, A);
+      assert.equal(secretGeneration(state, A), before + 1, 'invalidateSecret bumps the shared generation and no other');
+
+      readDelayMs = 200;
+      const inFlight = readSecretCached(state, A);
+      await sleep(20);
+      stored.set(A, 'new-shared');
+      // Bump only. Do not delete the cache or the in-flight entry here: those are invalidateSecret's other steps.
+      // Caching must stop because the generation changed, which is the counter bindAgentSecrets checks.
+      bumpSecretGeneration(state, A);
+      assert.equal(await inFlight, 'old-shared', 'the in-flight caller still gets the value it read');
+      readDelayMs = 0;
+      assert.equal(state.secretCache?.get(A), undefined, 'the old value is not written back');
+      assert.equal(await readSecretCached(state, A), 'new-shared');
+      assert.equal(reads.filter((r) => r.name === A).length, 2, 'the next read went to the provider');
+    } finally {
+      restore();
+      cleanupSecrets([A], ['old-shared', 'new-shared']);
     }
   });
 

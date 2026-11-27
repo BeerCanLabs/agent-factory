@@ -63,6 +63,12 @@ export type PropertyManagerState = {
   providers: SecretProvider[];
   secretValues: Set<string>;
   secretCache?: Map<string, { value: string; at: number }>;
+  /**
+   * GAP-269 (#503): one invalidation generation per secret name, shared with the control plane's `readSecretCached`.
+   * A read caches its value only when this is unchanged since the read started. The control plane bumps it; this
+   * package never imports the control plane.
+   */
+  secretGenerations?: Map<string, number>;
   /** Provider keys only the gatekeeper-egress holds (S1); pre-flight treats them as satisfied and never reads them. */
   gatekeeperEgressHeldSecrets?: Set<string>;
   publicUrl?: string;
@@ -208,6 +214,26 @@ export function activeRun(state: PropertyManagerState, agentId: string): Run | u
 
 const SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * The part of factory state that holds the shared secret-invalidation generation (GAP-269, #503). `secretValues` is
+ * required so this is not a weak type: the control plane's `FactoryState` stays in `app.ts` and is still assignable.
+ */
+export type SecretGenerationState = {
+  secretValues: Set<string>;
+  secretGenerations?: Map<string, number>;
+};
+
+/** The invalidation generation for `name` (0 when nothing has invalidated it). */
+export function secretGeneration(state: SecretGenerationState, name: string): number {
+  return state.secretGenerations?.get(name) ?? 0;
+}
+
+/** Bumps `name`'s generation so a read that started before this call does not write its value back to the cache. */
+export function bumpSecretGeneration(state: SecretGenerationState, name: string): void {
+  const gens = (state.secretGenerations ??= new Map());
+  gens.set(name, (gens.get(name) ?? 0) + 1);
+}
+
 async function bindAgentSecrets(state: PropertyManagerState, names: string[]): Promise<{ ok: true; env: Record<string, string> } | { ok: false; missing: string[] }> {
   const cache = (state.secretCache ??= new Map());
   const now = Date.now();
@@ -219,10 +245,13 @@ async function bindAgentSecrets(state: PropertyManagerState, names: string[]): P
     else uncached.push(name);
   }
   if (uncached.length) {
+    // Captured before the provider read. An invalidation during the read bumps the generation and this write is skipped.
+    const generations = new Map(uncached.map((name) => [name, secretGeneration(state, name)]));
     const bound = await bindSecrets(uncached, state.providers);
     if (!bound.ok) return bound;
     for (const [name, value] of Object.entries(bound.env)) {
-      cache.set(name, { value, at: now });
+      // The caller still gets the value it read. A value read before an invalidation is not cached.
+      if (secretGeneration(state, name) === generations.get(name)) cache.set(name, { value, at: now });
       env[name] = value;
     }
   }

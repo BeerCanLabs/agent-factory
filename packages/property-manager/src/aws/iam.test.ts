@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { IAMClient } from '@aws-sdk/client-iam';
 import {
-  awsMindProbe, checkMindPrefix, listAgentTaskRoleIds, mindBucketName, mindPolicyDocument, MIND_POLICY, provisionAgentRoles, reconcileAgentTaskRole,
+  agentRoleBoundaryArn, awsMindProbe, checkMindPrefix, listAgentTaskRoleIds, mindBucketName, mindPolicyDocument, MIND_POLICY, provisionAgentRoles, reconcileAgentTaskRole,
   retireAgentTaskRole, type MindProbe,
 } from './iam.js';
 import { ECSClient } from '@aws-sdk/client-ecs';
@@ -277,5 +277,161 @@ describe('agent task roles: own mind prefix only, no direct model access (GAP-26
     assert.deepEqual(actions(list), ['s3:ListBucket']);
     assert.match(list, /Resource = aws_s3_bucket\.mind\.arn\n/);
     assert.match(tf, /"s3:prefix" = \["\$\{each.key\}\/", "\$\{each.key\}\/\*"\]/, 'landing-zone agents list only their own prefix');
+  });
+});
+
+// agent-factory #561: control-plane-paas-orchestration let the control plane create, write and pass any role ("*"),
+// its own included, and start any CodeBuild project in the account. Agent roles now carry a permissions boundary.
+describe('agent role permissions boundary and the control plane\'s IAM and CodeBuild scope (#561)', () => {
+  const BOUNDARY = 'arn:aws:iam::123456789012:policy/factory-prod-agent-role-boundary';
+  const saved = { b: process.env.FACTORY_AGENT_ROLE_BOUNDARY_ARN, m: process.env.FACTORY_MIND_BUCKET };
+  beforeEach(() => {
+    process.env.FACTORY_MIND_BUCKET = B;
+    process.env.FACTORY_AGENT_ROLE_BOUNDARY_ARN = BOUNDARY;
+  });
+  afterEach(() => {
+    mock.restoreAll();
+    for (const [k, v] of [['FACTORY_AGENT_ROLE_BOUNDARY_ARN', saved.b], ['FACTORY_MIND_BUCKET', saved.m]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+  // existing: roles already exist, with this boundary (undefined: none).
+  function boundaryIam(o: { existing: boolean; boundary?: string }) {
+    const calls: Call[] = [];
+    mock.method(IAMClient.prototype, 'send', async (cmd: { constructor: { name: string }; input: Record<string, any> }) => {
+      const c = { name: cmd.constructor.name.replace(/Command$/, ''), input: cmd.input };
+      calls.push(c);
+      switch (c.name) {
+        case 'CreateRole':
+          if (o.existing) throw err('EntityAlreadyExistsException');
+          return { Role: { Arn: `arn:aws:iam::1:role/${c.input.RoleName}` } };
+        case 'GetRole':
+          return { Role: { Arn: `arn:aws:iam::1:role/${c.input.RoleName}`, ...(o.boundary ? { PermissionsBoundary: { PermissionsBoundaryArn: o.boundary } } : {}) } };
+        case 'ListAttachedRolePolicies':
+          return { AttachedPolicies: [] };
+        case 'DeleteRolePolicy':
+          throw err('NoSuchEntityException');
+      }
+      return {};
+    });
+    return calls;
+  }
+  const at = (calls: Call[], name: string, role: string) => calls.findIndex((c) => c.name === name && c.input.RoleName === role);
+
+  it('creates both agent roles with the boundary, and puts no separate boundary on a new role', async () => {
+    const calls = boundaryIam({ existing: false });
+    await provisionAgentRoles('castle', ['HA_TOKEN'], { probe: probe() });
+    const creates = calls.filter((c) => c.name === 'CreateRole');
+    assert.deepEqual(creates.map((c) => [c.input.RoleName, c.input.PermissionsBoundary]), [
+      ['AgentTaskRole-castle', BOUNDARY],
+      ['AgentExecutionRole-castle', BOUNDARY],
+    ]);
+    assert.ok(!calls.some((c) => c.name === 'PutRolePermissionsBoundary'));
+  });
+
+  it('puts the boundary on an existing role without one before writing any policy to it', async () => {
+    const calls = boundaryIam({ existing: true });
+    await provisionAgentRoles('castle', ['HA_TOKEN'], { probe: probe() });
+    for (const role of ['AgentTaskRole-castle', 'AgentExecutionRole-castle']) {
+      const put = at(calls, 'PutRolePermissionsBoundary', role);
+      assert.ok(put >= 0, `${role}: ${calls.map((c) => c.name).join(',')}`);
+      assert.equal(calls[put].input.PermissionsBoundary, BOUNDARY);
+      const firstPolicy = at(calls, 'PutRolePolicy', role);
+      assert.ok(firstPolicy > put, `${role}: boundary before the first PutRolePolicy`);
+    }
+  });
+
+  it('leaves an existing role that already has the boundary alone', async () => {
+    const calls = boundaryIam({ existing: true, boundary: BOUNDARY });
+    await provisionAgentRoles('castle', [], { probe: probe() });
+    assert.ok(!calls.some((c) => c.name === 'PutRolePermissionsBoundary'));
+  });
+
+  it('without the setting (compose, tests, an older landing zone) creates roles with no boundary', async () => {
+    delete process.env.FACTORY_AGENT_ROLE_BOUNDARY_ARN;
+    const calls = boundaryIam({ existing: false });
+    await provisionAgentRoles('castle', [], { probe: probe() });
+    assert.ok(calls.filter((c) => c.name === 'CreateRole').every((c) => !('PermissionsBoundary' in c.input)));
+    assert.equal(agentRoleBoundaryArn({}), undefined);
+  });
+
+  it('refuses a setting that is not an IAM policy ARN before calling IAM', async () => {
+    for (const bad of ['*', 'arn:aws:iam::123456789012:role/x', 'arn:aws:iam::*:policy/x', 'factory-prod-agent-role-boundary']) {
+      assert.throws(() => agentRoleBoundaryArn({ FACTORY_AGENT_ROLE_BOUNDARY_ARN: bad }), /not an IAM policy ARN/, bad);
+    }
+    process.env.FACTORY_AGENT_ROLE_BOUNDARY_ARN = '*';
+    const calls = boundaryIam({ existing: false });
+    await assert.rejects(provisionAgentRoles('castle', [], { probe: probe() }), /not an IAM policy ARN/);
+    assert.deepEqual(calls, []);
+  });
+
+  it('reconcile puts the boundary on a task role before narrowing its mind policy', async () => {
+    const calls = boundaryIam({ existing: true });
+    const r = await reconcileAgentTaskRole('higgins', { memoryPrefix: 'higgins-state', probe: probe({ higgins: 'higgins-state' }) });
+    assert.equal(r.outcome, 'updated');
+    const put = at(calls, 'PutRolePermissionsBoundary', 'AgentTaskRole-higgins');
+    assert.ok(put >= 0 && put < at(calls, 'PutRolePolicy', 'AgentTaskRole-higgins'), calls.map((c) => c.name).join(','));
+  });
+
+  const tf = (f: string) => readFileSync(fileURLToPath(new URL(`../../../../landing-zones/aws/${f}`, import.meta.url)), 'utf8');
+  const resourceBlock = (src: string, header: string) => {
+    const start = src.indexOf(header);
+    assert.ok(start >= 0, header);
+    return src.slice(start, src.indexOf('\n}\n', start) + 2);
+  };
+
+  it('the control plane writes and passes only agent roles carrying the boundary, and starts only the factory builders', () => {
+    const iam = tf('iam.tf');
+    const paas = resourceBlock(iam, 'resource "aws_iam_role_policy" "control_plane_paas"');
+    const sid = (name: string) => {
+      const i = paas.indexOf(`Sid       = "${name}"`) >= 0 ? paas.indexOf(`Sid       = "${name}"`) : paas.indexOf(`Sid      = "${name}"`);
+      assert.ok(i >= 0, name);
+      return paas.slice(i, paas.indexOf('\n      }', i));
+    };
+    // No IAM write, PassRole or CodeBuild action is granted on "*" any more.
+    const wide = [...paas.matchAll(/Effect\s*=\s*"Allow"\s*\n\s*Action\s*=\s*\[([^\]]+)\]\s*\n\s*Resource\s*=\s*"\*"/g)];
+    assert.ok(wide.length >= 1);
+    for (const m of wide) assert.doesNotMatch(m[1], /iam:(Create|Put|Pass|Attach|Update|Delete|Detach|Tag|GetRole)|codebuild:/, m[1]);
+    const write = sid('WriteAgentRolesWithinBoundary');
+    assert.match(write, /Action\s*=\s*\["iam:CreateRole", "iam:PutRolePolicy", "iam:PutRolePermissionsBoundary"\]/);
+    assert.match(write, /Resource\s*=\s*local\.agent_role_arns/);
+    assert.match(write, /"iam:PermissionsBoundary" = aws_iam_policy\.agent_role_boundary\.arn/);
+    const pass = sid('PassAgentRolesToEcsTasks');
+    assert.match(pass, /Resource\s*=\s*local\.agent_role_arns/);
+    assert.match(pass, /"iam:PassedToService" = "ecs-tasks\.amazonaws\.com"/);
+    assert.match(sid('ReadAgentRoles'), /Resource\s*=\s*local\.agent_role_arns/);
+    const builds = sid('StartFactoryBuilds');
+    assert.match(builds, /Resource\s*=\s*local\.factory_build_project_arns/);
+    const roles = /agent_role_arns = \[([^\]]+)\]/.exec(iam)![1];
+    assert.deepEqual([...roles.matchAll(/role\/([A-Za-z-]+)\*"/g)].map((m) => m[1]).sort(), ['AgentExecutionRole-', 'AgentTaskRole-']);
+    const projects = /factory_build_project_arns = \[([^\]]+)\]/.exec(iam)![1];
+    assert.deepEqual([...projects.matchAll(/aws_codebuild_project\.(\w+)\.arn/g)].map((m) => m[1]).sort(),
+      ['factory_agent_builder', 'factory_skill_checker', 'factory_skills_builder']);
+    assert.match(iam, /for k in local\.denied_build_overrides : \{\s*Effect\s*=\s*"Deny"\s*Action\s*=\s*\["codebuild:StartBuild"\]/);
+    for (const k of ['source.buildspec', 'source.location', 'serviceRole', 'environment.image', 'environment.privilegedMode']) {
+      assert.match(iam, new RegExp(`"codebuild:${k.replace('.', '\\.')}"`), k);
+    }
+    // The code's role names are the ones the policy names.
+    const src = readFileSync(fileURLToPath(new URL('./iam.ts', import.meta.url)), 'utf8');
+    assert.match(src, /const taskRoleName = `AgentTaskRole-\$\{agentId\}`/);
+    assert.match(src, /const executionRoleName = `AgentExecutionRole-\$\{agentId\}`/);
+    // The control plane gets the boundary's ARN.
+    assert.match(tf('ecs.tf'), /\{ name = "FACTORY_AGENT_ROLE_BOUNDARY_ARN", value = aws_iam_policy\.agent_role_boundary\.arn \}/);
+  });
+
+  it('the boundary allows every action iam.ts grants an agent role, and no IAM, STS or Bedrock action', () => {
+    const boundary = resourceBlock(tf('iam.tf'), 'resource "aws_iam_policy" "agent_role_boundary"');
+    const allowed = new Set([...boundary.matchAll(/Effect\s*=\s*"Allow"\s*\n\s*Action\s*=\s*\[([^\]]+)\]/g)]
+      .flatMap((m) => m[1].split(',').map((a) => a.trim().replace(/"/g, ''))));
+    const src = readFileSync(fileURLToPath(new URL('./iam.ts', import.meta.url)), 'utf8');
+    const granted = new Set([...src.matchAll(/"((?:s3|ecr|logs|secretsmanager):[A-Za-z]+)"/g)].map((m) => m[1]).filter((a) => a !== 's3:prefix'));
+    assert.ok(granted.size >= 10, [...granted].join(','));
+    for (const a of granted) assert.ok(allowed.has(a), `boundary lacks ${a}`);
+    for (const a of allowed) assert.doesNotMatch(a, /^(iam|sts|bedrock|codebuild|ecs|kms):|\*/, a);
+    assert.match(boundary, /Sid\s*=\s*"NeverReadProviderKeys"\s*\n\s*Effect\s*=\s*"Deny"[\s\S]*?Resource\s*=\s*local\.provider_secret_arns/);
+    assert.match(boundary, /Sid\s*=\s*"NeverReadKeymasterGrants"\s*\n\s*Effect\s*=\s*"Deny"[\s\S]*?Resource\s*=\s*concat\(local\.keymaster_grant_arns, local\.keymaster_app_arns\)/);
+    assert.match(boundary, /Resource = "\$\{local\.secret_arn\}\/\*"/);
+    assert.match(boundary, /Resource = "\$\{aws_s3_bucket\.mind\.arn\}\/\*"/);
   });
 });
