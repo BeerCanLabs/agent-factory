@@ -546,4 +546,75 @@ describe('adoption: request, approve, remove, retire, and private skills (TSK-15
       assert.equal(adoptionStore(state).get('bea', 'twice')?.state, 'requested', 'a malformed delete or approve did nothing');
     });
   });
+
+  describe('redeploy on adoption (#519)', () => {
+    async function ensureNell() {
+      if (state.agents.has('nell')) return;
+      state.agents.set('nell', { id: 'nell', name: 'nell', role: 'Agent', state: 'SLEEPING', provider: 'local', artifact: '', requires: [], ungated: [], gated: [], triggers: [], dir: '/agents/nell' } as never);
+      await state.configs!.put({ agentId: 'nell', source: {}, skills: [], policy: null, owners: ['token:admin'] }, { updatedBy: 'test', reason: 'owners' });
+    }
+
+    it('stores the owner’s redeploy choice on the request and does not write a configuration version', async () => {
+      await ensureNell();
+      await publish(publicManifest('batch-skill', '1.0.0'));
+      const versions = state.configs!.history('nell').length;
+      const asked = await call('/api/v1/agents/nell/skills', 'POST', ADMIN, { skillId: 'batch-skill', version: '1.0.0', redeploy: false });
+      assert.equal(asked.status, 201, JSON.stringify(asked.body));
+      assert.equal(asked.body.redeploy, false);
+      assert.equal(state.configs!.history('nell').length, versions, 'a request still creates no configuration version');
+      const listed = await call('/api/v1/agents/nell/skills', 'GET', ADMIN);
+      const pending = (listed.body.requests as Array<{ skillId: string; redeploy?: boolean }>).find((r) => r.skillId === 'batch-skill');
+      assert.equal(pending?.redeploy, false);
+      const adopters = await call('/api/v1/skills/batch-skill/adopters', 'GET', ADMIN);
+      assert.equal((adopters.body as Array<{ state: string; redeploy?: boolean }>).find((a) => a.state === 'requested')?.redeploy, false);
+      const bad = await call('/api/v1/agents/nell/skills', 'POST', ADMIN, { skillId: 'batch-skill', version: '1.0.0', redeploy: 'yes' });
+      assert.equal(bad.status, 400);
+      assert.equal(bad.body.error, 'invalid_redeploy');
+      assert.equal(adoptionStore(state).get('nell', 'batch-skill')?.redeploy, false, 'a bad flag does not replace the request');
+    });
+
+    it('approving with no flag redeploys by default and reports the apply status', async () => {
+      await publish(publicManifest('live-skill', '1.0.0'));
+      const asked = await call('/api/v1/agents/nell/skills', 'POST', ADMIN, { skillId: 'live-skill', version: '1.0.0' });
+      assert.equal(asked.status, 201);
+      assert.equal(asked.body.redeploy, true);
+      const approved = await call('/api/v1/agents/nell/skills/live-skill/adoption/approve', 'POST', ADMIN, {});
+      assert.equal(approved.status, 200, JSON.stringify(approved.body));
+      assert.equal(approved.body.redeploy, true);
+      assert.equal(typeof approved.body.configVersion, 'number');
+      // nell was never deployed, so the existing apply path skips and says why, instead of hiding it.
+      assert.deepEqual(approved.body.apply, { status: 'skipped', reason: 'not_deployed' });
+      assert.ok(skillsOf('nell').includes('live-skill@1.0.0'));
+      assert.equal(state.agents.get('nell')!.state, 'SLEEPING');
+    });
+
+    it('an owner opt-out updates the configuration and does not start an apply', async () => {
+      const approved = await call('/api/v1/agents/nell/skills/batch-skill/adoption/approve', 'POST', ADMIN, {});
+      assert.equal(approved.status, 200, JSON.stringify(approved.body));
+      assert.equal(approved.body.redeploy, false);
+      assert.deepEqual(approved.body.apply, { status: 'skipped', reason: 'redeploy_declined' });
+      assert.ok(skillsOf('nell').includes('batch-skill@1.0.0'));
+      assert.equal(actions('AGENT_CONFIG_APPLY_STARTED').filter((e) => e.agentId === 'nell').length, 0);
+      assert.equal(state.agents.get('nell')!.state, 'SLEEPING');
+    });
+
+    it('the approver’s flag overrides the request, either way, and a non-boolean is refused', async () => {
+      await publish(publicManifest('override-skill', '1.0.0'));
+      assert.equal((await call('/api/v1/agents/nell/skills', 'POST', ADMIN, { skillId: 'override-skill', version: '1.0.0', redeploy: false })).status, 201);
+      const forced = await call('/api/v1/agents/nell/skills/override-skill/adoption/approve', 'POST', ADMIN, { redeploy: true });
+      assert.equal(forced.status, 200, JSON.stringify(forced.body));
+      assert.equal(forced.body.redeploy, true);
+      assert.deepEqual(forced.body.apply, { status: 'skipped', reason: 'not_deployed' });
+
+      await publish(publicManifest('hold-skill', '1.0.0'));
+      assert.equal((await call('/api/v1/agents/nell/skills', 'POST', ADMIN, { skillId: 'hold-skill', version: '1.0.0', redeploy: true })).status, 201);
+      const held = await call('/api/v1/agents/nell/skills/hold-skill/adoption/approve', 'POST', ADMIN, { redeploy: false });
+      assert.equal(held.status, 200, JSON.stringify(held.body));
+      assert.equal(held.body.redeploy, false);
+      assert.deepEqual(held.body.apply, { status: 'skipped', reason: 'redeploy_declined' });
+      const bad = await call('/api/v1/agents/nell/skills/hold-skill/adoption/approve', 'POST', ADMIN, { redeploy: 'no' });
+      assert.equal(bad.status, 400);
+      assert.equal(bad.body.error, 'invalid_redeploy');
+    });
+  });
 });
