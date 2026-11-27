@@ -21,6 +21,7 @@ import { KeysView } from './views/KeysView.js';
 import { canAccessSubscriptions, canManagePeople, hasAnyAccess } from './auth/access-gate.js';
 import { DrainModal } from './components/DrainModal.js';
 import { UpdateDrawer } from './components/UpdateDrawer.js';
+import { cartridgeUpdateBuckets } from './components/cartridge-updates.js';
 import { factoryApi } from './api/client.js';
 import type { AgentRecord, ApprovalItem, OfferedModel } from './api/types.js';
 
@@ -98,7 +99,7 @@ const MainLayout: React.FC = () => {
   const [isUpdateDrawerOpen, setIsUpdateDrawerOpen] = useState(false);
   const [selectedAgentForUpdate, setSelectedAgentForUpdate] = useState<AgentRecord | null>(null);
 
-  const updatesAvailableCount = agents.filter((a) => a.updateAvailable).length;
+  const updatesAvailableCount = cartridgeUpdateBuckets(agents).updatesAvailable.length;
 
   const handleCheckUpdate = async (agentId: string) => {
     await factoryApi.checkAgentUpdate(agentId);
