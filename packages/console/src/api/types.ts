@@ -93,7 +93,27 @@ export interface HeldRequestCopy {
   preview?: string;
 }
 
-/** `GET /api/v1/approvals`: an MCP tool call waiting on its run, or a held request in a person's name (E9). */
+/**
+ * A decision an agent asked a person for (GAP-259). It holds no egress request and does not pause the run.
+ * `kind` here is the agent's name for the ask (for example `plan-budget`); the approval's own `kind` is `decision`.
+ */
+export interface DecisionHold {
+  requestKey: string;
+  kind: string;
+  title: string;
+  summary: string;
+  link?: string;
+  /** Agent-supplied data (a budget estimate, a target). Shown as data; the console does not interpret unknown fields. */
+  payload?: Record<string, unknown>;
+  requiresCap?: boolean;
+  approvers?: string[];
+}
+
+/**
+ * `GET /api/v1/approvals`: an MCP tool call waiting on its run, a held request in a person's name (E9),
+ * or a decision hold (GAP-259). `capUsd` is set once a decision hold was approved with a cap; `cap_usd` is the
+ * same amount on a hold read, or null while it is still pending.
+ */
 export interface ApprovalItem {
   approvalId: string;
   agentId: string;
@@ -103,7 +123,11 @@ export interface ApprovalItem {
   argsSha256: string;
   state: 'pending' | 'approved' | 'rejected' | 'consumed';
   requestedAt: string;
-  kind?: 'held';
+  kind?: 'held' | 'decision' | 'change';
+  /** `decision`: what the agent asked, as `GET /api/v1/approvals` returns it. */
+  hold?: DecisionHold;
+  capUsd?: number;
+  cap_usd?: number | null;
   request?: HeldRequestCopy;
   decidedBy?: string;
   decidedAt?: string;
