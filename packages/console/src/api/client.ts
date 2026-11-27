@@ -378,11 +378,22 @@ export const factoryApi = {
     }
   },
 
-  /** E9: `delivered` says how the agent heard (its live run's mailbox, or a new run). */
-  async decideApproval(id: string, decision: 'approve' | 'reject', notes?: string): Promise<ApprovalItem & { delivered?: 'mailbox' | 'run' | 'not_delivered' }> {
+  /**
+   * E9 / GAP-259: `delivered` says how the agent heard (its live run's mailbox, or a new run).
+   * `capUsd` is sent only when approving. A decision hold opened with `requiresCap` is refused
+   * by the server (400 `cap_required`) unless this amount is present.
+   */
+  async decideApproval(
+    id: string,
+    decision: 'approve' | 'reject',
+    notes?: string,
+    capUsd?: number,
+  ): Promise<ApprovalItem & { delivered?: 'mailbox' | 'run' | 'not_delivered' }> {
+    const body: { decision: 'approve' | 'reject'; notes?: string; capUsd?: number } = { decision, notes };
+    if (decision === 'approve' && typeof capUsd === 'number' && Number.isFinite(capUsd) && capUsd >= 0 && capUsd <= 1e9) body.capUsd = capUsd;
     return request<ApprovalItem & { delivered?: 'mailbox' | 'run' | 'not_delivered' }>(`/approvals/${encodeURIComponent(id)}`, {
       method: 'POST',
-      body: JSON.stringify({ decision, notes }),
+      body: JSON.stringify(body),
     });
   },
 

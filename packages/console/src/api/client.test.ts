@@ -138,3 +138,27 @@ it('OAuth consents management: listOAuthConsents and revokeOAuthConsent', async 
   assert.equal(calls[1].method, 'DELETE');
   assert.equal(revoke.ok, true);
 });
+
+it('#520: decideApproval sends capUsd when approving and leaves it off every other call', async () => {
+  const calls: { url: string; body: string }[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), body: String(init?.body ?? '') });
+    return new Response(JSON.stringify({ approvalId: 'a', delivered: 'mailbox' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await factoryApi.decideApproval('id 1', 'approve', 'go', 16.63);
+  assert.equal(calls[0].url, '/api/v1/approvals/id%201');
+  assert.deepEqual(JSON.parse(calls[0].body), { decision: 'approve', notes: 'go', capUsd: 16.63 });
+
+  await factoryApi.decideApproval('id 1', 'approve', undefined, 0);
+  assert.deepEqual(JSON.parse(calls[1].body), { decision: 'approve', capUsd: 0 });
+
+  await factoryApi.decideApproval('id 1', 'reject', 'too much', 16.63);
+  assert.deepEqual(JSON.parse(calls[2].body), { decision: 'reject', notes: 'too much' });
+
+  await factoryApi.decideApproval('id 1', 'approve');
+  assert.deepEqual(JSON.parse(calls[3].body), { decision: 'approve' });
+});
