@@ -157,7 +157,8 @@ export function sessionIdp(state: FactoryState, req: http.IncomingMessage): IdpK
 /** The session verifier: a live factory session is a verified email with zero claim-derived roles (D2). */
 export function verifySession(state: FactoryState, req: http.IncomingMessage): AuthResult {
   const email = sessionEmail(state, req);
-  return email ? { ok: true, principal: { actor: `oidc:${email}`, roles: [] } } : { ok: false, reason: 'no session' };
+  // A live factory session was issued only after the IdP attested a verified email (R13 / #527).
+  return email ? { ok: true, principal: { actor: `oidc:${email}`, roles: [], emailVerified: true } } : { ok: false, reason: 'no session' };
 }
 
 function cookie(value: string, maxAgeSeconds: number): string {
@@ -320,7 +321,7 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
   }
   if (pending?.cli) {
     // S13: hand the CLI a one-time code on its loopback; the key itself only travels in the CLI's own POST.
-    const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [] }, true);
+    const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [], emailVerified: true }, true);
     if (!state.keys || !/^user:/.test(who.actor)) return sendLoginPage(state, res, 403, 'You are signed in, but this factory has not granted you access yet.'), true;
     const code = sessions(state).cliCode(who.actor, pending.cli.challenge);
     res.writeHead(302, { location: `http://127.0.0.1:${pending.cli.port}/callback?${new URLSearchParams({ code, state: pending.cli.state })}`, 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
