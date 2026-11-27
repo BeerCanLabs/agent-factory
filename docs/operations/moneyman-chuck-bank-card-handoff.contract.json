@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "issue": 453,
+  "epic": 452,
+  "laterStory": 458,
+  "agentId": "finley",
+  "accounts": [
+    {
+      "display": "Desert Financial checking",
+      "institution": "Desert Financial",
+      "last4": null,
+      "last4Source": "MoneyMan supplies the last 4 from the existing read-only link on the first export. This repository does not record it."
+    },
+    {
+      "display": "HELOC Savings",
+      "institution": "Desert Financial",
+      "last4": null,
+      "last4Source": "MoneyMan supplies the last 4 from the existing read-only link on the first export. This repository does not record it."
+    },
+    {
+      "display": "Business 0402",
+      "institution": "Desert Financial",
+      "last4": "0402"
+    },
+    {
+      "display": "Kemba 6606",
+      "institution": "Kemba",
+      "last4": "6606"
+    },
+    {
+      "display": "Chase Marriott 4914",
+      "institution": "Chase",
+      "last4": "4914"
+    },
+    {
+      "display": "Citi 3530",
+      "institution": "Citi",
+      "last4": "3530"
+    },
+    {
+      "display": "Citi AAdvantage 4609",
+      "institution": "Citi",
+      "last4": "4609"
+    }
+  ],
+  "excluded": [
+    {
+      "display": "Lexi Savings 0000",
+      "nickname": "Lexi Savings",
+      "institution": "Desert Financial",
+      "last4": "0000",
+      "reason": "Out of the export contract. MoneyMan filters it before writing. A row that arrives anyway is a feed failure, recorded on the Feed status page, and is not mapped."
+    }
+  ],
+  "transactionFields": [
+    { "name": "Date", "notionType": "date", "required": true, "notes": "Transaction date from the institution." },
+    { "name": "Posted date", "notionType": "date", "required": false, "notes": "Empty while the transaction is pending." },
+    { "name": "Amount", "notionType": "number", "required": true, "notes": "Signed decimal in USD. A charge is negative. A credit or payment is positive." },
+    { "name": "Merchant", "notionType": "rich_text", "required": true, "notes": "Merchant name or statement descriptor." },
+    { "name": "Account", "notionType": "rich_text", "required": true, "notes": "Nickname plus last 4, matching an in-scope display name once the last 4 is known." },
+    { "name": "Last 4", "notionType": "rich_text", "required": true, "notes": "Exactly four digits. This is the only account or card number stored." },
+    { "name": "Institution", "notionType": "select", "required": true, "notes": "Desert Financial, Kemba, Chase, or Citi." },
+    { "name": "Pending", "notionType": "checkbox", "required": true, "notes": "True until the institution posts the transaction." },
+    { "name": "Running balance", "notionType": "number", "required": false, "notes": "Present only when the institution provides a running balance on the transaction." },
+    { "name": "Feed ID", "notionType": "rich_text", "required": true, "notes": "MoneyMan's stable transaction id, hashed. Upsert key. It is not a bank token and not a PAN." },
+    { "name": "Imported at", "notionType": "date", "required": true, "notes": "Timestamp of this export, America/Phoenix." },
+    { "name": "Vendor hint", "notionType": "select", "required": false, "notes": "Empty, or AI/cloud/tech for known vendors. Mapping rules are a separate skill story." }
+  ],
+  "balanceFields": [
+    { "name": "Date", "notionType": "date", "required": true, "notes": "Calendar day of the snapshot in America/Phoenix. One row per in-scope account per day." },
+    { "name": "Account", "notionType": "rich_text", "required": true, "notes": "Nickname plus last 4." },
+    { "name": "Last 4", "notionType": "rich_text", "required": true, "notes": "Exactly four digits." },
+    { "name": "Institution", "notionType": "select", "required": true, "notes": "Desert Financial, Kemba, Chase, or Citi." },
+    { "name": "Current", "notionType": "number", "required": true, "notes": "Current balance in USD." },
+    { "name": "Available", "notionType": "number", "required": false, "notes": "Present when the institution provides an available balance." },
+    { "name": "Imported at", "notionType": "date", "required": true, "notes": "Timestamp of this export, America/Phoenix." }
+  ],
+  "statusFields": [
+    "Last run (America/Phoenix)",
+    "Result (succeeded, partial, or failed)",
+    "Rows added and rows updated per account",
+    "Whether a balance row was written per account",
+    "Accounts that failed, with the institution's error summarized and no credentials",
+    "Lexi Savings 0000 rows written (must be 0)",
+    "Window (backfill from 1 Jan 2026, or the last 7 days)",
+    "Transactions database id, Balances database id, and page URL once Dale has approved creation",
+    "How to ask MoneyMan for a refresh"
+  ],
+  "forbiddenStoredValues": [
+    "full card or account numbers",
+    "routing numbers",
+    "Plaid access tokens",
+    "Plaid item ids",
+    "bank passwords",
+    "login details",
+    "factory run tokens"
+  ],
+  "vendorHintValue": "AI/cloud/tech",
+  "vendorHintVendors": [
+    "AWS",
+    "Cloudflare",
+    "Google Cloud",
+    "Google AI",
+    "GitHub",
+    "Cursor",
+    "xAI/Grok",
+    "OpenAI",
+    "Anthropic",
+    "Microsoft 365",
+    "domain registrars"
+  ],
+  "cadence": {
+    "timezone": "America/Phoenix",
+    "dailyLocalTime": "05:00",
+    "lookbackDays": 7,
+    "backfillStart": "2026-01-01",
+    "upsertKey": "Feed ID",
+    "statusFreshWithinHours": 26,
+    "firstExportTrigger": "Dale sends the ready-to-send request, or Dale approves a MoneyMan routine that performs the same export."
+  },
+  "destination": {
+    "pageTitle": "Chuck feed (read-only)",
+    "transactionsDatabase": "Transactions",
+    "balancesDatabase": "Balances",
+    "statusPage": "Feed status",
+    "workspaceDecision": "Dale names the Notion workspace and teamspace before MoneyMan creates the page. The proposed default is a new page in the workspace the factory Notion integration already serves, recorded on Chuck's Notion skill as Dale Sackrider's Space. The page is not a view of The Submind Operations Board.",
+    "operationsBoardDatabaseId": "3d80a48f-fae0-816b-bc00-e4cba96c85aa",
+    "moneyManAccess": "Write on the Transactions database, the Balances database, and the Feed status page only.",
+    "chuckAccess": "Read-only share of the Chuck feed (read-only) page with the integration behind the factory NOTION_API_KEY."
+  },
+  "chuckEgress": {
+    "routes": ["models", "discord", "notion"],
+    "internalTools": ["tools.factory-spend"],
+    "forbiddenRoutes": ["plaid", "finance-broker", "grok-finance"],
+    "grantChange": "none",
+    "sources": [
+      "https://github.com/BeerCanLabs/knowledge/blob/main/agents/finley.md",
+      "https://github.com/BeerCanLabs/SM-finley/blob/main/cartridge.yaml",
+      "https://github.com/BeerCanLabs/SM-finley/blob/main/skills/notion/scripts/notion_worker.py"
+    ]
+  }
+}

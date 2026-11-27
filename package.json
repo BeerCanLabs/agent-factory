@@ -9,7 +9,7 @@
   "scripts": {
     "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
     "build": "node scripts/build-workspaces.mjs",
-    "test": "npm run build && npm run test --workspaces --if-present",
+    "test": "npm run build && npm run test --workspaces --if-present && node --test docs/operations/moneyman-chuck-bank-card-handoff.test.mjs",
     "validate": "npm exec -w @beercanlabs/factory-contract -- tsx src/cli.ts validate --all ../../agents"
   },
   "keywords": [
