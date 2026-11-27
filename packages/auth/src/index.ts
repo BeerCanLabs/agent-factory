@@ -32,6 +32,22 @@ export {
   type ExternalAsSigner,
   type SecretReader,
 } from './as-keys.js';
+export {
+  ACCESS_JWT_TYP,
+  ACCESS_TOKEN_TTL_SECONDS,
+  accessKindOfUrl,
+  accessResourceKind,
+  canonicalAccessResource,
+  canonicalAudiences,
+  isFactoryAccessJwt,
+  signAccessToken,
+  verifyAccessToken,
+  type AccessAudienceKind,
+  type AccessTokenHints,
+  type AccessTokenInput,
+  type AccessTokenVerifyResult,
+  type VerifiedAccessToken,
+} from './access-jwt.js';
 
 export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];

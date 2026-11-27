@@ -1,10 +1,22 @@
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { hashApiKey, sameHash, type Principal, type KeyScopes } from '@beercanlabs/factory-auth';
+import {
+  ROLES,
+  accessKindOfUrl,
+  canonicalAccessResource,
+  canonicalAudiences,
+  hashApiKey,
+  sameHash,
+  signAccessToken,
+  type AccessTokenHints,
+  type KeyScopes,
+  type Principal,
+  type Role,
+} from '@beercanlabs/factory-auth';
 import { MemoryDocBackend, snapshotSha256, type VersionedDocBackend } from '@beercanlabs/factory-bouncer';
-import { actorIsAdmin, identify, json, readBody, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
-import { sessionEmail } from './login.js';
-import { resolveAsIssuer } from './as-discovery.js';
+import { actorIsAdmin, effectiveGrantsForActor, identify, json, readBody, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
+import { sessionEmail, sessionIdp } from './login.js';
+import { ensureAsKeys, resolveAsIssuer } from './as-discovery.js';
 
 export type McpOAuthClientRecord = {
   clientId: string;
@@ -37,7 +49,12 @@ export type McpOAuthRefreshTokenRecord = {
   deviceFamily: string;
   keyId: string;
   scope?: string;
+  /** First audience, kept so a record written before Slice 2 still refreshes. */
   audience?: string;
+  /** Canonical api/mcp resource URIs authorized for this refresh family. */
+  audiences?: string[];
+  /** How the person signed in when the grant was issued. A hint copied onto the access token (`amr`). */
+  amr?: string[];
   expiresAt: string;
   createdAt: string;
   rotatedAt?: string;
@@ -72,7 +89,10 @@ export type PendingAuthCode = {
   codeChallenge: string;
   codeChallengeMethod: string;
   scope: string;
+  /** Space-separated canonical resource URIs authorized for the code. Absent means mcp only. */
   resource?: string;
+  /** IdP that proved the person at authorize time (`amr` on the access token). */
+  amr?: string[];
   expiresAt: number;
 };
 
@@ -470,6 +490,7 @@ export class McpOAuthStore {
     newTokenHash: string,
     newExpiresAt: string,
     keyId: string,
+    patch?: { audience?: string; audiences?: string[]; amr?: string[] },
   ): Promise<McpOAuthRefreshTokenRecord> {
     return this.serial(async () => {
       const cur = this.refreshTokensByHash.get(oldTokenHash);
@@ -482,6 +503,9 @@ export class McpOAuthStore {
         keyId,
         expiresAt: newExpiresAt,
         createdAt: this.now().toISOString(),
+        ...(patch?.audience ? { audience: patch.audience } : {}),
+        ...(patch?.audiences ? { audiences: patch.audiences } : {}),
+        ...(patch?.amr ? { amr: patch.amr } : {}),
       };
       delete next.rotatedAt;
       this.refreshTokensByHash.set(newTokenHash, next);
@@ -639,7 +663,7 @@ async function handleAuthorizeGet(
   let codeChallengeMethod = q.get('code_challenge_method');
   let clientState = q.get('state') ?? undefined;
   let scope = q.get('scope') ?? 'mcp:full';
-  let resource = q.get('resource') ?? undefined;
+  let resourceList = resourceParams(q.getAll('resource'));
 
   const oauthReq = q.get('oauth_req');
   if (oauthReq) {
@@ -652,7 +676,7 @@ async function handleAuthorizeGet(
       codeChallengeMethod = pending.codeChallengeMethod;
       clientState = pending.state;
       scope = pending.scope ?? 'mcp:full';
-      resource = pending.resource;
+      resourceList = pending.resource ? pending.resource.split(/\s+/).filter(Boolean) : [];
     }
   }
 
@@ -701,20 +725,22 @@ async function handleAuthorizeGet(
     return true;
   }
 
-  // Canonicalize and validate resource if provided
-  if (resource) {
-    const cleanResource = resource.split('?')[0].replace(/\/$/, '');
-    const canonicalMcp = `${issuer}/mcp`;
-    if (cleanResource !== canonicalMcp && !cleanResource.startsWith(`${canonicalMcp}/`)) {
+  // RFC 8707 resource. Omitted means mcp only, which is what existing MCP connectors request.
+  // An explicit resource must be this factory's api audience, mcp audience, or both.
+  let resource: string | undefined;
+  if (resourceList.length > 0) {
+    const canon = canonicalAudiences(issuer, resourceList);
+    if (!canon.ok) {
       const errUrl = new URL(redirectUri);
       errUrl.searchParams.set('error', 'invalid_target');
-      errUrl.searchParams.set('error_description', 'Resource must match factory MCP resource URI');
+      errUrl.searchParams.set('error_description', 'Resource must be the factory api or mcp resource');
       if (clientState) errUrl.searchParams.set('state', clientState);
       errUrl.searchParams.set('iss', issuer);
       res.writeHead(302, { location: errUrl.toString(), 'cache-control': 'no-store' });
       res.end();
       return true;
     }
+    resource = canon.audiences.join(' ');
   }
 
   // Check live session
@@ -762,6 +788,7 @@ async function handleAuthorizeGet(
       codeChallengeMethod,
       scope,
       resource,
+      amr: amrOf(state, req),
     });
     const targetUrl = new URL(redirectUri);
     targetUrl.searchParams.set('code', code);
@@ -936,6 +963,7 @@ async function handleAuthorizePost(
     codeChallengeMethod: pending.codeChallengeMethod,
     scope,
     resource: pending.resource,
+    amr: amrOf(state, req),
   });
 
   redirectUrl.searchParams.set('code', code);
@@ -947,6 +975,190 @@ async function handleAuthorizePost(
   return true;
 }
 
+function anchorLive(k: { revokedAt?: string; expiresAt: string | null }, now: number): boolean {
+  return !k.revokedAt && (k.expiresAt === null || Date.parse(k.expiresAt) > now);
+}
+
+/** Current refresh lifetime. Slice 3 (#564) applies D-4 (30 days for people, 90 for devices). */
+const REFRESH_TTL_MS = 60 * 24 * 3600 * 1000;
+const HINT_AGENT_CAP = 16;
+
+function resourceParams(values: readonly string[]): string[] {
+  return values.flatMap((v) => v.split(/\s+/)).map((s) => s.trim()).filter(Boolean);
+}
+
+function amrOf(state: FactoryState, req: http.IncomingMessage): string[] | undefined {
+  const idp = sessionIdp(state, req);
+  return idp ? [idp] : undefined;
+}
+
+/** Rebuild canonical audiences for the issuer this request is speaking as. */
+function audiencesFromStored(issuer: string, field: string | undefined): string[] {
+  const out: string[] = [];
+  for (const part of (field ?? '').split(/\s+/)) {
+    const kind = part ? accessKindOfUrl(part) : undefined;
+    if (!kind) continue;
+    const canon = canonicalAccessResource(issuer, kind);
+    if (!out.includes(canon)) out.push(canon);
+  }
+  return out.length > 0 ? out : [canonicalAccessResource(issuer, 'mcp')];
+}
+
+/**
+ * Audiences for this token. The authorization (or the refresh family) fixes the allowed set.
+ * Omitting `resource` keeps that set. A request may only narrow it (RFC 8707).
+ */
+function selectAudiences(
+  issuer: string,
+  authorizedField: string | undefined,
+  requested: readonly string[],
+): { ok: true; audiences: string[] } | { ok: false } {
+  const authorized = audiencesFromStored(issuer, authorizedField);
+  if (requested.length === 0) return { ok: true, audiences: authorized };
+  const asked = canonicalAudiences(issuer, requested);
+  if (!asked.ok) return { ok: false };
+  if (asked.audiences.some((aud) => !authorized.includes(aud))) return { ok: false };
+  return { ok: true, audiences: asked.audiences };
+}
+
+async function readOAuthBody(req: http.IncomingMessage): Promise<{ fields: Record<string, string>; resources: string[] }> {
+  const contentType = String(req.headers['content-type'] ?? '');
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const params = new URLSearchParams(await readBody(req));
+    const fields: Record<string, string> = {};
+    for (const [k, v] of params.entries()) if (k !== 'resource') fields[k] = v;
+    return { fields, resources: resourceParams(params.getAll('resource')) };
+  }
+  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+  const fields: Record<string, string> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (k === 'resource') continue;
+    if (typeof v === 'string') fields[k] = v;
+  }
+  const raw = body.resource;
+  const resources = Array.isArray(raw)
+    ? resourceParams(raw.filter((v): v is string => typeof v === 'string'))
+    : typeof raw === 'string'
+      ? resourceParams([raw])
+      : [];
+  return { fields, resources };
+}
+
+/** Role and grant hints for UIs (D-5). The resource server does not authorize from these claims. */
+function grantHints(state: FactoryState, actor: string): AccessTokenHints {
+  const hints: AccessTokenHints = {};
+  if (state.grants && Number.isFinite(state.grants.version)) hints.grantsVersion = state.grants.version;
+  const res = effectiveGrantsForActor(state, actor);
+  if (!res.ok || !res.grants) return hints;
+  const roles = new Set<string>();
+  const agents = new Map<string, Set<string>>();
+  for (const eg of res.grants) {
+    if (eg.readOnly) continue;
+    if (eg.grant.scope.kind === 'fleet' && (ROLES as readonly string[]).includes(eg.grant.role)) roles.add(eg.grant.role);
+    if (eg.grant.scope.kind === 'agent') {
+      const set = agents.get(eg.grant.scope.id) ?? new Set<string>();
+      set.add(eg.grant.role);
+      agents.set(eg.grant.scope.id, set);
+    }
+  }
+  const roleList = [...roles].filter((r): r is Role => (ROLES as readonly string[]).includes(r));
+  if (actorIsAdmin(state, actor, roleList) && !roles.has('admin')) roles.add('admin');
+  if (roles.size > 0) hints.roles = [...roles];
+  if (agents.size > 0) {
+    const out: Record<string, string[]> = {};
+    let n = 0;
+    for (const [id, set] of agents) {
+      if (n >= HINT_AGENT_CAP) break;
+      out[id] = [...set].slice(0, 8);
+      n += 1;
+    }
+    hints.agents = out;
+  }
+  return hints;
+}
+
+/**
+ * Sign a 10-minute access token and keep a key-store anchor so consent revocation and refresh-reuse
+ * still kill it. The anchor's plaintext is never returned. Slice 3 replaces the anchor with the revocation set.
+ */
+async function mintAccessToken(
+  state: FactoryState,
+  input: {
+    issuer: string;
+    principalId: string;
+    clientId: string;
+    clientName: string;
+    scope?: string;
+    audiences: string[];
+    amr?: string[];
+    anchorId?: string;
+  },
+): Promise<{ accessToken: string; expiresIn: number; keyId: string; deviceFamily: string }> {
+  const keys = state.keys;
+  if (!keys) throw Object.assign(new Error('Key store unavailable'), { status: 503 });
+  const deviceFamily = `mcp:${input.clientId.slice(0, 60)}`;
+  const scopes = mapOAuthScopeToKeyScopes(input.scope);
+  const anchorExpiry = new Date(Date.now() + REFRESH_TTL_MS).toISOString();
+  const rotateInput = {
+    by: input.principalId,
+    expiresAt: anchorExpiry,
+    secretPrefix: 'fk_at_' as const,
+    audience: input.audiences[0],
+    oauthClientId: input.clientId,
+    oauthClientName: input.clientName,
+    scopes,
+  };
+  let recordId: string | undefined;
+  if (input.anchorId) {
+    try {
+      recordId = (await keys.rotate(input.anchorId, rotateInput)).record.id;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== 'key_not_found') throw err;
+    }
+  }
+  if (!recordId) {
+    const now = Date.now();
+    // list() still returns expired rows. Rotating one throws key_not_found; mint a new anchor instead.
+    const existing = keys.list({ owner: input.principalId }).find((k) => k.deviceFamily === deviceFamily && anchorLive(k, now));
+    if (existing) {
+      try {
+        recordId = (await keys.rotate(existing.id, rotateInput)).record.id;
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code !== 'key_not_found') throw err;
+      }
+    }
+  }
+  if (!recordId) {
+    recordId = (
+      await keys.create({
+        owner: input.principalId,
+        deviceFamily,
+        by: input.principalId,
+        expiresAt: anchorExpiry,
+        secretPrefix: 'fk_at_',
+        audience: input.audiences[0],
+        oauthClientId: input.clientId,
+        oauthClientName: input.clientName,
+        scopes,
+      })
+    ).record.id;
+  }
+  const signed = await signAccessToken(await ensureAsKeys(state), {
+    issuer: input.issuer,
+    subject: input.principalId,
+    audiences: input.audiences,
+    clientId: input.clientId,
+    scope: input.scope,
+    sid: recordId,
+    amr: input.amr,
+    actSub: `client:${input.clientId}`,
+    hints: grantHints(state, input.principalId),
+  });
+  return { accessToken: signed.token, expiresIn: signed.expiresIn, keyId: recordId, deviceFamily };
+}
+
 async function handleTokenPost(
   state: FactoryState,
   req: http.IncomingMessage,
@@ -956,16 +1168,7 @@ async function handleTokenPost(
   const issuer = getOAuthIssuer(state, req);
   res.setHeader('cache-control', 'no-store');
 
-  let body: Record<string, string> = {};
-  const contentType = String(req.headers['content-type'] ?? '');
-  if (contentType.includes('application/x-www-form-urlencoded')) {
-    const raw = await readBody(req);
-    const params = new URLSearchParams(raw);
-    for (const [k, v] of params.entries()) body[k] = v;
-  } else {
-    body = (await readJson(req).catch(() => ({}))) as Record<string, string>;
-  }
-
+  const { fields: body, resources } = await readOAuthBody(req);
   const grantType = body.grant_type;
 
   if (grantType === 'authorization_code') {
@@ -996,50 +1199,32 @@ async function handleTokenPost(
       return json(res, 400, { error: 'invalid_grant', error_description: 'PKCE verification failed' }), true;
     }
 
+    const selected = selectAudiences(issuer, auth.resource, resources);
+    if (!selected.ok) {
+      return json(res, 400, { error: 'invalid_target', error_description: 'resource is not an authorized api or mcp audience' }), true;
+    }
+
     const client = store.getClient(clientId);
     const clientName = client?.clientName ?? clientId;
-    const canonicalMcp = `${issuer}/mcp`;
-    const deviceFamily = `mcp:${clientId.slice(0, 60)}`;
-
     if (!state.keys) {
       return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
     }
 
-    // Create or rotate 1-hour fk_at_ key in KeyStore
-    const scopes = mapOAuthScopeToKeyScopes(auth.scope);
-    const existingKey = state.keys.list({ owner: auth.principalId }).find((k) => k.deviceFamily === deviceFamily);
-    const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
-    let keyOut: { record: any; plaintext: string };
+    const minted = await mintAccessToken(state, {
+      issuer,
+      principalId: auth.principalId,
+      clientId,
+      clientName,
+      scope: auth.scope,
+      audiences: selected.audiences,
+      amr: auth.amr,
+    });
 
-    if (existingKey) {
-      keyOut = await state.keys.rotate(existingKey.id, {
-        by: auth.principalId,
-        expiresAt,
-        secretPrefix: 'fk_at_',
-        audience: canonicalMcp,
-        oauthClientId: clientId,
-        oauthClientName: clientName,
-        scopes,
-      });
-    } else {
-      keyOut = await state.keys.create({
-        owner: auth.principalId,
-        deviceFamily,
-        by: auth.principalId,
-        expiresAt,
-        secretPrefix: 'fk_at_',
-        audience: canonicalMcp,
-        oauthClientId: clientId,
-        oauthClientName: clientName,
-        scopes,
-      });
-    }
-
-    // Mint durable rotating refresh token (60-day sliding TTL)
+    // Refresh tokens stay opaque. Slice 3 (#564) makes the family durable across tasks and applies D-4 lifetimes.
     const refreshTokenPlaintext = 'fk_rt_' + b64url(randomBytes(32));
     const tokenHash = hashApiKey(refreshTokenPlaintext);
     const familyId = 'fam_' + randomBytes(16).toString('hex');
-    const refreshExpiresAt = new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString();
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS).toISOString();
 
     await store.saveRefreshToken({
       tokenHash,
@@ -1048,18 +1233,20 @@ async function handleTokenPost(
       principalId: auth.principalId,
       clientId,
       clientName,
-      deviceFamily,
-      keyId: keyOut.record.id,
+      deviceFamily: minted.deviceFamily,
+      keyId: minted.keyId,
       scope: auth.scope,
-      audience: canonicalMcp,
+      audience: selected.audiences[0],
+      audiences: selected.audiences,
+      amr: auth.amr,
       expiresAt: refreshExpiresAt,
       createdAt: new Date().toISOString(),
     });
 
     return json(res, 200, {
-      access_token: keyOut.plaintext,
+      access_token: minted.accessToken,
       token_type: 'Bearer',
-      expires_in: 3600,
+      expires_in: minted.expiresIn,
       refresh_token: refreshTokenPlaintext,
       scope: auth.scope,
     }), true;
@@ -1103,29 +1290,37 @@ async function handleTokenPost(
       return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
     }
 
-    // Advance family generation & rotate KeyStore fk_at_ key (+1h TTL)
-    const newExpiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
-    const scopes = mapOAuthScopeToKeyScopes(rec.scope);
-    const keyOut = await state.keys.rotate(rec.keyId, {
-      by: rec.principalId,
-      expiresAt: newExpiresAt,
-      secretPrefix: 'fk_at_',
-      audience: rec.audience,
-      oauthClientId: rec.clientId,
-      oauthClientName: rec.clientName,
-      scopes,
+    const held = audiencesFromStored(issuer, rec.audiences?.length ? rec.audiences.join(' ') : rec.audience);
+    const selected = selectAudiences(issuer, held.join(' '), resources);
+    if (!selected.ok) {
+      return json(res, 400, { error: 'invalid_target', error_description: 'resource is not an authorized api or mcp audience' }), true;
+    }
+
+    const minted = await mintAccessToken(state, {
+      issuer,
+      principalId: rec.principalId,
+      clientId: rec.clientId,
+      clientName: rec.clientName,
+      scope: rec.scope,
+      audiences: selected.audiences,
+      amr: rec.amr,
+      anchorId: rec.keyId,
     });
 
     const newRefreshToken = 'fk_rt_' + b64url(randomBytes(32));
     const newTokenHash = hashApiKey(newRefreshToken);
-    const newRefreshExpiresAt = new Date(Date.now() + 60 * 24 * 3600 * 1000).toISOString();
+    const newRefreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS).toISOString();
 
-    await store.rotateRefreshTokenFamily(tokenHash, newTokenHash, newRefreshExpiresAt, keyOut.record.id);
+    await store.rotateRefreshTokenFamily(tokenHash, newTokenHash, newRefreshExpiresAt, minted.keyId, {
+      audience: selected.audiences[0],
+      audiences: selected.audiences,
+      ...(rec.amr ? { amr: rec.amr } : {}),
+    });
 
     return json(res, 200, {
-      access_token: keyOut.plaintext,
+      access_token: minted.accessToken,
       token_type: 'Bearer',
-      expires_in: 3600,
+      expires_in: minted.expiresIn,
       refresh_token: newRefreshToken,
       scope: rec.scope ?? 'mcp:full',
     }), true;

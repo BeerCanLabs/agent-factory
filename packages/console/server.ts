@@ -75,6 +75,7 @@ export function providerLabel(signedInWith: unknown, access = false): string {
     'cloudflare-access': 'Cloudflare Access',
     'api-key': 'API key',
     oauth: 'Connected app (OAuth)',
+    'access-jwt': 'Factory access token',
     'static-token': 'Static token',
     'oidc-bearer': 'OIDC token',
     'run-token': 'Agent run',

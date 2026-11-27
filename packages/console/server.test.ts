@@ -155,6 +155,7 @@ describe('A2 console forwards the caller, adds no credential', () => {
 
   it('providerLabel names the new verified methods', () => {
     assert.equal(providerLabel('oauth'), 'Connected app (OAuth)');
+    assert.equal(providerLabel('access-jwt'), 'Factory access token');
     assert.equal(providerLabel('static-token'), 'Static token');
     assert.equal(providerLabel('oidc-bearer'), 'OIDC token');
     assert.equal(providerLabel('run-token'), 'Agent run');
