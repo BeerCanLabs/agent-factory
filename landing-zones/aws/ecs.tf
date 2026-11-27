@@ -118,6 +118,8 @@ resource "aws_ecs_task_definition" "control_plane" {
         { name = "FACTORY_GATEKEEPER_EGRESS_URL", value = local.gatekeeper_egress_url },
         # Where factory-registered agents keep their minds and send logs (aws/ecs.ts registers their task definitions).
         { name = "FACTORY_MIND_BUCKET", value = aws_s3_bucket.mind.bucket },
+        # agent-factory #561: every agent role the control plane creates or writes carries this boundary (iam.ts).
+        { name = "FACTORY_AGENT_ROLE_BOUNDARY_ARN", value = aws_iam_policy.agent_role_boundary.arn },
         { name = "FACTORY_LOG_GROUP", value = aws_cloudwatch_log_group.factory.name },
         # Gatekeeper-held secrets (S1): the control plane is denied them, pre-flight never reads them, and they are
         # never put in an agent task definition (aws/ecs.ts).
