@@ -6,6 +6,7 @@ import { RunTokens } from '@beercanlabs/factory-auth';
 import { SpendTracker } from '@beercanlabs/factory-budget';
 import { envProvider } from '@beercanlabs/factory-secrets-bind';
 import {
+  bumpSecretGeneration,
   createRun,
   finishRun,
   MemoryRunStore,
@@ -13,6 +14,7 @@ import {
   dockerRuntime,
   dockerApi,
   parseImageMap,
+  secretGeneration,
   type DockerApi,
   type PropertyManagerState,
 } from './index.js';
@@ -390,5 +392,98 @@ describe('GAP-255 policy env and bound secrets', () => {
     assert.ok(env.includes('SDLC_SHARED=bound-secret-value'), env.join(' '));
     assert.ok(!env.includes('SDLC_SHARED=policy-value'));
     assert.ok(env.includes('SDLC_FLEET_CONFIG={}'));
+  });
+});
+
+describe('GAP-269 pre-flight secret invalidation (#503)', () => {
+  it('a pre-flight read in flight at an invalidation does not cache the stale secret; a sibling secret still caches', async () => {
+    const stored = new Map<string, string>([
+      ['SECRET_A', 'old-secret-a-value'],
+      ['SECRET_B', 'secret-b-value-ok'],
+    ]);
+    let releaseRead: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let entered: () => void = () => {};
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const reads: string[] = [];
+    let seen: Record<string, string> = {};
+
+    const agent: AgentRecord = {
+      id: 'preflight',
+      name: 'Preflight',
+      role: 'agent',
+      state: 'SLEEPING',
+      provider: 'local',
+      artifact: '',
+      requires: ['SECRET_A', 'SECRET_B'],
+      ungated: ['SECRET_A', 'SECRET_B'],
+      triggers: [],
+      memoryPrefix: 'preflight',
+      dir: '/tmp',
+    };
+    const state: PropertyManagerState = {
+      agents: new Map([['preflight', agent]]),
+      ledger: new MemoryLedger(),
+      providers: [{
+        name: 'slow',
+        async get(name: string) {
+          reads.push(name);
+          const atStart = stored.get(name);
+          if (name === 'SECRET_A' && reads.filter((n) => n === 'SECRET_A').length === 1) {
+            entered();
+            await gate;
+            return atStart;
+          }
+          return stored.get(name);
+        },
+      }],
+      runtime: {
+        start: async (_a, secrets) => {
+          seen = secrets;
+          return { handle: 'h-preflight' };
+        },
+        stop: async () => {},
+        running: () => false,
+      },
+      runs: new MemoryRunStore(),
+      runTokens: new RunTokens('pm-gap269-test-key-0123456789abcdef012345'),
+      callbacks: { allowedProtocols: ['http:', 'https:'], allowedHostnames: ['127.0.0.1'], allowPrivateIps: true },
+      policies: { get: () => ({ routes: [], models: [] }), has: () => true },
+      spend: new SpendTracker(),
+      idleMs: 0,
+      idleTimers: new Map(),
+      secretValues: new Set(),
+    };
+
+    const waking = createRun(state, 'preflight', { actor: 'factory:scheduler', trigger: 'schedule' });
+    await started;
+    stored.set('SECRET_A', 'new-secret-a-value');
+    // The same bump `invalidateSecret` performs. Deleting the cache entry is the other half of that invalidation.
+    bumpSecretGeneration(state, 'SECRET_A');
+    state.secretCache?.delete('SECRET_A');
+    assert.equal(secretGeneration(state, 'SECRET_A'), 1);
+    assert.equal(secretGeneration(state, 'SECRET_B'), 0, 'invalidating A does not bump B');
+    releaseRead();
+
+    const first = await waking;
+    assert.equal(first.status, 202, JSON.stringify(first.body));
+    assert.equal(seen.SECRET_A, 'old-secret-a-value', 'the in-flight pre-flight still receives the value it read');
+    assert.equal(seen.SECRET_B, 'secret-b-value-ok');
+    assert.equal(state.secretCache?.has('SECRET_A'), false, 'the stale value is not written back to the cache');
+    assert.equal(state.secretCache?.get('SECRET_B')?.value, 'secret-b-value-ok', 'a secret that was not invalidated stays cached');
+
+    const runId = (first.body as { runId: string }).runId;
+    await finishRun(state, runId, 'DONE', { actor: 'run:preflight', exitCode: 0 });
+
+    const readsBefore = reads.length;
+    const bReadsBefore = reads.filter((n) => n === 'SECRET_B').length;
+    const second = await createRun(state, 'preflight', { actor: 'factory:scheduler', trigger: 'schedule' });
+    assert.equal(second.status, 202, JSON.stringify(second.body));
+    assert.equal(seen.SECRET_A, 'new-secret-a-value', 'the next pre-flight reads the new value');
+    assert.equal(reads.length, readsBefore + 1, 'only the invalidated secret is read again');
+    assert.equal(reads.filter((n) => n === 'SECRET_B').length, bReadsBefore, 'the cached sibling is not read again');
+    assert.equal(state.secretCache?.get('SECRET_A')?.value, 'new-secret-a-value');
+
+    await finishRun(state, (second.body as { runId: string }).runId, 'DONE', { actor: 'run:preflight', exitCode: 0 });
   });
 });
