@@ -54,12 +54,12 @@ One row per transaction.
 | Pending | checkbox | yes | Set until the institution posts the transaction. |
 | Running balance | number | no | Present when the institution sends a running balance on the transaction. |
 | Feed ID | rich text | yes | Hashed stable id. Upsert key. |
-| Imported at | date | yes | Export timestamp in America/Denver. |
+| Imported at | date | yes | Export timestamp in America/Phoenix. |
 | Vendor hint | select | no | Empty, or `AI/cloud/tech`. |
 
 ### Balances
 
-One row per in-scope account per calendar day in America/Denver.
+One row per in-scope account per calendar day in America/Phoenix.
 
 | Field | Notion type | Required | Rule |
 | --- | --- | --- | --- |
@@ -69,13 +69,13 @@ One row per in-scope account per calendar day in America/Denver.
 | Institution | select | yes | Desert Financial, Kemba, Chase, or Citi. |
 | Current | number | yes | Current balance in USD. |
 | Available | number | no | Present when the institution provides it. |
-| Imported at | date | yes | Export timestamp in America/Denver. |
+| Imported at | date | yes | Export timestamp in America/Phoenix. |
 
 ### Feed status
 
 A page rewritten on every run, including a run that updates zero rows.
 
-- Last run, in America/Denver.
+- Last run, in America/Phoenix.
 - Result: `succeeded`, `partial`, or `failed`.
 - Per account: rows added, rows updated, and whether a balance row was written.
 - Accounts that failed, with a short error and no credentials. A failed account does not block the others.
@@ -88,8 +88,8 @@ A page rewritten on every run, including a run that updates zero rows.
 
 | Item | Value |
 | --- | --- |
-| Time zone | America/Denver |
-| Daily run | 05:00 local (the planned 5:00 AM Mountain Time run) |
+| Time zone | America/Phoenix |
+| Daily run | 05:00 America/Phoenix (fixed MST, UTC-7, no daylight-saving shift; the approved 5:00 AM MST run) |
 | Daily window | The last 7 days of transactions, plus current balances. The overlap lets a pending charge become a posted one without a duplicate `Feed ID`. |
 | First run | One backfill from 1 Jan 2026, or a start date Dale names in the request. |
 | Who starts it | Dale sends the request below, or Dale approves a MoneyMan routine that performs that export. The factory does not start it. |
@@ -142,7 +142,7 @@ Dale sends this, or approves a routine that does the same work, after he fills i
 >
 > Store last 4 only. Refuse or mask any full card or account number, routing number, access token, or login. Upsert transactions by hashed Feed ID.
 >
-> Backfill from 1 Jan 2026, then run daily at 05:00 America/Denver over the last 7 days plus current balances. Mark known AI, cloud, and tech vendors with Vendor hint `AI/cloud/tech`.
+> Backfill from 1 Jan 2026, then run daily at 05:00 America/Phoenix over the last 7 days plus current balances. Mark known AI, cloud, and tech vendors with Vendor hint `AI/cloud/tech`.
 >
 > Write every run to the Feed status page: last run time, rows added and updated per account, accounts that failed, and `Lexi Savings 0000 rows written` (must be 0).
 >

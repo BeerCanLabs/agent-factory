@@ -63,20 +63,20 @@
     { "name": "Pending", "notionType": "checkbox", "required": true, "notes": "True until the institution posts the transaction." },
     { "name": "Running balance", "notionType": "number", "required": false, "notes": "Present only when the institution provides a running balance on the transaction." },
     { "name": "Feed ID", "notionType": "rich_text", "required": true, "notes": "MoneyMan's stable transaction id, hashed. Upsert key. It is not a bank token and not a PAN." },
-    { "name": "Imported at", "notionType": "date", "required": true, "notes": "Timestamp of this export, America/Denver." },
+    { "name": "Imported at", "notionType": "date", "required": true, "notes": "Timestamp of this export, America/Phoenix." },
     { "name": "Vendor hint", "notionType": "select", "required": false, "notes": "Empty, or AI/cloud/tech for known vendors. Mapping rules are a separate skill story." }
   ],
   "balanceFields": [
-    { "name": "Date", "notionType": "date", "required": true, "notes": "Calendar day of the snapshot in America/Denver. One row per in-scope account per day." },
+    { "name": "Date", "notionType": "date", "required": true, "notes": "Calendar day of the snapshot in America/Phoenix. One row per in-scope account per day." },
     { "name": "Account", "notionType": "rich_text", "required": true, "notes": "Nickname plus last 4." },
     { "name": "Last 4", "notionType": "rich_text", "required": true, "notes": "Exactly four digits." },
     { "name": "Institution", "notionType": "select", "required": true, "notes": "Desert Financial, Kemba, Chase, or Citi." },
     { "name": "Current", "notionType": "number", "required": true, "notes": "Current balance in USD." },
     { "name": "Available", "notionType": "number", "required": false, "notes": "Present when the institution provides an available balance." },
-    { "name": "Imported at", "notionType": "date", "required": true, "notes": "Timestamp of this export, America/Denver." }
+    { "name": "Imported at", "notionType": "date", "required": true, "notes": "Timestamp of this export, America/Phoenix." }
   ],
   "statusFields": [
-    "Last run (America/Denver)",
+    "Last run (America/Phoenix)",
     "Result (succeeded, partial, or failed)",
     "Rows added and rows updated per account",
     "Whether a balance row was written per account",
@@ -110,7 +110,7 @@
     "domain registrars"
   ],
   "cadence": {
-    "timezone": "America/Denver",
+    "timezone": "America/Phoenix",
     "dailyLocalTime": "05:00",
     "lookbackDays": 7,
     "backfillStart": "2026-01-01",

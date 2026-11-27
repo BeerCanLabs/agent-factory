@@ -68,7 +68,11 @@ test("Chuck's egress stays notion and gains no finance-broker route", () => {
 });
 
 test('cadence and destination match the approved plan', () => {
-  assert.equal(contract.cadence.timezone, 'America/Denver');
+  assert.equal(contract.cadence.timezone, 'America/Phoenix');
+  assert.equal(JSON.stringify(contract).includes('America/Denver'), false);
+  assert.equal(doc.includes('America/Denver'), false);
+  assert.match(section('Cadence'), /America\/Phoenix/);
+  assert.match(section('Ready-to-send MoneyMan request'), /05:00 America\/Phoenix/);
   assert.equal(contract.cadence.dailyLocalTime, '05:00');
   assert.equal(contract.cadence.lookbackDays, 7);
   assert.equal(contract.cadence.backfillStart, '2026-01-01');
