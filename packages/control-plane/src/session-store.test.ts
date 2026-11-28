@@ -116,6 +116,7 @@ describe('refresh lifetimes and cross-task reuse', () => {
     assert.equal(isSnapshotConflict(Object.assign(new Error('Command failed: aws s3api put-object'), { stderr: 'An error occurred (PreconditionFailed) when calling the PutObject operation' })), true);
     assert.equal(isSnapshotConflict(Object.assign(new Error('Command failed'), { stderr: Buffer.from('ConditionalRequestConflict') })), true);
     assert.equal(isSnapshotConflict(new Error('GCS doc write failed (412: PreconditionFailed)')), true);
+    assert.equal(isSnapshotConflict(new Error('upstream returned 412')), false);
     assert.equal(isSnapshotConflict(new Error('network down')), false);
 
     const inner = new MemoryDocBackend<RevocationDoc>();

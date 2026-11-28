@@ -15,7 +15,8 @@ export type RevocationEntry = {
 
 export type RevocationDoc = { entries: RevocationEntry[] };
 
-const SNAPSHOT_CONFLICT = /already exists|PreconditionFailed|ConditionalRequestConflict|\b412\b/i;
+// 412 counts only as the GCS document-write failure. A bare 412 from another call is not a version race.
+const SNAPSHOT_CONFLICT = /already exists|PreconditionFailed|ConditionalRequestConflict|GCS doc write failed \(412/i;
 
 function snapshotConflictText(err: unknown): string {
   if (typeof err === 'string') return err;
