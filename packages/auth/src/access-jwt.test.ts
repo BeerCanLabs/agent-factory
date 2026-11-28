@@ -148,4 +148,24 @@ describe('RFC 9068 access tokens (front-door Phase 1 Slice 2)', () => {
     assert.equal(isFactoryAccessJwt(noTyp), false);
     assert.deepEqual(await verifyAccessToken(noTyp, { keys, issuers: [ISSUER], audience: MCP }), { ok: false, reason: 'invalid' });
   });
+
+  it('accepts the Phase 3 issuer alias and rejects a kid that is not in the JWKS', async () => {
+    const keys = await keySet();
+    const alias = 'https://factory-dashboard.example.test';
+    const aliasApi = canonicalAccessResource(alias, 'api');
+    const issued = await signAccessToken(keys, { ...base, issuer: alias, audiences: [aliasApi], scope: 'agents:read' });
+    const ok = await verifyAccessToken(issued.token, {
+      keys,
+      issuers: [ISSUER, alias],
+      audience: [API, aliasApi],
+    });
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    if (ok.ok) assert.equal(ok.token.iss, alias);
+    const wrongIssuer = await verifyAccessToken(issued.token, { keys, issuers: [ISSUER], audience: [API, aliasApi] });
+    assert.equal(wrongIssuer.ok, false);
+
+    const retired = await keySet('retired-kid');
+    const staleKid = await signAccessToken(retired, { ...base, jti: 'retired' });
+    assert.deepEqual(await verifyAccessToken(staleKid.token, { keys, issuers: [ISSUER], audience: MCP }), { ok: false, reason: 'invalid' });
+  });
 });

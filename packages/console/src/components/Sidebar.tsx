@@ -16,7 +16,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../auth/CloudflareAuth.js';
-import { canAccessSubscriptions, canManageFactorySubscriptions, canManagePeople } from '../auth/access-gate.js';
+import { canAccessSubscriptions, canManageFactorySubscriptions, canManagePeople, holds } from '../auth/access-gate.js';
 
 export type ScreenId =
   | 'fleet'
@@ -33,7 +33,8 @@ export type ScreenId =
   | 'triage'
   | 'studio'
   | 'people'
-  | 'keys';
+  | 'keys'
+  | 'legacy-credentials';
 
 interface SidebarProps {
   currentScreen: ScreenId;
@@ -66,6 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const managesPeople = canManagePeople(whoami);
   const seesSubscriptions = canAccessSubscriptions(whoami);
   const managesFactorySubs = canManageFactorySubscriptions(whoami);
+  const seesLegacyCredentials = holds(whoami, 'ledger.read');
 
   const navSections: NavSection[] = [
     {
@@ -139,6 +141,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           badgeColor: 'bg-amber-950 text-amber-400 border border-amber-800/80',
         },
         { id: 'keys' as const, label: 'Your API Keys', icon: <KeyRound className="w-4 h-4" /> },
+        ...(seesLegacyCredentials
+          ? [{ id: 'legacy-credentials' as const, label: 'Old credentials', icon: <KeyRound className="w-4 h-4" /> }]
+          : []),
         ...(managesPeople ? [{ id: 'people' as const, label: 'People & Access', icon: <Users className="w-4 h-4" /> }] : []),
         ...(isAdmin
           ? [

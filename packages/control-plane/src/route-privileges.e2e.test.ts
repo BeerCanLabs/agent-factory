@@ -587,6 +587,7 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
       '/api/v1/oauth/consents',
       '/api/v1/oauth/consents/client1',
       '/api/v1/oauth/clients',
+      '/api/v1/auth/legacy-credentials',
       '/api/v1/account/sessions',
       '/api/v1/account/sessions/sess_x',
       '/api/v1/account/refresh-families',

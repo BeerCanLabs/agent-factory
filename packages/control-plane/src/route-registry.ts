@@ -1845,6 +1845,17 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     responseSchema: HealthResponseSchema,
   },
   {
+    operationId: "list_legacy_credentials",
+    method: "GET",
+    pattern: "/api/v1/auth/legacy-credentials",
+    summary: "Who still uses old credentials",
+    description: "Counts of fk_, fk_at_, factory-token, oidc-bearer, and cloudflare-access use from auth.request log lines, with ledger samples (Slice 5, #566). Access JWTs are not listed.",
+    staff: "bouncer",
+    mcpExposure: "internal",
+    privilege: "ledger.read",
+    responseSchema: SuccessResponseSchema,
+  },
+  {
     operationId: "whoami",
     method: "GET",
     pattern: "/api/v1/whoami",

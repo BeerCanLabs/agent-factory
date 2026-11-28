@@ -1,11 +1,13 @@
 // Front-door Phase 1 Slice 2 (docs/design/front-door-auth.md §4.2, §10 item 5, issue #563).
 // RFC 9068 JWT access tokens, signed with the Slice 1 ES256 key set. This module only signs and checks the token.
-// It does not decide privileges: `roles`, `agents`, and `grants_v` are hints (D-5). The resource server re-reads live
-// grants. `sid` is the refresh-family id (Slice 3). Tokens issued before that still carry the key-store id.
-// Slice 4 (#565) puts real factory scopes on `scope`. Slice 5 (#566) is the one verifier.
+// Signature checks use the public JWKS (the same document as GET /jwks), never the private key.
+// It does not decide privileges: `roles`, `agents`, and `grants_v` are hints (D-5). The resource server
+// (Slice 5, #566) re-reads live grants, intersects them with `scope`, and hands the request to the Bouncer.
+// `sid` is the refresh-family id (Slice 3). Tokens issued before that still carry the key-store id.
+// Slice 4 (#565) puts real factory scopes on `scope`.
 import { randomBytes } from 'node:crypto';
-import { SignJWT, decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from 'jose';
-import { AS_SIGNING_ALG, stripTrailingSlash, type AsKey, type AsKeySet } from './as-keys.js';
+import { SignJWT, createLocalJWKSet, decodeProtectedHeader, jwtVerify, type JWTPayload } from 'jose';
+import { AS_SIGNING_ALG, publicJwksOf, stripTrailingSlash, type AsKeySet } from './as-keys.js';
 
 /** D-3: access tokens live 10 minutes. */
 export const ACCESS_TOKEN_TTL_SECONDS = 600;
@@ -143,7 +145,14 @@ export async function signAccessToken(keys: AsKeySet, input: AccessTokenInput): 
 
 export async function verifyAccessToken(
   token: string,
-  opts: { keys: AsKeySet; issuers: readonly string[]; audience: string; now?: Date; clockToleranceSec?: number },
+  opts: {
+    keys: AsKeySet;
+    issuers: readonly string[];
+    /** One audience, or any of these (the primary issuer and the Phase 3 alias, for this route's api or mcp resource). */
+    audience: string | readonly string[];
+    now?: Date;
+    clockToleranceSec?: number;
+  },
 ): Promise<AccessTokenVerifyResult> {
   const typ = unprotectedTyp(token);
   if (!typ || !ACCEPTED_TYP.has(typ)) return { ok: false, reason: 'invalid' };
@@ -154,15 +163,15 @@ export async function verifyAccessToken(
     return { ok: false, reason: 'invalid' };
   }
   if (header.alg !== AS_SIGNING_ALG || typeof header.kid !== 'string' || !header.kid) return { ok: false, reason: 'invalid' };
-  const signingKey = keyForKid(opts.keys, header.kid);
-  if (!signingKey) return { ok: false, reason: 'invalid' };
+  const jwks = publicJwksOf(opts.keys);
+  if (!jwks.keys.some((key) => key.kid === header.kid)) return { ok: false, reason: 'invalid' };
   const issuers = [...new Set(opts.issuers.map((i) => stripTrailingSlash(i)).filter(Boolean))];
-  if (issuers.length === 0) return { ok: false, reason: 'invalid' };
+  const audiences = [...new Set((Array.isArray(opts.audience) ? opts.audience : [opts.audience]).map((a) => a.trim()).filter(Boolean))];
+  if (issuers.length === 0 || audiences.length === 0) return { ok: false, reason: 'invalid' };
   try {
-    const key = await importJWK(signingKey.publicJwk, AS_SIGNING_ALG);
-    const { payload } = await jwtVerify(token, key, {
+    const { payload } = await jwtVerify(token, createLocalJWKSet({ keys: jwks.keys }), {
       issuer: issuers,
-      audience: opts.audience,
+      audience: audiences,
       algorithms: [AS_SIGNING_ALG],
       typ: header.typ,
       clockTolerance: opts.clockToleranceSec ?? 5,
@@ -175,7 +184,7 @@ export async function verifyAccessToken(
     const jti = typeof payload.jti === 'string' ? payload.jti : '';
     if (!sub || !clientId || !sid || !jti) return { ok: false, reason: 'invalid' };
     const aud = payload.aud;
-    const audiences = (Array.isArray(aud) ? aud : typeof aud === 'string' ? [aud] : []).filter((a) => typeof a === 'string');
+    const tokenAudiences = (Array.isArray(aud) ? aud : typeof aud === 'string' ? [aud] : []).filter((a) => typeof a === 'string');
     return {
       ok: true,
       token: {
@@ -185,7 +194,7 @@ export async function verifyAccessToken(
         sid,
         jti,
         exp: typeof payload.exp === 'number' ? payload.exp : 0,
-        audiences,
+        audiences: tokenAudiences,
         ...(typeof payload.scope === 'string' && payload.scope ? { scope: payload.scope } : {}),
         ...(Array.isArray(payload.amr) ? { amr: payload.amr.filter((v): v is string => typeof v === 'string') } : {}),
         hints: hintsOf(payload),
@@ -220,12 +229,6 @@ function agentsOf(value: unknown): Record<string, string[]> | undefined {
     if (names.length > 0) out[id] = names;
   }
   return Object.keys(out).length > 0 ? out : undefined;
-}
-
-function keyForKid(set: AsKeySet, kid: string): AsKey | undefined {
-  if (set.current.kid === kid) return set.current;
-  if (set.previous && set.previous.kid === kid) return set.previous;
-  return undefined;
 }
 
 function unprotectedTyp(token: string): string | undefined {

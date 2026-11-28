@@ -173,6 +173,7 @@ export const factoryApi = {
   listAccountSessions: (owner?: string) => request<{ lifetimes: AuthLifetimes; sessions: AccountSession[] }>(`/account/sessions${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
   revokeAccountSession: (sid: string, owner?: string) => request<{ ok: boolean; revoked: string }>(`/account/sessions/${encodeURIComponent(sid)}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`, { method: 'DELETE' }),
   listRefreshFamilies: (owner?: string) => request<{ lifetimes: AuthLifetimes; refreshFamilies: RefreshFamily[] }>(`/account/refresh-families${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
+  legacyCredentialUse: () => request<{ source: string; kinds: { id: string; label?: string; detail?: string; count?: number; lastSeenAt?: string; recent?: { ts: string; actor?: string; path: string; keyId?: string; ledgered?: boolean }[] }[] }>('/auth/legacy-credentials'),
   revokeRefreshFamily: (familyId: string, owner?: string) => request<{ ok: boolean; revoked: string }>(`/account/refresh-families/${encodeURIComponent(familyId)}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`, { method: 'DELETE' }),
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {
