@@ -1,5 +1,5 @@
 // Front-door Phase 1 Slice 4 (#565, D-2). Turn a requested scope string into the consented set,
-// and into the key-scope ceiling the Bouncer already enforces. Slice 5 is the one verifier.
+// and into the key-scope ceiling the Bouncer already enforces. Slice 5 intersects that ceiling with live grants.
 import type { KeyScopes } from '@beercanlabs/factory-auth';
 import {
   DEFAULT_OAUTH_SCOPE,

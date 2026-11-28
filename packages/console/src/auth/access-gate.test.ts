@@ -14,6 +14,11 @@ describe('S9 console gating from whoami (#374)', () => {
     assert.equal(canManagePeople(admin), true);
   });
 
+  it('S9: a revoked grant is the no-access screen, not a leftover JWT role hint', () => {
+    const afterRevoke = { actor: 'user:nora', roles: [], grants: [], privileges: { fleet: [], agents: {}, skills: {} } };
+    assert.equal(hasAnyAccess(afterRevoke), false);
+  });
+
   it('S9: act-as accepts only a user principal', () => {
     assert.equal(validActAs('user:alice'), true);
     for (const bad of ['alice', 'service:ci', 'user:', 'user:a b']) assert.equal(validActAs(bad), false, bad);

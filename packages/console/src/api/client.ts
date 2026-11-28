@@ -82,6 +82,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
     headers,
   });
+  // D-5: reload whoami when grants moved (JWT hint) or a call was refused, including a session cookie that carries no grants_v.
+  if (
+    typeof window !== 'undefined' &&
+    (res.headers.get('x-factory-grants-stale') === '1' || res.status === 403)
+  ) {
+    window.dispatchEvent(new Event('factory-grants-stale'));
+  }
 
   if (!res.ok) {
     let errMessage = `HTTP ${res.status} ${res.statusText}`;
@@ -173,6 +180,7 @@ export const factoryApi = {
   listAccountSessions: (owner?: string) => request<{ lifetimes: AuthLifetimes; sessions: AccountSession[] }>(`/account/sessions${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
   revokeAccountSession: (sid: string, owner?: string) => request<{ ok: boolean; revoked: string }>(`/account/sessions/${encodeURIComponent(sid)}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`, { method: 'DELETE' }),
   listRefreshFamilies: (owner?: string) => request<{ lifetimes: AuthLifetimes; refreshFamilies: RefreshFamily[] }>(`/account/refresh-families${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
+  legacyCredentialUse: () => request<{ source: string; kinds: { id: string; label?: string; detail?: string; count?: number; lastSeenAt?: string; recent?: { ts: string; actor?: string; path: string; keyId?: string; ledgered?: boolean }[] }[] }>('/auth/legacy-credentials'),
   revokeRefreshFamily: (familyId: string, owner?: string) => request<{ ok: boolean; revoked: string }>(`/account/refresh-families/${encodeURIComponent(familyId)}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`, { method: 'DELETE' }),
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {

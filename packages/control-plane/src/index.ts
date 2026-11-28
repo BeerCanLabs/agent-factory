@@ -27,6 +27,7 @@ import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { McpOAuthStore, type McpOAuthDoc } from './mcp-oauth.js';
 import { SessionStore, type SessionsDoc } from './login.js';
 import { RevocationSet, type RevocationDoc } from './revocation-set.js';
+import { LegacyCredentialUse } from './legacy-credential-use.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, SpeakAsGrantStore, type GrantsDoc, type PrincipalsDoc, type SpeakAsDoc } from '@beercanlabs/factory-bouncer';
@@ -317,6 +318,7 @@ const state: FactoryState = {
   asIssuerAliases: parseIssuerAliases(process.env.FACTORY_AS_ISSUER_ALIASES),
   asKeys,
   // Front-door Phase 0: one JSON line per request naming its verified sign-in method (no secrets). Off with FACTORY_AUTH_REQUEST_LOG=off.
+  legacyCredentialUse: new LegacyCredentialUse(),
   ...((process.env.FACTORY_AUTH_REQUEST_LOG ?? '').toLowerCase() === 'off' ? {} : { authRequestLog: stdoutAuthRequestLog }),
   publicUrl: process.env.FACTORY_PUBLIC_URL || process.env.FACTORY_URL || 'http://control-plane.factory.internal:8088',
   gatekeeperEgressUrl: process.env.FACTORY_GATEKEEPER_EGRESS_URL,

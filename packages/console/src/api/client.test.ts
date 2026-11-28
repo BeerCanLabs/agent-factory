@@ -21,6 +21,29 @@ it('#519 adoption request and approval send redeploy, defaulting to true', async
   assert.deepEqual(JSON.parse(String(calls[3].init?.body)), { reason: 'now', redeploy: false });
 });
 
+it('S9: a stale grants header asks the console to reload whoami', async () => {
+  const events: string[] = [];
+  const previous = (globalThis as { window?: { dispatchEvent: (event: Event) => void } }).window;
+  (globalThis as { window?: { dispatchEvent: (event: Event) => void } }).window = {
+    dispatchEvent: (event: Event) => events.push(event.type),
+  };
+  globalThis.fetch = (async () => new Response(JSON.stringify({ kinds: [] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'x-factory-grants-stale': '1' },
+  })) as typeof fetch;
+  await factoryApi.legacyCredentialUse();
+  assert.deepEqual(events, ['factory-grants-stale']);
+  events.length = 0;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'forbidden' }), {
+    status: 403,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+  await factoryApi.legacyCredentialUse().catch(() => undefined);
+  assert.deepEqual(events, ['factory-grants-stale']);
+  if (previous) (globalThis as { window?: typeof previous }).window = previous;
+  else delete (globalThis as { window?: unknown }).window;
+});
+
 it('S9: people, grants and keys calls are prefixed with /api/v1 exactly once', async () => {
   const seen: string[] = [];
   globalThis.fetch = (async (url: string) => {

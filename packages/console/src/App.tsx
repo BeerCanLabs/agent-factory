@@ -18,7 +18,8 @@ import { ExecutiveOfficeView } from './views/ExecutiveOfficeView.js';
 import { SubscriptionsView } from './views/SubscriptionsView.js';
 import { PeopleView } from './views/PeopleView.js';
 import { KeysView } from './views/KeysView.js';
-import { canAccessSubscriptions, canManagePeople, hasAnyAccess } from './auth/access-gate.js';
+import { LegacyCredentialsView } from './views/LegacyCredentialsView.js';
+import { canAccessSubscriptions, canManagePeople, hasAnyAccess, holds } from './auth/access-gate.js';
 import { DrainModal } from './components/DrainModal.js';
 import { UpdateDrawer } from './components/UpdateDrawer.js';
 import { cartridgeUpdateBuckets } from './components/cartridge-updates.js';
@@ -38,7 +39,8 @@ function initialLocation(): { screen: ScreenId; agentId?: string } {
       view === 'models' ||
       view === 'subscriptions' ||
       view === 'studio' ||
-      view === 'keys'
+      view === 'keys' ||
+      view === 'legacy-credentials'
         ? view
         : 'fleet',
     agentId: q.get('agent') ?? undefined,
@@ -223,6 +225,7 @@ const MainLayout: React.FC = () => {
 
           {currentScreen === 'people' && canManagePeople(whoami) && <PeopleView />}
           {currentScreen === 'keys' && <KeysView />}
+          {currentScreen === 'legacy-credentials' && holds(whoami, 'ledger.read') && <LegacyCredentialsView />}
           {currentScreen === 'models' && (
             <ExecutiveOfficeView
               onOpenSubscriptions={canAccessSubscriptions(whoami) ? () => setCurrentScreen('subscriptions') : undefined}
