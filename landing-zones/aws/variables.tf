@@ -376,6 +376,16 @@ variable "console_image" {
   default     = ""
 }
 
+variable "console_extra_hostnames" {
+  type        = list(string)
+  description = "More hostnames the ALB forwards to the console (front-door D-7: auth.<domain>, api.<domain>, factory.<domain>). Each needs DNS through the identity-aware proxy and a listener certificate that covers it. Empty adds no rule."
+  default     = []
+  validation {
+    condition     = length(var.console_extra_hostnames) <= 5 && alltrue([for h in var.console_extra_hostnames : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", h))])
+    error_message = "console_extra_hostnames takes at most 5 lowercase DNS hostnames (one ALB host condition)."
+  }
+}
+
 variable "ledger_recover_seq" {
   description = "LG2: set only for the deploy that archives a failed ledger; must equal the failing seq the control plane reports."
   type        = string
