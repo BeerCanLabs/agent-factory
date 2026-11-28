@@ -462,4 +462,61 @@ describe('speak-as grants, speaker field, discovery, and delivered caller', { co
     assert.equal(run?.caller?.actor, 'user:dale.sackrider', 'run.caller');
     assert.equal((run?.input as { caller?: { actor?: string } })?.caller?.actor, 'user:dale.sackrider', 'run.input.caller');
   });
+
+  it('a warm speak-as child can follow up in the same conversation, and a different child is still busy (#537)', async () => {
+    for (const r of state.runs.list({ agentId: 'rosie', active: true })) {
+      state.runs.update(r.runId, { state: 'DONE' });
+    }
+    const rosie = state.agents.get('rosie')!;
+    const prev = { skillIds: rosie.skillIds, skillRoutes: rosie.skillRoutes, roles: rosie.roles };
+    // Denied routes are what makes warm-run isolation apply. A child holds none of these.
+    rosie.skillIds = ['home', 'schedules'];
+    rosie.skillRoutes = { home: ['ha'], schedules: ['cron'] };
+    try {
+      const enrolled = await call('POST', `/api/v1/speak-as-grants/${grantId}/members`, {
+        token: TOKENS.admin,
+        body: { principalId: 'user:sibling', aliases: ['sibling'], targetAgents: ['rosie'], relationship: 'child' },
+      });
+      assert.equal(enrolled.status, 200, JSON.stringify(enrolled.body));
+
+      const first = await call('POST', '/api/v1/agents/rosie/conversation', {
+        token: rosieKey,
+        body: { input: { message: 'hello from the kid' }, speaker: 'kid', channel: 'voice', mode: 'call' },
+      });
+      assert.equal(first.status, 202, JSON.stringify(first.body));
+      const warm = state.runs.get(first.body.runId);
+      assert.equal(warm?.state, 'WORKING');
+      assert.match(warm?.actor ?? '', /^agent:/);
+      assert.equal(warm?.caller?.actor, 'user:kid');
+      assert.equal(warm?.caller?.relationship, 'child');
+
+      const again = await call('POST', '/api/v1/agents/rosie/conversation', {
+        token: rosieKey,
+        body: {
+          input: { message: 'still me' },
+          conversationId: first.body.conversationId,
+          channel: 'voice',
+          mode: 'call',
+        },
+      });
+      assert.equal(again.status, 202, JSON.stringify(again.body));
+      assert.equal(again.body.error, undefined);
+      assert.equal(again.body.runId, first.body.runId, 'the same warm run takes the same speaker');
+      assert.equal(again.body.caller.actor, 'user:kid');
+
+      const other = await call('POST', '/api/v1/agents/rosie/conversation', {
+        token: rosieKey,
+        body: { input: { message: 'a different child' }, speaker: 'sibling', channel: 'voice', mode: 'call' },
+      });
+      assert.equal(other.status, 409, JSON.stringify(other.body));
+      assert.equal(other.body.error, 'busy_with_another_person');
+    } finally {
+      rosie.skillIds = prev.skillIds;
+      rosie.skillRoutes = prev.skillRoutes;
+      rosie.roles = prev.roles;
+      for (const r of state.runs.list({ agentId: 'rosie', active: true })) {
+        state.runs.update(r.runId, { state: 'DONE' });
+      }
+    }
+  });
 });

@@ -49,6 +49,19 @@ export {
   type VerifiedAccessToken,
 } from './access-jwt.js';
 
+export {
+  DEFAULT_OAUTH_SCOPE,
+  FACTORY_SCOPES,
+  FACTORY_SCOPE_LABELS,
+  FIRST_PARTY_HEADS,
+  LEGACY_FULL_SCOPE,
+  THIRD_PARTY_DENIED_SCOPES,
+  isFactoryScope,
+  isThirdPartyDeniedScope,
+  scopeLabel,
+  type FactoryScope,
+} from './factory-scopes.js';
+
 export const ROLES =['viewer', 'operator', 'approver', 'ingest', 'gatekeeper-egress', 'gatekeeper-ingress', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 

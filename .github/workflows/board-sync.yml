@@ -1,0 +1,72 @@
+name: board-sync
+
+# Moves cards on org Project #4 (Agent Factory Sprint Board).
+# pull_request_target is used only so the Grok-Flow app token secret is available
+# on pull requests, including from forks. This workflow must NEVER check out or
+# run code from the pull request head — only trusted refs, and only GraphQL calls.
+# Never mutates the Status option list and never creates, edits, or deletes views.
+on:
+  issues:
+    types: [labeled, unlabeled, assigned, closed, reopened]
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, converted_to_draft, closed]
+  schedule:
+    # Sprint boundaries at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 America/Phoenix (UTC-7, no DST)
+    - cron: '0 3,7,11,15,19,23 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'boundary (sprint window), reconcile (all cards), or sync (no-op unless an event payload is present)'
+        type: choice
+        default: boundary
+        options: [boundary, reconcile, sync]
+      dry_run:
+        description: 'Log the actions without writing to the project'
+        type: boolean
+        default: false
+      force:
+        description: 'Run the boundary shift even mid-window (still no-ops if this window was already recorded)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: board-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted ref only
+        uses: actions/checkout@v4
+        with:
+          # pull_request_target: github.sha is the base branch, never the PR head.
+          # schedule / workflow_dispatch / issues: the sha that triggered the run.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Mint Grok-Flow App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GROK_FLOW_APP_ID }}
+          private-key: ${{ secrets.GROK_FLOW_APP_PRIVATE_KEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Sync Board 4
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BOARD4_PROJECT_ID: PVT_kwDOEz3Oo84BthuH
+          BOARD4_STATUS_FIELD_ID: PVTSSF_lADOEz3Oo84BthuHzhrqyzA
+          BOARD_SYNC_LATCH_ISSUE: "628"
+        run: node .github/scripts/board-sync.mjs

@@ -263,7 +263,7 @@ for `/mcp` (current behaviour kept).
 
 Already largely conformant; the changes are:
 - `/mcp` keeps answering 401 with `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`.
-- Protected-resource metadata lists `authorization_servers: [issuer]` and real `scopes_supported` (not just `mcp:full`).
+- Protected-resource metadata lists `authorization_servers: [issuer]` and real `scopes_supported` (not `mcp:full`). Slice 4 advertises the §4.2 scope list.
 - Access tokens become JWTs (§4.2); `aud` must include the MCP resource (RFC 8707) — already enforced.
 - Tokens are never passed through to downstream services (spec "token passthrough" ban); the factory uses its own
   ConnectionKeymaster credentials downstream.
@@ -473,7 +473,7 @@ days.
 4. **AS signing keys, JWKS and OIDC discovery** — KMS/Secrets-Manager-held ES256 keys with `kid` rotation. Tracked in [#562](https://github.com/BeerCanLabs/agent-factory/issues/562) (also closes [#527](https://github.com/BeerCanLabs/agent-factory/issues/527)).
 5. **JWT access tokens (RFC 9068) from `/token` with `api` and `mcp` audiences** — dual-accept alongside `fk_at_`. Tracked in [#563](https://github.com/BeerCanLabs/agent-factory/issues/563).
 6. **Durable sessions, refresh families and revocation set** — survive restarts and multiple tasks (D-4). Tracked in [#564](https://github.com/BeerCanLabs/agent-factory/issues/564).
-7. **Scopes and scope-based consent; first-party client flag** — replace `mcp:full`. Tracked in [#565](https://github.com/BeerCanLabs/agent-factory/issues/565).
+7. **Scopes and scope-based consent; first-party client flag** — replace `mcp:full`. Tracked in [#565](https://github.com/BeerCanLabs/agent-factory/issues/565). Implemented: the consent screen lists each scope in plain language and names the client origin; third-party clients are not offered `admin`, `grants:manage`, or `keys:manage`; an admin can block a client; first-party heads skip that screen. `FACTORY_FACTORY_ORIGIN` seeds Console, Garrison, Web Chat, and Connect as first-party. Current authorization-code clients stay person holders. Legacy `fk_` and `fk_at_` keys keep working. Device-holder clients stay Phase 2.
 8. **Single resource-server verifier for `/api/v1/*` and `/mcp`** — JWT → live grants ∩ scope → Bouncer (D-5). Tracked in [#566](https://github.com/BeerCanLabs/agent-factory/issues/566).
 9. **CORS driven by the client registry** — exact-origin allow-list, no credentials.
 10. **First-party web shell uses Bearer tokens via a BFF on `factory.<domain>`** — cookie only at the AS (`auth.<domain>`); the shell talks only to `api.<domain>`.

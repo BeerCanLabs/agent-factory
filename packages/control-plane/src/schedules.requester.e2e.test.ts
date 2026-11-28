@@ -174,6 +174,21 @@ describe('a scheduled run carries its requester’s authority, never more (E12, 
       assert.deepEqual(r({ actor: 'token:operator' }), { kind: 'principal', actor: 'token:operator' });
       assert.deepEqual(r({ actor: 'cloudflare:dale@example.com' }), { kind: 'principal', actor: 'cloudflare:dale@example.com' });
     });
+
+    it('a speak-as device run is for the enrolled principal on its caller (#537)', () => {
+      const r = (over: Record<string, unknown>) => requesterOfRun(state, { runId: 'r', agentId: 'rosie', state: 'WORKING', trigger: 'conversation', ...over } as never);
+      const caller = (actor: string) => ({ actor, role: 'agent-member', roles: [], verified: true, via: 'agent:rosie' });
+      assert.deepEqual(r({ actor: 'agent:rosie', caller: caller('user:alyssa.sackrider') }), { kind: 'principal', actor: 'user:alyssa.sackrider' });
+      assert.deepEqual(r({ actor: 'agent:rosie', caller: caller('cloudflare:dale@example.com') }), { kind: 'principal', actor: 'cloudflare:dale@example.com' });
+      assert.deepEqual(r({ actor: 'agent:rosie', caller: caller('test') }), { kind: 'principal', actor: 'test' });
+      assert.equal(r({ actor: 'agent:rosie', caller: caller('agent:other') }), undefined, 'a device is not a person');
+      assert.equal(r({ actor: 'webhook:stripe', caller: caller('user:alyssa.sackrider') }), undefined, 'only an agent: run reads the caller');
+      assert.deepEqual(
+        r({ actor: 'agent:rosie', caller: caller('user:alyssa.sackrider'), requestedBy: discord('201') }),
+        { kind: 'identity', provider: 'discord', id: '201' },
+        'an attested identity still wins',
+      );
+    });
   });
 
   describe('when a schedule fires', () => {

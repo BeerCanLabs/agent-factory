@@ -274,6 +274,12 @@ export const ROUTE_EXCEPTIONS = {
     rationale: 'User revokes an active connected MCP OAuth client; admin may revoke any; API keys cannot manage consents (D14, TSK-339)',
     retiringStory: 'S4',
   },
+  'oauth-client-admin': {
+    id: 'oauth-client-admin',
+    protection: 'transitional',
+    rationale: 'An admin registers a first-party client or blocks a client (D-2, #565). API keys cannot. Third-party registration stays on DCR.',
+    retiringStory: 'S4',
+  },
   'account-sessions-list': {
     id: 'account-sessions-list',
     protection: 'transitional',
@@ -1734,6 +1740,18 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     pathParamsSchema: jsonSchema.object({
       clientId: jsonSchema.string({ description: "OAuth client ID" }),
     }, { required: ["clientId"] }),
+    responseSchema: SuccessResponseSchema,
+    statusCodes: [200],
+  },
+  {
+    operationId: "put_oauth_client",
+    method: "PUT",
+    pattern: "/api/v1/oauth/clients",
+    summary: "Register or block an OAuth client",
+    description: "Admin only. Sets the first-party flag or blocks a client. Blocking revokes that client's refresh families. DCR cannot set these flags (D-2, #565).",
+    staff: "bouncer",
+    mcpExposure: "internal",
+    exception: "oauth-client-admin",
     responseSchema: SuccessResponseSchema,
     statusCodes: [200],
   },

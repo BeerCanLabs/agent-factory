@@ -136,6 +136,26 @@ resource "aws_lb_listener_rule" "console_route" {
   }
 }
 
+# agent-factory #526/#559 (front-door D-7): more public hosts served by the console, which proxies /api/v1/*, /login,
+# the OAuth endpoints and /mcp to the control plane, e.g. auth.<domain>, api.<domain> and factory.<domain>. A separate
+# rule, so adding hosts never rewrites console_route. An ALB host condition takes at most 5 values.
+resource "aws_lb_listener_rule" "console_extra_hosts" {
+  count        = var.console_image != "" && length(var.console_extra_hostnames) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 12
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.console[0].arn
+  }
+
+  condition {
+    host_header {
+      values = var.console_extra_hostnames
+    }
+  }
+}
+
 resource "aws_lb_listener_rule" "garrison_route" {
   count        = var.garrison_image != "" ? 1 : 0
   listener_arn = aws_lb_listener.https.arn
