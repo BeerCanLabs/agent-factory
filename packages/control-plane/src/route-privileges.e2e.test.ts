@@ -211,6 +211,7 @@ const ROUTES: RouteRow[] = [
   { method: 'GET', path: '/api/v1/config/export', privilege: 'config.export', role: 'admin' },
   { method: 'GET', path: '/api/v1/identity-links', privilege: 'identity.links.read', role: 'admin' },
   { method: 'PUT', path: '/api/v1/identity-links/discord/1', privilege: 'identity.links.set', role: 'admin', body: { actor: 'token:x' } },
+  { method: 'PUT', path: '/api/v1/identity-links/slack/U1', privilege: 'identity.links.set', role: 'admin', body: { principalName: 'Dale' } },
   { method: 'DELETE', path: '/api/v1/identity-links/discord/1', privilege: 'identity.links.set', role: 'admin' },
   { method: 'GET', path: '/api/v1/config/export?agent=castle', privilege: 'config.export.agent', role: 'admin' },
   { method: 'PUT', path: '/api/v1/agents/nope/owners', privilege: 'agents.owners.set', role: 'admin', body: {} },

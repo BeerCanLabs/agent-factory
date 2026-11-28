@@ -24,6 +24,56 @@ export function parseActor(value: unknown): string | undefined {
   return actor.length <= 320 && PRINCIPAL_ACTOR.test(actor) ? actor : undefined;
 }
 
+export type PrincipalNameMatch = { id: string; displayName: string };
+
+export type PrincipalNameResolution =
+  | { ok: true; match: PrincipalNameMatch }
+  | {
+      ok: false;
+      status: 400 | 404 | 409;
+      error: 'principal_name_required' | 'principal_not_found' | 'ambiguous_principal';
+      message: string;
+      matches?: PrincipalNameMatch[];
+    };
+
+const PRINCIPAL_NAME_MAX = 256;
+const PRINCIPAL_NAME_CONTROLS = /[\u0000-\u001F\u007F]/;
+
+/**
+ * Which factory person a friendly name names (issue #439). Exact display name, case-insensitive, after trimming.
+ * A name that names more than one person matches none: the caller must not guess.
+ */
+export function matchPrincipalsByDisplayName(
+  records: readonly { id: string; displayName: string }[],
+  raw: unknown,
+): PrincipalNameResolution {
+  if (typeof raw !== 'string') {
+    return { ok: false, status: 400, error: 'principal_name_required', message: "principalName must be the person's friendly name" };
+  }
+  const name = raw.trim();
+  if (!name || name.length > PRINCIPAL_NAME_MAX || PRINCIPAL_NAME_CONTROLS.test(name)) {
+    return { ok: false, status: 400, error: 'principal_name_required', message: 'principalName must be 1 to 256 characters' };
+  }
+  const needle = name.toLowerCase();
+  const matches = records
+    .filter((r) => typeof r.id === 'string' && typeof r.displayName === 'string' && r.displayName.trim().toLowerCase() === needle)
+    .map((r) => ({ id: r.id, displayName: r.displayName }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  if (matches.length === 0) {
+    return { ok: false, status: 404, error: 'principal_not_found', message: `no factory person is named ${JSON.stringify(name)}` };
+  }
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'ambiguous_principal',
+      message: `more than one factory person is named ${JSON.stringify(name)}`,
+      matches,
+    };
+  }
+  return { ok: true, match: matches[0] };
+}
+
 /**
  * Maps legacy `cloudflare:<email>` / `oidc:<email>` (and bare group emails) to the matching `PrincipalRecord.id`
  * in `store` (or deterministic `user:<lowercased-email>` when no store record exists yet), and normalizes

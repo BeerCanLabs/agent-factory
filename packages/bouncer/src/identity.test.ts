@@ -9,6 +9,7 @@ import {
   normalizeIdentityLink,
   normalizeLegacyActor,
   normalizeOwnersToPrincipals,
+  matchPrincipalsByDisplayName,
   parseActor,
 } from './identity.js';
 import type { EffectiveGrant } from './grants.js';
@@ -799,6 +800,56 @@ describe('S1 canonical & legacy actor normalization (AC3)', () => {
       'token:agent:',
     ]) {
       assert.throws(() => normalizeActorToPrincipal(bad, store), /invalid/, `expected throw for ${JSON.stringify(bad)}`);
+    }
+  });
+});
+
+describe('matchPrincipalsByDisplayName (#439)', () => {
+  const people = [
+    { id: 'user:dale', displayName: 'Dale' },
+    { id: 'user:dale.sackrider', displayName: 'Dale Sackrider' },
+    { id: 'user:pat', displayName: 'Pat' },
+  ];
+
+  it('matches one person by friendly name, ignoring case and surrounding space', () => {
+    for (const raw of ['Dale', 'dale', 'DALE', '  Dale  ']) {
+      const found = matchPrincipalsByDisplayName(people, raw);
+      assert.equal(found.ok, true, raw);
+      if (found.ok) assert.equal(found.match.id, 'user:dale');
+    }
+    const pat = matchPrincipalsByDisplayName(people, 'pat');
+    assert.equal(pat.ok, true);
+    if (pat.ok) assert.equal(pat.match.id, 'user:pat');
+  });
+
+  it('does not match a longer name that merely contains the friendly name', () => {
+    const found = matchPrincipalsByDisplayName(people, 'Dale');
+    assert.equal(found.ok, true);
+    if (found.ok) assert.notEqual(found.match.id, 'user:dale.sackrider');
+    const missing = matchPrincipalsByDisplayName(people, 'Sackrider');
+    assert.equal(missing.ok, false);
+    if (!missing.ok) assert.equal(missing.status, 404);
+  });
+
+  it('refuses an empty, non-string, oversized, or control-character name', () => {
+    for (const raw of ['', '   ', 12, null, undefined, 'a'.repeat(257), 'Dale\nSackrider']) {
+      const found = matchPrincipalsByDisplayName(people, raw);
+      assert.equal(found.ok, false, JSON.stringify(raw));
+      if (!found.ok) assert.equal(found.status, 400);
+    }
+  });
+
+  it('refuses an ambiguous name and returns the matching people, sorted by id', () => {
+    const found = matchPrincipalsByDisplayName(
+      [...people, { id: 'user:other', displayName: 'dale' }, { id: 'user:aaa', displayName: 'Dale' }],
+      'Dale',
+    );
+    assert.equal(found.ok, false);
+    if (!found.ok) {
+      assert.equal(found.status, 409);
+      assert.equal(found.error, 'ambiguous_principal');
+      assert.deepEqual(found.matches?.map((m) => m.id), ['user:aaa', 'user:dale', 'user:other']);
+      assert.equal(JSON.stringify(found).includes('@'), false);
     }
   });
 });
