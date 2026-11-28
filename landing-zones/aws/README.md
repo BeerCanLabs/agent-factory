@@ -80,6 +80,10 @@ Agents call models at `${FACTORY_MODEL_BASE_URL}/chat/completions` (OpenAI Chat 
 1. Set `model_catalog` to the models this factory offers (default: seven open-weight Bedrock models, each also offered as a cheaper `-flex` entry; see `variables.tf`). Enable model access for them in the Bedrock console.
 2. `PUT /api/v1/agents/<id>/policy {"routes":["models"], "models":["minimax-m2.5"], "budgetUsd":{"perDay":5}}`.
 
+## Front-door lockout
+
+When sign-in is locked and the control plane is still running, an operator with this AWS account follows [docs/runbooks/lockout-recovery.md](../../docs/runbooks/lockout-recovery.md). That procedure restores an admin grant with a one-off task of the control-plane image. It does not read Secrets Manager values and it does not add a recovery key.
+
 ## Operator identity (Cloudflare Access)
 
 The control plane takes a person's identity only from the Access assertion it verifies itself (Design Authority §6.12 A2): an RS256 JWT in `cf-access-jwt-assertion` or the `CF_Authorization` cookie, checked against `https://<access_team_domain>/cdn-cgi/access/certs`, issuer `https://<access_team_domain>`, and `access_aud`. The `cf-access-authenticated-user-email` header grants nothing. The dashboard adds no token; it forwards each caller's assertion.

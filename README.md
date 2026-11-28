@@ -126,6 +126,7 @@ The architecture is opinionated and accepts certain limits by design:
 - **[Cartridge Developer Guide](docs/CARTRIDGE_DEVELOPER_GUIDE.md)** — Deep-dive implementation guide for Repository-Based Cartridges using the "New Hire" model, Factory Model API (`M1`), `AM3` notebook rotation, and E12 role-based route access.
 - **[Factory CLI](docs/CLI.md)** — Terminal client for the Factory Manager, agent inspection, runs, approvals, and subscription connections (factory-shared and personal BYOM).
 - **[MoneyMan to Chuck bank and card hand-off](docs/operations/moneyman-chuck-bank-card-handoff.md)** — Read-only export contract for Chuck Finley: in-scope accounts, Notion destination, and the request Dale sends to MoneyMan.
+- **[Lockout recovery](docs/runbooks/lockout-recovery.md)** — AWS console procedure when front-door sign-in is locked: tell a lockout from an outage, find the landing-zone resources, and restore an admin grant. Docs only.
 - **[DESIGN_AUTHORITY.md](DESIGN_AUTHORITY.md)** — The Single Source of Truth (SSOT) for architectural intent, component contracts, and AI governance.
 - **[POSITION_PAPER.md](POSITION_PAPER.md)** — The foundational manifesto: Console vs. Cartridge.
 - **[AGENTS.md](AGENTS.md)** — Instructions for implementing AIs deploying the Factory.
@@ -136,6 +137,7 @@ docs/CREATING_AGENTS.md           # Dual-mode hosting, activation smoke gate & m
 docs/SKILLS.md                    # Skills authoring, manifest, packaging & publishing guide
 docs/CLI.md                       # Factory CLI guide & subscription commands
 docs/operations/moneyman-chuck-bank-card-handoff.md # MoneyMan → Chuck read-only bank/card feed
+docs/runbooks/lockout-recovery.md  # Front-door lockout recovery through the AWS console
 docs/architecture/agent-memory-models.md # Agent memory models & storage triad spec
 docs/CARTRIDGE_DEVELOPER_GUIDE.md # Developer tutorial for building cartridges
 DESIGN_AUTHORITY.md               # SSOT architecture & AI locking board

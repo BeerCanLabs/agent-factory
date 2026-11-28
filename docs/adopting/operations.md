@@ -53,8 +53,8 @@ Status labels: ✅ works today · 🛠️ needs the factory team · ⛔ not yet 
 
 ### "The whole factory is down"
 
-- Check `https://<your-factory>/api/v1/health` in a browser. `{"ok":true,...}` means the factory is up and the problem is narrower.
-- 🛠️ If it is down, contact the factory team. ⛔ There is no public status page or in-product support contact yet ([GAPS.md](GAPS.md)). Agree a support contact and response time with the factory team when you start.
+- Open the factory address in a browser. A sign-in page, or a refusal that says unauthorized, means the factory process answered and the problem is the front door. A browser error that never reaches a page can mean it is down.
+- 🛠️ If it is down, or nobody can sign in, contact the factory team. They follow the [lockout recovery runbook](../runbooks/lockout-recovery.md) (AWS console access; it restores an admin grant and does not hand out a recovery key). ⛔ There is no public status page or in-product support contact yet ([GAPS.md](GAPS.md)). Agree a support contact and response time with the factory team when you start.
 
 ### Emergency stop
 
