@@ -126,7 +126,7 @@ import { applySpeakAs, clientHasSpeakAsGrant, parseSpeakAsFromRequest, type Voic
 import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
-import { handleLoginRoutes, sendLoginPage, sessionIdp, verifySession, type SessionStore } from './login.js';
+import { SESSION_COOKIE, cookieValue, handleLoginRoutes, sendLoginPage, sessionIdp, verifySession, type SessionStore } from './login.js';
 import { handleAccountSessionRoutes } from './account-sessions.js';
 import type { RevocationSet } from './revocation-set.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
@@ -3555,22 +3555,28 @@ export async function dispatchControlPlaneHttp(state: FactoryState, req: http.In
   }
 }
 
-async function prepareDurableAuth(state: FactoryState, res: http.ServerResponse): Promise<boolean> {
-  try {
-    await state.sessions?.reload();
-    await state.revocations?.reload();
-  } catch {
-    json(res, 503, { error: 'auth_store_unavailable', message: 'Sign-in state could not be read' });
-    return false;
-  }
-  return true;
+/**
+ * Reload sessions only when this request can see one. A cookie covers sign-out. Account routes and
+ * revoke-all can name another person's sessions without carrying that person's cookie.
+ */
+function sessionReloadNeeded(req: http.IncomingMessage, path: string): boolean {
+  if (cookieValue(req, SESSION_COOKIE)) return true;
+  if (path.startsWith('/api/v1/account/')) return true;
+  return req.method === 'POST' && /^\/api\/v1\/principals\/[^/]+\/revoke-access$/.test(path);
 }
 
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
   const path = (req.url ?? '/').split('?')[0];
-  // Probes must answer even when the session store cannot be read. Auth routes still fail closed.
+  // Probes stay up when the session store cannot be read. Other routes reload sessions only when they use one.
   const probe = path === '/healthz' || path === '/api/v1/health' || path === '/' || path === '/metrics';
-  if (!probe && !(await prepareDurableAuth(state, res))) return;
+  if (!probe && sessionReloadNeeded(req, path)) {
+    try {
+      await state.sessions?.reload();
+    } catch {
+      json(res, 503, { error: 'auth_store_unavailable', message: 'Sign-in state could not be read' });
+      return;
+    }
+  }
   if (!(await verifyApiKeyBeforeRouting(state, req, res))) return;
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
@@ -3686,14 +3692,15 @@ async function acceptFactoryAccessJwt(
     return fail('invalid_token', 'Access token is invalid or expired');
   }
   const token = verdict.token;
-  if (state.revocations?.has(token.jti) || state.revocations?.has(token.sid)) {
-    return fail('invalid_token', 'Access token is invalid or expired');
-  }
   try {
+    await state.revocations?.reload();
     await state.mcpOAuthStore?.reload();
   } catch {
     json(res, 503, { error: 'auth_store_unavailable', message: 'Sign-in state could not be read' });
     return false;
+  }
+  if (state.revocations?.has(token.jti) || state.revocations?.has(token.sid)) {
+    return fail('invalid_token', 'Access token is invalid or expired');
   }
   const family = state.mcpOAuthStore?.liveFamily(token.sid);
   const now = Date.now();

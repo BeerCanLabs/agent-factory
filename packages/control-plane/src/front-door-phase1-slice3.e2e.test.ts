@@ -152,6 +152,8 @@ describe('front-door Phase 1 Slice 3 (#564)', { concurrency: false }, () => {
     });
     assert.equal(adminRevoke.status, 200);
     assert.equal((await get('/api/v1/whoami', { cookie: ada })).status, 401, 'admin revoke ends the other person');
+    const revokedBy = state.ledger.query().find((e) => e.action === 'SESSION_REVOKED' && e.subject === `session:${adaBody.sessions[0]!.sid}`);
+    assert.equal(revokedBy?.actor, 'user:stephanie', 'the ledger names the admin, not the person whose session ended');
     const stranger = cookieFor('ada@example.com');
     const hidden = await get('/api/v1/account/sessions?owner=user:stephanie', { cookie: stranger });
     const hiddenBody = (await hidden.json()) as { sessions: Array<{ sid: string }> };
@@ -307,5 +309,36 @@ describe('front-door Phase 1 Slice 3 (#564)', { concurrency: false }, () => {
     assert.ok(list.refreshFamilies.some((f) => f.familyId === familyId), 'the account list reloads the other task\'s family');
     const del = await request(`/api/v1/account/refresh-families/${familyId}`, { method: 'DELETE', headers: { cookie, origin: BASE } });
     assert.equal(del.status, 200);
+    const familyRow = state.ledger.query().find((e) => e.action === 'REFRESH_FAMILY_REVOKED' && e.subject === `family:${familyId}`);
+    assert.equal(familyRow?.actor, 'user:stephanie');
+  });
+
+  it('refuses an authorization code after that browser session was revoked', async () => {
+    const cookie = cookieFor('stephanie@example.com');
+    const id = cookie.slice('factory_session='.length);
+    const sid = state.sessions!.get(id)!.sid;
+    const verifier = `verifier_${randomBytes(16).toString('hex')}`;
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    const redirect = 'http://127.0.0.1:6016/callback';
+    const code = state.mcpOAuthStore!.storeAuthCode({
+      clientId: 'revoked-session-client',
+      principalId: 'user:stephanie',
+      redirectUri: redirect,
+      codeChallenge: challenge,
+      codeChallengeMethod: 'S256',
+      scope: 'mcp:full',
+      sessionSid: sid,
+    });
+    const out = await request('/api/v1/auth/logout', { method: 'POST', headers: { cookie, origin: BASE } });
+    assert.equal(out.status, 200);
+    const tok = await postForm('/token', {
+      grant_type: 'authorization_code',
+      code,
+      client_id: 'revoked-session-client',
+      redirect_uri: redirect,
+      code_verifier: verifier,
+    });
+    assert.equal(tok.status, 400);
+    assert.equal(((await tok.json()) as { error: string }).error, 'invalid_grant');
   });
 });

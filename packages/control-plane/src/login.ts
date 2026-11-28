@@ -57,6 +57,7 @@ export class SessionStore {
   private readonly dirty = new Set<string>();
   private docVersion = 0;
   private queue: Promise<unknown> = Promise.resolve();
+  private reloadFlight?: Promise<void>;
   private flushTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
@@ -174,7 +175,14 @@ export class SessionStore {
   /** Pull another task's creates and revokes. Dirty local slides and revokes still win. */
   async reload(): Promise<void> {
     if (!this.backend) return;
-    await this.serial(() => this.reloadUnlocked());
+    if (this.reloadFlight) return this.reloadFlight;
+    const flight = this.serial(() => this.reloadUnlocked());
+    this.reloadFlight = flight;
+    try {
+      await flight;
+    } finally {
+      if (this.reloadFlight === flight) this.reloadFlight = undefined;
+    }
   }
 
   private isLive(s: StoredSession, now: number): boolean {

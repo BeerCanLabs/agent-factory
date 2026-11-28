@@ -15,12 +15,24 @@ export type RevocationEntry = {
 
 export type RevocationDoc = { entries: RevocationEntry[] };
 
-/** A versioned-document write lost a race with another task. The caller reloads and retries. */
+const SNAPSHOT_CONFLICT = /already exists|PreconditionFailed|ConditionalRequestConflict|\b412\b/i;
+
+function snapshotConflictText(err: unknown): string {
+  if (typeof err === 'string') return err;
+  if (!err || typeof err !== 'object') return String(err);
+  const e = err as { message?: unknown; stderr?: unknown };
+  const stderr = typeof e.stderr === 'string' ? e.stderr : Buffer.isBuffer(e.stderr) ? e.stderr.toString('utf8') : '';
+  return `${typeof e.message === 'string' ? e.message : ''} ${stderr}`;
+}
+
+/**
+ * A versioned-document write lost a race with another task. File stores throw EEXIST. S3 conditional
+ * puts fail with PreconditionFailed, and GCS fails with 412. The caller reloads and retries.
+ */
 export function isSnapshotConflict(err: unknown): boolean {
-  const code = (err as { code?: string }).code;
+  const code = (err as { code?: string } | null)?.code;
   if (code === 'EEXIST') return true;
-  const msg = err instanceof Error ? err.message : String(err);
-  return /already exists/i.test(msg);
+  return SNAPSHOT_CONFLICT.test(snapshotConflictText(err));
 }
 
 export type RevocationInput = { id: string; kind: RevocationKind; expiresAt: number; reason: string };
@@ -33,6 +45,7 @@ export class RevocationSet {
   private entries = new Map<string, RevocationEntry>();
   private docVersion = 0;
   private queue: Promise<unknown> = Promise.resolve();
+  private reloadFlight?: Promise<void>;
   private unhealthy?: unknown;
   private readonly now: () => number;
 
@@ -69,7 +82,14 @@ export class RevocationSet {
   }
 
   async reload(): Promise<void> {
-    return this.serial(() => this.reloadUnlocked());
+    if (this.reloadFlight) return this.reloadFlight;
+    const flight = this.serial(() => this.reloadUnlocked());
+    this.reloadFlight = flight;
+    try {
+      await flight;
+    } finally {
+      if (this.reloadFlight === flight) this.reloadFlight = undefined;
+    }
   }
 
   async revoke(entry: RevocationInput): Promise<void> {

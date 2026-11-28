@@ -61,7 +61,7 @@ export async function noteRevokedKey(
   await applyFamilyRevocation(state, families, 'key-revoked');
 }
 
-type AccountSubject = { principalId: string; emails: string[]; currentSid?: string };
+type AccountSubject = { actor: string; principalId: string; emails: string[]; currentSid?: string };
 
 async function accountSubject(
   state: FactoryState,
@@ -85,7 +85,7 @@ async function accountSubject(
   }
   if (principalId.startsWith('user:') && principalId.includes('@')) emails.add(principalId.slice('user:'.length));
   const currentSid = state.sessions?.get(cookieValue(req, SESSION_COOKIE))?.sid;
-  return { principalId, emails: [...emails], currentSid };
+  return { actor: who.principal.actor, principalId, emails: [...emails], currentSid };
 }
 
 function sessionView(s: Session, currentSid: string | undefined) {
@@ -141,8 +141,8 @@ export async function handleAccountSessionRoutes(
       agentId: 'control-plane',
       type: 'action',
       action: 'SESSION_REVOKED',
-      actor: subject.principalId,
-      subject: sid,
+      actor: subject.actor,
+      subject: `session:${sid}`,
     });
     if (subject.currentSid === sid) {
       res.setHeader('set-cookie', `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`);
@@ -165,15 +165,15 @@ export async function handleAccountSessionRoutes(
     const familyId = decodeURIComponent(familyRevoke[1] ?? '');
     const owned = state.mcpOAuthStore?.listFamilies(subject.principalId).some((family) => family.familyId === familyId) ?? false;
     if (!owned) return json(res, 404, { error: 'not_found', message: 'Refresh family not found' }), true;
-    const keyIds = (await state.mcpOAuthStore?.revokeRefreshTokenFamily(familyId, subject.principalId)) ?? [];
+    const keyIds = (await state.mcpOAuthStore?.revokeRefreshTokenFamily(familyId, subject.actor)) ?? [];
     await applyFamilyRevocation(state, [{ familyId, keyIds }], 'family-revoked');
     state.ledger.append({
       timestamp: new Date().toISOString(),
       agentId: 'control-plane',
       type: 'action',
       action: 'REFRESH_FAMILY_REVOKED',
-      actor: subject.principalId,
-      subject: familyId,
+      actor: subject.actor,
+      subject: `family:${familyId}`,
     });
     return json(res, 200, { ok: true, revoked: familyId }), true;
   }

@@ -173,6 +173,7 @@ export class McpOAuthStore {
   private docVersion = 0;
   private unhealthy?: unknown;
   private queue: Promise<unknown> = Promise.resolve();
+  private reloadFlight?: Promise<void>;
 
   private clientsById = new Map<string, McpOAuthClientRecord>();
   private consentsByPrincipal = new Map<string, Map<string, McpOAuthConsentRecord>>();
@@ -210,7 +211,14 @@ export class McpOAuthStore {
   }
 
   async reload(): Promise<void> {
-    return this.serial(() => this.reloadUnlocked());
+    if (this.reloadFlight) return this.reloadFlight;
+    const flight = this.serial(() => this.reloadUnlocked());
+    this.reloadFlight = flight;
+    try {
+      await flight;
+    } finally {
+      if (this.reloadFlight === flight) this.reloadFlight = undefined;
+    }
   }
 
   private async reloadUnlocked(): Promise<void> {
@@ -1379,6 +1387,16 @@ async function handleTokenPost(
 
     const client = store.getClient(clientId);
     const clientName = client?.clientName ?? clientId;
+    if (auth.sessionSid) {
+      try {
+        await state.revocations?.reload();
+      } catch {
+        return json(res, 503, { error: 'server_error', error_description: 'Sign-in state could not be read' }), true;
+      }
+      if (state.revocations?.has(auth.sessionSid)) {
+        return json(res, 400, { error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }), true;
+      }
+    }
     if (!state.keys) {
       return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
     }
@@ -1495,9 +1513,11 @@ async function handleTokenPost(
         ...(rec.amr ? { amr: rec.amr } : {}),
       });
     } catch (err) {
+      await state.keys?.revoke(minted.keyId, { by: 'service:mcp-oauth' }).catch(() => undefined);
       if (err instanceof RefreshReuseError) {
         const keyIds = await store.revokeRefreshTokenFamily(err.familyId, err.principalId);
-        await applyFamilyRevocation(state, [{ familyId: err.familyId, keyIds }], 'refresh-reuse');
+        const anchors = keyIds.includes(minted.keyId) ? keyIds : [...keyIds, minted.keyId];
+        await applyFamilyRevocation(state, [{ familyId: err.familyId, keyIds: anchors }], 'refresh-reuse');
         state.ledger.append({
           timestamp: new Date().toISOString(),
           agentId: 'control-plane',
