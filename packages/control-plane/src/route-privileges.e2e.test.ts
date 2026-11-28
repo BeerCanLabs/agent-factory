@@ -586,12 +586,18 @@ describe('who may call each route (GAP-087, TSK-099)', { concurrency: false }, (
     for (const path of [
       '/api/v1/oauth/consents',
       '/api/v1/oauth/consents/client1',
+      '/api/v1/oauth/clients',
       '/api/v1/account/sessions',
       '/api/v1/account/sessions/sess_x',
       '/api/v1/account/refresh-families',
       '/api/v1/account/refresh-families/fam_x',
     ]) {
-      const none = await call(port, path.endsWith('client1') || path.includes('sess_') || path.includes('fam_') ? 'DELETE' : 'GET', path, 'none');
+      const method = path.endsWith('/oauth/clients')
+        ? 'PUT'
+        : path.endsWith('client1') || path.includes('sess_') || path.includes('fam_')
+          ? 'DELETE'
+          : 'GET';
+      const none = await call(port, method, path, 'none');
       assert.equal(none.status, 401, `${path} without credential`);
     }
   });

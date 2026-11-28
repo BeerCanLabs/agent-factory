@@ -2,7 +2,7 @@
 // RFC 9068 JWT access tokens, signed with the Slice 1 ES256 key set. This module only signs and checks the token.
 // It does not decide privileges: `roles`, `agents`, and `grants_v` are hints (D-5). The resource server re-reads live
 // grants. `sid` is the refresh-family id (Slice 3). Tokens issued before that still carry the key-store id.
-// Slice 4 (#565) replaces `mcp:full`. Slice 5 (#566) is the one verifier.
+// Slice 4 (#565) puts real factory scopes on `scope`. Slice 5 (#566) is the one verifier.
 import { randomBytes } from 'node:crypto';
 import { SignJWT, decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from 'jose';
 import { AS_SIGNING_ALG, stripTrailingSlash, type AsKey, type AsKeySet } from './as-keys.js';

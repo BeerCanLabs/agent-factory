@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { ACCESS_TOKEN_LIFETIME_MINUTES, REFRESH_DEVICE_DAYS, REFRESH_PERSON_DAYS, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_HOURS, factoryIssuerInfo, keysAccessTokenCopy, sessionLifetimeCopy } from './keys-model.js';
+import { ACCESS_TOKEN_LIFETIME_MINUTES, REFRESH_DEVICE_DAYS, REFRESH_PERSON_DAYS, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_HOURS, connectedAppCopy, connectedAppsIntro, factoryIssuerInfo, keysAccessTokenCopy, sessionLifetimeCopy } from './keys-model.js';
 
 describe('keys access-token copy (front-door Phase 1 Slice 2)', () => {
   it('says new access tokens are 10-minute JWTs and that legacy keys still work', () => {
@@ -30,6 +30,36 @@ describe('session lifetime copy (front-door Phase 1 Slice 3)', () => {
     assert.match(copy, /people/);
     assert.match(copy, /90 days/);
     assert.match(copy, /devices/);
+  });
+});
+
+describe('connected apps (front-door Phase 1 Slice 4)', () => {
+  it('shows granted scopes in plain language and marks a first-party head', () => {
+    const copy = connectedAppCopy({
+      clientName: 'Factory Console',
+      scope: 'admin mcp',
+      scopes: [
+        { id: 'mcp', label: 'Use the factory MCP tools your account already allows' },
+        { id: 'admin', label: 'Administer the factory' },
+      ],
+      origin: 'https://factory.example',
+      firstParty: true,
+    });
+    assert.equal(copy.kind, 'First-party factory app');
+    assert.equal(copy.origin, 'https://factory.example');
+    assert.match(copy.scopes, /Administer the factory/);
+    assert.match(copy.scopes, /MCP tools/);
+    assert.doesNotMatch(copy.kind, /Third-party/);
+  });
+
+  it('labels every other app as third-party and keeps the raw scope when labels are absent', () => {
+    const copy = connectedAppCopy({ clientName: 'Cursor', scope: 'mcp', firstParty: false });
+    assert.equal(copy.kind, 'Third-party app');
+    assert.equal(copy.scopes, 'mcp');
+    assert.match(connectedAppsIntro(), /First-party/);
+    assert.match(connectedAppsIntro(), /Console, Garrison, Web Chat, and Connect/);
+    assert.match(connectedAppsIntro(), /fk_at_/);
+    assert.match(connectedAppsIntro(), /immediately/);
   });
 });
 

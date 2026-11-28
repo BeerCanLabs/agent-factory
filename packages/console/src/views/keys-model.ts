@@ -1,4 +1,4 @@
-/** Factory issuer URLs, the Slice 2 access-token note, and the Slice 3 D-4 lifetime copy. */
+/** Factory issuer URLs, the Slice 2 access-token note, the Slice 3 D-4 lifetime copy, and Slice 4 connected apps. */
 
 export const ACCESS_TOKEN_LIFETIME_MINUTES = 10;
 
@@ -28,6 +28,29 @@ export type FactoryIssuerInfo = {
   jwksUri: string;
   discoveryUrl: string;
 };
+
+export type ConnectedAppView = {
+  clientName: string;
+  scope: string;
+  scopes?: { id: string; label: string }[];
+  origin?: string;
+  firstParty?: boolean;
+  blocked?: boolean;
+};
+
+/** How a connected app is described on Your API Keys. First-party heads are not labeled as third-party consoles. */
+export function connectedAppCopy(app: ConnectedAppView): { kind: string; origin: string; scopes: string } {
+  const scopes = app.scopes && app.scopes.length > 0 ? app.scopes.map((scope) => scope.label).join('; ') : app.scope;
+  return {
+    kind: app.firstParty ? 'First-party factory app' : 'Third-party app',
+    origin: app.origin ?? '',
+    scopes,
+  };
+}
+
+export function connectedAppsIntro(): string {
+  return 'Connected apps show the scopes you granted. First-party factory apps (Console, Garrison, Web Chat, and Connect) are marked First-party so they are not shown as third-party consoles. Revoking an app invalidates its tokens immediately. Legacy fk_ and fk_at_ keys stay listed above and keep working.';
+}
 
 export function factoryIssuerInfo(
   origin: string,

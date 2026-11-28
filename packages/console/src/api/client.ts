@@ -117,6 +117,12 @@ export interface OAuthConsentView {
   clientId: string;
   clientName: string;
   scope: string;
+  /** Plain-language scope lines from the authorization server. */
+  scopes?: { id: string; label: string }[];
+  origin?: string;
+  /** First-party factory head (Console, Garrison, Web Chat, Connect). Not a third-party console. */
+  firstParty?: boolean;
+  blocked?: boolean;
   createdAt: string;
   updatedAt?: string;
   lastUsedAt?: string;
