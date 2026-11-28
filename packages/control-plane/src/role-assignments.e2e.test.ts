@@ -267,11 +267,16 @@ describe('owners assign roles; an agent may only ask (CF2, CF4, TSK-265)', { con
   it('the MCP approvals list hides a change from those who may not decide it, as the REST list does', async () => {
     const mine = await runFor({ provider: 'discord', id: '100' });
     const ask = await call('POST', `/api/v1/runs/${mine.run.runId}/role-requests`, { provider: 'discord', identity: '201', roles: ['Family'] }, mine.token);
-    assert.ok((await mcp(VIEWER, 'list_approvals')).includes(ask.body.approvalId), 'listed, so approvers know something waits');
-    assert.ok(!(await mcp(VIEWER, 'list_approvals')).includes('201'), 'but not what it says');
-    assert.ok(!(await mcp(APPROVER, 'list_approvals')).includes('201'));
-    assert.ok((await mcp(ADMIN, 'list_approvals')).includes('201'));
-    await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'reject' }, OWNER);
+    try {
+      const viewer = await mcp(VIEWER, 'list_approvals');
+      assert.ok(viewer.includes(ask.body.approvalId), 'listed, so approvers know something waits');
+      // Quoted, as the REST test does: an approval id that happens to contain 201 is not the identity.
+      assert.equal(viewer.includes('"201"'), false, 'but not what it says');
+      assert.equal((await mcp(APPROVER, 'list_approvals')).includes('"201"'), false);
+      assert.equal((await mcp(ADMIN, 'list_approvals')).includes('"201"'), true);
+    } finally {
+      await call('POST', `/api/v1/approvals/${ask.body.approvalId}`, { decision: 'reject' }, OWNER);
+    }
   });
 
   it('any owner of the agent decides a change, not only the owner who was asking; owners compare case-insensitively', async () => {
