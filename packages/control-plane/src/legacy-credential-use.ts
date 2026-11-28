@@ -32,7 +32,10 @@ export type LegacyCredentialKindView = {
   id: LegacyCredentialKindId;
   label: string;
   detail: string;
+  /** Requests seen by this control-plane process since it started. */
   count: number;
+  /** AUTH_LEGACY_CREDENTIAL rows in the ledger. These survive a restart. A sampled row, not every request. */
+  ledgerSamples: number;
   lastSeenAt?: string;
   recent: LegacyCredentialSample[];
 };
@@ -75,6 +78,7 @@ export class LegacyCredentialUse {
           label: kind.label,
           detail: kind.detail,
           count: bucket?.count ?? 0,
+          ledgerSamples: 0,
           ...(bucket?.lastSeenAt ? { lastSeenAt: bucket.lastSeenAt } : {}),
           recent: bucket?.recent.map((sample) => ({ ...sample })) ?? [],
         };
@@ -103,4 +107,46 @@ export class LegacyCredentialUse {
       return false;
     }
   }
+}
+
+type LedgerAuthRow = { action?: string; subject?: string; actor?: string; route?: string; timestamp?: string };
+
+/** Fold ledger samples into the live tally. Counts stay "since this process started"; ledgerSamples survive a restart. */
+export function withLedgerSamples<T extends { kinds: LegacyCredentialKindView[] }>(
+  snap: T,
+  rows: readonly LedgerAuthRow[],
+): T {
+  const extra = new Map<string, LegacyCredentialSample[]>();
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.action !== 'AUTH_LEGACY_CREDENTIAL' || typeof row.subject !== 'string' || !row.subject.startsWith('credential:')) continue;
+    const id = row.subject.slice('credential:'.length);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+    const list = extra.get(id) ?? [];
+    list.push({
+      ts: row.timestamp ?? '',
+      ...(row.actor ? { actor: row.actor } : {}),
+      path: row.route ?? '',
+      ledgered: true,
+    });
+    extra.set(id, list);
+  }
+  return {
+    ...snap,
+    kinds: snap.kinds.map((kind) => {
+      const recent = [...kind.recent];
+      for (const sample of extra.get(kind.id) ?? []) {
+        if (recent.some((have) => have.ts === sample.ts && have.actor === sample.actor && have.path === sample.path)) continue;
+        recent.push(sample);
+      }
+      recent.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+      const lastSeenAt = recent[0]?.ts || kind.lastSeenAt;
+      return {
+        ...kind,
+        ledgerSamples: counts.get(kind.id) ?? 0,
+        ...(lastSeenAt ? { lastSeenAt } : {}),
+        recent: recent.slice(0, RECENT_CAP),
+      };
+    }),
+  };
 }

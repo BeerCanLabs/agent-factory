@@ -17,6 +17,7 @@ export type LegacyCredentialKind = {
   label?: string;
   detail?: string;
   count?: number;
+  ledgerSamples?: number;
   lastSeenAt?: string;
   recent?: LegacyCredentialSample[];
 };
@@ -34,6 +35,7 @@ export type LegacyCredentialRow = {
   label: string;
   detail: string;
   count: number;
+  ledgerSamples: number;
   lastSeenAt?: string;
   recent: LegacyCredentialSample[];
 };
@@ -48,8 +50,9 @@ export function legacyCredentialRows(kinds: readonly LegacyCredentialKind[] | un
       label: found?.label || copy.label,
       detail: found?.detail || copy.detail,
       count: typeof found?.count === 'number' && found.count > 0 ? found.count : 0,
+      ledgerSamples: typeof found?.ledgerSamples === 'number' && found.ledgerSamples > 0 ? found.ledgerSamples : 0,
       ...(found?.lastSeenAt ? { lastSeenAt: found.lastSeenAt } : {}),
-      recent: found?.recent ?? [],
+      recent: [...(found?.recent ?? [])].sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0)),
     };
   });
 }

@@ -82,6 +82,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
     headers,
   });
+  // D-5: the factory sets this when the caller's grants changed after the token was issued. The console reloads whoami.
+  if (res.headers.get('x-factory-grants-stale') === '1' && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('factory-grants-stale'));
+  }
 
   if (!res.ok) {
     let errMessage = `HTTP ${res.status} ${res.statusText}`;

@@ -142,7 +142,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         },
         { id: 'keys' as const, label: 'Your API Keys', icon: <KeyRound className="w-4 h-4" /> },
         ...(seesLegacyCredentials
-          ? [{ id: 'legacy-credentials' as const, label: 'Old credentials', icon: <KeyRound className="w-4 h-4" /> }]
+          ? [{ id: 'legacy-credentials' as const, label: 'Who uses old keys', icon: <KeyRound className="w-4 h-4" /> }]
           : []),
         ...(managesPeople ? [{ id: 'people' as const, label: 'People & Access', icon: <Users className="w-4 h-4" /> }] : []),
         ...(isAdmin

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryLedger } from '@beercanlabs/factory-ledger';
-import { LegacyCredentialUse } from './legacy-credential-use.js';
+import { LegacyCredentialUse, withLedgerSamples } from './legacy-credential-use.js';
 import type { AuthRequestLogEntry } from './auth-method.js';
 
 function entry(authMethod: AuthRequestLogEntry['authMethod'], actor: string): AuthRequestLogEntry {
@@ -34,6 +34,11 @@ describe('legacy credential tally', () => {
     assert.equal(count('oidc-bearer'), 1);
     assert.equal(count('cloudflare-access'), 1);
     assert.equal(count('fk_at_'), 0);
+    const merged = withLedgerSamples(use.snapshot(), [
+      { action: 'AUTH_LEGACY_CREDENTIAL', subject: 'credential:fk_', actor: 'user:before-restart', route: '/mcp', timestamp: '2026-11-27T00:00:00.000Z' },
+    ]);
+    assert.equal(merged.kinds.find((kind) => kind.id === 'fk_')?.ledgerSamples, 1);
+    assert.equal(merged.kinds.find((kind) => kind.id === 'fk_')?.recent.some((sample) => sample.actor === 'user:before-restart'), true);
     const actions = ledger.query().map((row) => row.action);
     assert.equal(actions.filter((action) => action === 'AUTH_LEGACY_CREDENTIAL').length, 4);
     assert.equal(actions.includes('AUTH_LEGACY_CREDENTIAL') && ledger.query().some((row) => row.subject === 'credential:fk_'), true);

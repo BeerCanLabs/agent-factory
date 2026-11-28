@@ -47,25 +47,35 @@ export const CloudflareAuthProvider: React.FC<{ children: React.ReactNode }> = (
   };
 
   useEffect(() => {
+    let cancelled = false;
     async function loadIdentity() {
       try {
         const asWho = sessionStorage.getItem(ACT_AS_KEY);
         const res = await fetch('/api/auth/me', asWho ? { headers: { 'x-factory-act-as': asWho } } : undefined);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.user) {
-            setUser(data.user);
-            setWhoami(data.whoami ?? { actor: data.user.actor, roles: data.user.roles });
-            setActiveRole(data.user.roles.includes('admin') ? 'admin' : data.user.roles[0] || 'viewer');
-          }
-        }
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled || !data || !data.user) return;
+        const nextWho = data.whoami ?? { actor: data.user.actor, roles: data.user.roles };
+        setUser({ ...data.user, roles: Array.isArray(nextWho.roles) ? nextWho.roles : data.user.roles });
+        setWhoami(nextWho);
+        const roles: string[] = Array.isArray(nextWho.roles) ? nextWho.roles : data.user.roles ?? [];
+        const nextRole = roles.includes('admin') ? 'admin' : roles[0] || 'viewer';
+        setActiveRole(nextRole === 'operator' || nextRole === 'approver' || nextRole === 'admin' ? nextRole : 'viewer');
       } catch (err) {
         console.warn('Could not fetch /api/auth/me; showing nothing until the factory answers:', err);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     }
     loadIdentity();
+    const onStale = () => {
+      void loadIdentity();
+    };
+    window.addEventListener('factory-grants-stale', onStale);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('factory-grants-stale', onStale);
+    };
   }, []);
 
   const hasRole = (required: 'viewer' | 'operator' | 'approver' | 'admin') => {
