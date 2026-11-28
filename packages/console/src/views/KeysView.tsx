@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { factoryApi, type AccountSession, type KeyView, type OAuthConsentView, type RefreshFamily } from '../api/client.js';
-import { factoryIssuerInfo, keysAccessTokenCopy, sessionLifetimeCopy, type FactoryIssuerInfo } from './keys-model.js';
+import { connectedAppCopy, connectedAppsIntro, factoryIssuerInfo, keysAccessTokenCopy, sessionLifetimeCopy, type FactoryIssuerInfo } from './keys-model.js';
 
 const btn = 'px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 transition';
 const dangerBtn = 'px-2 py-1 rounded border border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/60 disabled:opacity-50 transition';
@@ -245,13 +245,11 @@ export const KeysView: React.FC = () => {
         </div>
       </div>
 
-      {/* Connected MCP Apps Section */}
+      {/* Connected apps */}
       <div className="space-y-4 pt-4 border-t border-slate-200 dark:border-slate-800">
         <div>
-          <h2 className="text-base font-semibold text-slate-900 dark:text-white">Connected MCP Apps</h2>
-          <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">
-            External editors and agents (Cursor, Claude Desktop, VS Code Copilot, Antigravity) authorized via OAuth 2.1 PKCE. Revoking invalidates tokens and active sessions immediately.
-          </p>
+          <h2 className="text-base font-semibold text-slate-900 dark:text-white">Connected apps</h2>
+          <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">{connectedAppsIntro()}</p>
         </div>
 
         <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden bg-white dark:bg-slate-900">
@@ -273,11 +271,25 @@ export const KeysView: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                consents.map((c) => (
+                consents.map((c) => {
+                  const copy = connectedAppCopy(c);
+                  return (
                   <tr key={c.clientId} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-medium text-slate-900 dark:text-white">{c.clientName}</td>
-                    <td className="px-3 py-2 font-mono text-[11px] text-slate-600 dark:text-slate-400">{c.clientId}</td>
-                    <td className="px-3 py-2 font-mono text-[11px] text-slate-600 dark:text-slate-400">{c.scope}</td>
+                    <td className="px-3 py-2 font-medium text-slate-900 dark:text-white">
+                      {c.clientName}
+                      {c.firstParty ? (
+                        <span className="ml-2 rounded border border-sky-300 bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-800 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-300">First-party</span>
+                      ) : null}
+                      {c.blocked ? (
+                        <span className="ml-2 rounded border border-rose-300 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-800 dark:border-rose-800 dark:bg-rose-950/50 dark:text-rose-300">Blocked</span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-[11px] text-slate-600 dark:text-slate-400">
+                      {c.clientId}
+                      {copy.origin ? <div className="mt-0.5 font-sans text-slate-500">{copy.origin}</div> : null}
+                      <div className="mt-0.5 font-sans text-slate-500">{copy.kind}</div>
+                    </td>
+                    <td className="px-3 py-2 text-[11px] text-slate-600 dark:text-slate-400">{copy.scopes}</td>
                     <td className="px-3 py-2 text-slate-500">{new Date(c.createdAt).toLocaleString()}</td>
                     <td className="px-3 py-2 text-right">
                       <button
@@ -289,7 +301,8 @@ export const KeysView: React.FC = () => {
                       </button>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

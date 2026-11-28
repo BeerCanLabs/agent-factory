@@ -160,6 +160,8 @@ The same surface is exposed as MCP tools. Per-container fake `/v1/mcp/agents` JS
 
 **Auth and roles.** The control plane refuses to start without auth configured (`FACTORY_AUTH=none` works only with `FACTORY_INSECURE_NO_AUTH=1`). Humans use OIDC: the JWT signature is verified against the IdP's JWKS, plus iss, aud and exp; roles come from `FACTORY_OIDC_ROLES_CLAIM` (default `roles`), optionally mapped through `FACTORY_OIDC_ROLE_MAP`. Services use `service:<name>` factory API keys (`fk_`), whose roles come from grants; after cutover (S11) `FACTORY_TOKENS` and `FACTORY_ADMIN_EMAILS` are not read, and every person's or service's roles come from factory grants (including `domain:<domain>` grants). `FACTORY_TOKEN` is a legacy admin token.
 
+The factory authorization server consents coarse scopes (`openid`, `profile`, `email`, `mcp`, `api`, `agents:read`, `agents:converse`, `agents:manage`, `skills:manage`, `grants:manage`, `keys:manage`, `admin`, `offline_access`). A third-party client is never offered `admin`, `grants:manage`, or `keys:manage` (D-2). First-party heads on `factory.<domain>` (Console, Garrison, Web Chat, Connect) carry a first-party flag and skip the consent screen. Scopes only narrow the person's live grants. Legacy `fk_` and `fk_at_` keys keep working. `mcp:full` is no longer advertised.
+
 | Role | Can |
 |---|---|
 | `viewer` | list agents, read ledger, MCP read tools |

@@ -11,11 +11,14 @@ import {
   sameHash,
   signAccessToken,
   verifyAccessToken,
+  DEFAULT_OAUTH_SCOPE,
+  FACTORY_SCOPES,
+  FIRST_PARTY_HEADS,
   type AccessTokenHints,
-  type KeyScopes,
   type Principal,
   type Role,
 } from '@beercanlabs/factory-auth';
+import { consentCovers, mapOAuthScopeToKeyScopes, normalizeRequestedScopes, scopeViews } from './oauth-scopes.js';
 import { MemoryDocBackend, snapshotSha256, type VersionedDocBackend } from '@beercanlabs/factory-bouncer';
 import { actorIsAdmin, effectiveGrantsForActor, identify, json, readBody, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import { allowedIssuerOrigins, ensureAsKeys, resolveAsIssuer } from './as-discovery.js';
@@ -32,6 +35,10 @@ export type McpOAuthClientRecord = {
   createdAt: string;
   isCimd?: boolean;
   clientUri?: string;
+  /** Admin-set. DCR and CIMD cannot turn this on. Skips the consent screen. */
+  firstParty?: boolean;
+  /** Admin-set. Authorize and token refuse a blocked client, and its refresh families are revoked. */
+  blocked?: boolean;
 };
 
 export type McpOAuthConsentRecord = {
@@ -346,8 +353,79 @@ export class McpOAuthStore {
           }
         }
       }
-      this.clientsById.set(client.clientId, structuredClone(client));
-      return structuredClone(client);
+      const existing = this.clientsById.get(client.clientId);
+      const next = structuredClone(client);
+      // A public registration cannot promote itself or clear an admin block.
+      if (by !== 'admin') {
+        next.firstParty = existing?.firstParty === true;
+        next.blocked = existing?.blocked === true;
+      }
+      this.clientsById.set(client.clientId, next);
+      return structuredClone(next);
+    });
+  }
+
+  /**
+   * Admin registration. `firstParty` and `blocked` are taken from the caller. Turning `blocked` on
+   * revokes every refresh family for the client in the same write, so a lost race retries both.
+   */
+  async upsertAdminClient(input: {
+    clientId: string;
+    clientName: string;
+    redirectUris: string[];
+    /** Omitted keeps the stored flag. */
+    firstParty?: boolean;
+    blocked?: boolean;
+  }): Promise<{ record: McpOAuthClientRecord; families: FamilyRevocation[] }> {
+    return this.change('admin', () => {
+      const existing = this.clientsById.get(input.clientId);
+      const firstParty = input.firstParty ?? existing?.firstParty === true;
+      const blocked = input.blocked ?? existing?.blocked === true;
+      const record: McpOAuthClientRecord = {
+        clientId: input.clientId,
+        clientName: input.clientName,
+        redirectUris: input.redirectUris,
+        grantTypes: existing?.grantTypes ?? ['authorization_code', 'refresh_token'],
+        responseTypes: existing?.responseTypes ?? ['code'],
+        tokenEndpointAuthMethod: 'none',
+        createdAt: existing?.createdAt ?? this.now().toISOString(),
+        ...(existing?.isCimd ? { isCimd: true, clientUri: existing.clientUri } : {}),
+        firstParty,
+        blocked,
+      };
+      this.clientsById.set(input.clientId, record);
+      const families = blocked && existing?.blocked !== true ? this.markFamilies((r) => r.clientId === input.clientId) : [];
+      return { record: structuredClone(record), families };
+    });
+  }
+
+  /** Flag Console, Garrison, Web Chat, and Connect as first-party for one factory origin. */
+  async ensureFirstPartyHeads(origin: string): Promise<void> {
+    let root: string;
+    try {
+      const url = new URL(origin);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('bad scheme');
+      root = url.origin;
+    } catch {
+      throw new Error('invalid_factory_origin');
+    }
+    await this.change('first-party', () => {
+      for (const head of FIRST_PARTY_HEADS) {
+        const existing = this.clientsById.get(head.id);
+        const redirect = `${root}${head.path}`;
+        if (!existing && !isValidRedirectUri(redirect)) continue;
+        this.clientsById.set(head.id, {
+          clientId: head.id,
+          clientName: head.name,
+          redirectUris: existing?.redirectUris?.length ? existing.redirectUris : [redirect],
+          grantTypes: existing?.grantTypes ?? ['authorization_code', 'refresh_token'],
+          responseTypes: existing?.responseTypes ?? ['code'],
+          tokenEndpointAuthMethod: 'none',
+          createdAt: existing?.createdAt ?? this.now().toISOString(),
+          firstParty: true,
+          blocked: existing?.blocked === true,
+        });
+      }
     });
   }
 
@@ -462,12 +540,8 @@ export class McpOAuthStore {
   hasConsent(principalId: string, clientId: string, requestedScope?: string): boolean {
     const c = this.getConsent(principalId, clientId);
     if (!c) return false;
-    if (!requestedScope || requestedScope === 'mcp:full') {
-      return c.scope === 'mcp:full' || c.scope.includes('mcp:full');
-    }
-    const granted = new Set(c.scope.split(/\s+/).filter(Boolean));
-    const req = requestedScope.split(/\s+/).filter(Boolean);
-    return req.every((s) => granted.has(s) || granted.has('mcp:full'));
+    if (!requestedScope) return true;
+    return consentCovers(c.scope, requestedScope.split(/\s+/).filter(Boolean));
   }
 
   listConsents(principalId: string): McpOAuthConsentRecord[] {
@@ -648,17 +722,20 @@ export class McpOAuthStore {
   }
 
   private async revokeGrouped(match: (r: McpOAuthRefreshTokenRecord) => boolean, by: string): Promise<FamilyRevocation[]> {
-    return this.change(by, () => {
-      const byFamily = new Map<string, string[]>();
-      for (const r of this.refreshTokensByHash.values()) {
-        if (!match(r)) continue;
-        r.familyRevoked = true;
-        const keys = byFamily.get(r.familyId) ?? [];
-        if (r.keyId && !keys.includes(r.keyId)) keys.push(r.keyId);
-        byFamily.set(r.familyId, keys);
-      }
-      return [...byFamily.entries()].map(([familyId, keyIds]) => ({ familyId, keyIds }));
-    });
+    return this.change(by, () => this.markFamilies(match));
+  }
+
+  /** Caller holds the write lock. Marks matching families revoked and returns their anchor key ids. */
+  private markFamilies(match: (r: McpOAuthRefreshTokenRecord) => boolean): FamilyRevocation[] {
+    const byFamily = new Map<string, string[]>();
+    for (const r of this.refreshTokensByHash.values()) {
+      if (!match(r)) continue;
+      r.familyRevoked = true;
+      const keys = byFamily.get(r.familyId) ?? [];
+      if (r.keyId && !keys.includes(r.keyId)) keys.push(r.keyId);
+      byFamily.set(r.familyId, keys);
+    }
+    return [...byFamily.entries()].map(([familyId, keyIds]) => ({ familyId, keyIds }));
   }
 }
 
@@ -751,7 +828,7 @@ export async function handleMcpOAuthRoutes(
       resource: `${issuer}/mcp`,
       authorization_servers: [issuer],
       bearer_methods_supported: ['header'],
-      scopes_supported: ['mcp:full'],
+      scopes_supported: [...FACTORY_SCOPES],
     }), true;
   }
 
@@ -822,7 +899,141 @@ export async function handleMcpOAuthRoutes(
     return handleConsentDelete(state, req, res, decodeURIComponent(consentMatch[1]));
   }
 
+  if (path === '/api/v1/oauth/clients' && req.method === 'PUT') {
+    return handleClientAdminPut(state, req, res);
+  }
+
   return false;
+}
+
+function redirectOAuthError(
+  res: http.ServerResponse,
+  redirectUri: string,
+  issuer: string,
+  clientState: string | undefined,
+  error: string,
+  description: string,
+): boolean {
+  const errUrl = new URL(redirectUri);
+  errUrl.searchParams.set('error', error);
+  errUrl.searchParams.set('error_description', description);
+  if (clientState) errUrl.searchParams.set('state', clientState);
+  errUrl.searchParams.set('iss', issuer);
+  res.writeHead(302, { location: errUrl.toString(), 'cache-control': 'no-store' });
+  res.end();
+  return true;
+}
+
+function clientOriginOf(redirectUri: string): string {
+  try {
+    return new URL(redirectUri).origin;
+  } catch {
+    return redirectUri;
+  }
+}
+
+/** Third-party consent screen. Names the client's origin and lists each scope in plain language. */
+export function consentPageHtml(input: {
+  clientName: string;
+  origin: string;
+  principalId: string;
+  scopes: { id: string; label: string }[];
+  consentNonce: string;
+  csrfToken: string;
+}): string {
+  const host = (() => {
+    try {
+      return new URL(input.origin).host;
+    } catch {
+      return input.origin;
+    }
+  })();
+  const items = input.scopes
+    .map((scope) => `<li data-scope="${esc(scope.id)}"><span class="scope-id">${esc(scope.id)}</span> ${esc(scope.label)}</li>`)
+    .join('');
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect MCP Application</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem; color: #111; line-height: 1.5; }
+    .box { border: 1px solid #ccc; border-radius: 8px; padding: 1.5rem; background: #fafafa; }
+    h1 { font-size: 1.4rem; margin-top: 0; }
+    .origin-host { font-size: 1.05rem; }
+    .client-origin { font-family: monospace; font-size: 0.85rem; }
+    ul.scope-list { padding-left: 1.2rem; }
+    ul.scope-list li { margin: 0.35rem 0; }
+    .scope-id { font-family: monospace; font-size: 0.8rem; color: #555; margin-right: 0.35rem; }
+    .note { font-size: 0.85rem; color: #444; }
+    .btn-row { display: flex; gap: 1rem; margin-top: 1.5rem; }
+    button { flex: 1; padding: 0.6rem 1rem; font-size: 1rem; border-radius: 6px; cursor: pointer; border: 1px solid #888; }
+    button.primary { background: #0066cc; color: #fff; border-color: #0055aa; font-weight: 600; }
+    button.secondary { background: #fff; color: #333; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Authorize MCP Client</h1>
+    <p class="origin-host"><strong>${esc(host)}</strong> wants to act as you.</p>
+    <p>Origin: <code class="client-origin">${esc(input.origin)}</code></p>
+    <p class="note">This is a third-party application. Factory Console, Garrison, Web Chat, and Connect are first-party apps and are not shown this screen.</p>
+    <div class="meta">
+      <div><strong>Application:</strong> ${esc(input.clientName)}</div>
+      <div><strong>User:</strong> ${esc(input.principalId)}</div>
+      <div><strong>Permissions:</strong></div>
+      <ul class="scope-list">${items}</ul>
+    </div>
+    <form method="POST" action="/authorize">
+      <input type="hidden" name="consent_nonce" value="${esc(input.consentNonce)}">
+      <input type="hidden" name="csrf_token" value="${esc(input.csrfToken)}">
+      <div class="btn-row">
+        <button type="submit" name="decision" value="deny" class="secondary">Deny</button>
+        <button type="submit" name="decision" value="approve" class="primary">Approve</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>`;
+}
+
+function issueAuthorizationCode(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  store: McpOAuthStore,
+  input: {
+    clientId: string;
+    principalId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    codeChallengeMethod: string;
+    scope: string;
+    resource?: string;
+    sessionSid?: string;
+    clientState?: string;
+    issuer: string;
+  },
+): boolean {
+  const code = store.storeAuthCode({
+    clientId: input.clientId,
+    principalId: input.principalId,
+    redirectUri: input.redirectUri,
+    codeChallenge: input.codeChallenge,
+    codeChallengeMethod: input.codeChallengeMethod,
+    scope: input.scope,
+    resource: input.resource,
+    amr: amrOf(state, req),
+    sessionSid: input.sessionSid,
+  });
+  const targetUrl = new URL(input.redirectUri);
+  targetUrl.searchParams.set('code', code);
+  if (input.clientState) targetUrl.searchParams.set('state', input.clientState);
+  targetUrl.searchParams.set('iss', input.issuer);
+  res.writeHead(302, { location: targetUrl.toString(), 'cache-control': 'no-store' });
+  res.end();
+  return true;
 }
 
 async function handleAuthorizeGet(
@@ -840,7 +1051,7 @@ async function handleAuthorizeGet(
   let codeChallenge = q.get('code_challenge');
   let codeChallengeMethod = q.get('code_challenge_method');
   let clientState = q.get('state') ?? undefined;
-  let scope = q.get('scope') ?? 'mcp:full';
+  let scope: string | undefined = q.get('scope') ?? undefined;
   let resourceList = resourceParams(q.getAll('resource'));
 
   const oauthReq = q.get('oauth_req');
@@ -853,7 +1064,7 @@ async function handleAuthorizeGet(
       codeChallenge = pending.codeChallenge;
       codeChallengeMethod = pending.codeChallengeMethod;
       clientState = pending.state;
-      scope = pending.scope ?? 'mcp:full';
+      scope = pending.scope;
       resourceList = pending.resource ? pending.resource.split(/\s+/).filter(Boolean) : [];
     }
   }
@@ -921,6 +1132,21 @@ async function handleAuthorizeGet(
     resource = canon.audiences.join(' ');
   }
 
+  try {
+    await store.reload();
+  } catch {
+    return json(res, 503, { error: 'server_error', message: 'Sign-in state could not be read' }), true;
+  }
+  client = store.getClient(client.clientId) ?? client;
+  if (client.blocked) {
+    return redirectOAuthError(res, redirectUri, issuer, clientState, 'access_denied', 'This application has been blocked by an administrator');
+  }
+  const normalized = normalizeRequestedScopes(scope, client.firstParty === true);
+  if (!normalized.ok) {
+    return redirectOAuthError(res, redirectUri, issuer, clientState, 'invalid_scope', 'Requested scope is unknown or not available to this application');
+  }
+  scope = normalized.scope;
+
   // Check live session
   const email = sessionEmail(state, req);
   if (!email) {
@@ -956,9 +1182,16 @@ async function handleAuthorizeGet(
     return true;
   }
 
-  // If already explicitly consented for this client and scope, issue code directly
-  if (store.hasConsent(principalId, client.clientId, scope)) {
-    const code = store.storeAuthCode({
+  const sessionSid = state.sessions?.get(cookieValue(req, SESSION_COOKIE))?.sid;
+  // First-party heads skip the consent screen. A third-party client never does, even when the person is already signed in.
+  if (client.firstParty === true) {
+    await store.saveConsent({
+      principalId,
+      clientId: client.clientId,
+      clientName: client.clientName,
+      scope,
+    });
+    return issueAuthorizationCode(state, req, res, store, {
       clientId: client.clientId,
       principalId,
       redirectUri,
@@ -966,19 +1199,28 @@ async function handleAuthorizeGet(
       codeChallengeMethod,
       scope,
       resource,
-      amr: amrOf(state, req),
-      sessionSid: state.sessions?.get(cookieValue(req, SESSION_COOKIE))?.sid,
+      sessionSid,
+      clientState,
+      issuer,
     });
-    const targetUrl = new URL(redirectUri);
-    targetUrl.searchParams.set('code', code);
-    if (clientState) targetUrl.searchParams.set('state', clientState);
-    targetUrl.searchParams.set('iss', issuer);
-    res.writeHead(302, { location: targetUrl.toString(), 'cache-control': 'no-store' });
-    res.end();
-    return true;
   }
 
-  // Mandatory per-client consent screen (never auto-approve unconsented client!)
+  if (store.hasConsent(principalId, client.clientId, scope)) {
+    return issueAuthorizationCode(state, req, res, store, {
+      clientId: client.clientId,
+      principalId,
+      redirectUri,
+      codeChallenge,
+      codeChallengeMethod,
+      scope,
+      resource,
+      sessionSid,
+      clientState,
+      issuer,
+    });
+  }
+
+  // Mandatory per-client consent screen (never auto-approve an unconsented third-party client).
   let redirectOrigin = redirectUri;
   try {
     redirectOrigin = new URL(redirectUri).origin;
@@ -999,47 +1241,14 @@ async function handleAuthorizeGet(
     principalId,
   });
 
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Connect MCP Application</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1.5rem; color: #111; line-height: 1.5; }
-    .box { border: 1px solid #ccc; border-radius: 8px; padding: 1.5rem; background: #fafafa; }
-    h1 { font-size: 1.4rem; margin-top: 0; }
-    .meta { margin: 1rem 0; font-size: 0.95rem; }
-    .meta strong { display: inline-block; width: 6rem; color: #555; }
-    .scope-box { background: #eee; padding: 0.5rem 0.75rem; border-radius: 4px; font-family: monospace; font-size: 0.85rem; margin-top: 0.25rem; word-break: break-all; }
-    .btn-row { display: flex; gap: 1rem; margin-top: 1.5rem; }
-    button { flex: 1; padding: 0.6rem 1rem; font-size: 1rem; border-radius: 6px; cursor: pointer; border: 1px solid #888; }
-    button.primary { background: #0066cc; color: #fff; border-color: #0055aa; font-weight: 600; }
-    button.secondary { background: #fff; color: #333; }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <h1>Authorize MCP Client</h1>
-    <p>The application below wants access to your Agent Factory MCP tools:</p>
-    <div class="meta">
-      <div><strong>Application:</strong> ${esc(client.clientName)}</div>
-      <div><strong>Redirect Host:</strong> <code>${esc(redirectOrigin)}</code></div>
-      <div><strong>User:</strong> ${esc(principalId)}</div>
-      <div><strong>Permissions:</strong></div>
-      <div class="scope-box">${esc(scope)}</div>
-    </div>
-    <form method="POST" action="/authorize">
-      <input type="hidden" name="consent_nonce" value="${esc(consentNonce)}">
-      <input type="hidden" name="csrf_token" value="${esc(csrfToken)}">
-      <div class="btn-row">
-        <button type="submit" name="decision" value="deny" class="secondary">Deny</button>
-        <button type="submit" name="decision" value="approve" class="primary">Approve</button>
-      </div>
-    </form>
-  </div>
-</body>
-</html>`;
+  const html = consentPageHtml({
+    clientName: client.clientName,
+    origin: redirectOrigin,
+    principalId,
+    scopes: scopeViews(scope.split(/\s+/)),
+    consentNonce,
+    csrfToken,
+  });
 
   res.writeHead(200, {
     'content-type': 'text/html; charset=utf-8',
@@ -1113,9 +1322,17 @@ async function handleAuthorizePost(
   }
 
   // Approved
+  try {
+    await store.reload();
+  } catch {
+    return json(res, 503, { error: 'server_error', message: 'Sign-in state could not be read' }), true;
+  }
   const client = store.getClient(pending.clientId);
+  if (client?.blocked) {
+    return redirectOAuthError(res, pending.redirectUri, issuer, pending.state, 'access_denied', 'This application has been blocked by an administrator');
+  }
   const clientName = client?.clientName ?? pending.clientId;
-  const scope = pending.scope ?? 'mcp:full';
+  const scope = pending.scope ?? DEFAULT_OAUTH_SCOPE;
 
   await store.saveConsent({
     principalId,
@@ -1385,7 +1602,15 @@ async function handleTokenPost(
       return json(res, 400, { error: 'invalid_target', error_description: 'resource is not an authorized api or mcp audience' }), true;
     }
 
+    try {
+      await store.reload();
+    } catch {
+      return json(res, 503, { error: 'server_error', error_description: 'Sign-in state could not be read' }), true;
+    }
     const client = store.getClient(clientId);
+    if (client?.blocked) {
+      return json(res, 400, { error: 'invalid_grant', error_description: 'This application has been blocked by an administrator' }), true;
+    }
     const clientName = client?.clientName ?? clientId;
     if (auth.sessionSid) {
       try {
@@ -1476,6 +1701,11 @@ async function handleTokenPost(
     if (!rec || rec.familyRevoked || Date.parse(rec.expiresAt) <= Date.now()) {
       return json(res, 400, { error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }), true;
     }
+    if (store.getClient(rec.clientId)?.blocked) {
+      const families = await store.revokeFamiliesForClient(rec.principalId, rec.clientId, 'blocked');
+      await applyFamilyRevocation(state, families, 'client-blocked');
+      return json(res, 400, { error: 'invalid_grant', error_description: 'This application has been blocked by an administrator' }), true;
+    }
 
     if (!state.keys) {
       return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
@@ -1540,7 +1770,7 @@ async function handleTokenPost(
       token_type: 'Bearer',
       expires_in: minted.expiresIn,
       refresh_token: newRefreshToken,
-      scope: rec.scope ?? 'mcp:full',
+      scope: rec.scope ?? DEFAULT_OAUTH_SCOPE,
     }), true;
   }
 
@@ -1634,15 +1864,77 @@ async function handleConsentsList(
   const ownerQ = new URL(req.url ?? '/', 'http://x').searchParams.get('owner')?.toLowerCase();
   const owner = isAdmin && ownerQ ? ownerQ : who.principal.actor;
 
-  const consents = state.mcpOAuthStore!.listConsents(owner);
+  const store = state.mcpOAuthStore!;
+  const consents = store.listConsents(owner);
   return json(res, 200, {
-    consents: consents.map((c) => ({
-      clientId: c.clientId,
-      clientName: c.clientName,
-      scope: c.scope,
-      createdAt: c.createdAt,
-      updatedAt: c.updatedAt,
-    })),
+    consents: consents.map((c) => {
+      const client = store.getClient(c.clientId);
+      const origin = client ? clientOriginOf(client.redirectUris[0] ?? '') : undefined;
+      const scopes = scopeViews(c.scope.split(/\s+/));
+      return {
+        clientId: c.clientId,
+        clientName: c.clientName,
+        scope: c.scope,
+        scopes,
+        ...(origin ? { origin } : {}),
+        firstParty: client?.firstParty === true,
+        blocked: client?.blocked === true,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+      };
+    }),
+  }), true;
+}
+
+async function handleClientAdminPut(
+  state: FactoryState,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<boolean> {
+  const who = await identify(req, state);
+  if (!who.ok) return json(res, 401, { error: 'unauthorized' }), true;
+  if (who.principal.keyId) {
+    return json(res, 403, { error: 'forbidden', message: 'API keys cannot manage OAuth clients; sign in' }), true;
+  }
+  if (!actorIsAdmin(state, who.principal.actor, who.principal.roles)) {
+    return json(res, 403, { error: 'forbidden', message: 'Only an admin can register or block a client' }), true;
+  }
+  const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+  const clientId = typeof body.clientId === 'string' ? body.clientId.trim() : '';
+  const clientName = typeof body.clientName === 'string' && body.clientName.trim() ? body.clientName.trim().slice(0, 120) : clientId;
+  const uris = body.redirectUris;
+  if (!clientId || clientId.length > 300) {
+    return json(res, 400, { error: 'invalid_client', message: 'clientId is required' }), true;
+  }
+  if (!Array.isArray(uris) || uris.length === 0 || uris.some((u) => typeof u !== 'string' || !isValidRedirectUri(u))) {
+    return json(res, 400, { error: 'invalid_redirect_uri', message: 'redirectUris must be valid https, loopback http, or desktop URIs' }), true;
+  }
+  const firstParty = typeof body.firstParty === 'boolean' ? body.firstParty : undefined;
+  const blocked = typeof body.blocked === 'boolean' ? body.blocked : undefined;
+  const { record, families } = await state.mcpOAuthStore!.upsertAdminClient({
+    clientId,
+    clientName,
+    redirectUris: uris.filter((u): u is string => typeof u === 'string'),
+    firstParty,
+    blocked,
+  });
+  if (families.length > 0) await applyFamilyRevocation(state, families, 'client-blocked');
+  state.ledger.append({
+    timestamp: new Date().toISOString(),
+    agentId: 'control-plane',
+    type: 'action',
+    action: blocked ? `OAUTH_CLIENT_BLOCKED:${clientId}` : `OAUTH_CLIENT_UPDATED:${clientId}`,
+    actor: who.principal.actor,
+    subject: clientId,
+  });
+  return json(res, 200, {
+    client: {
+      clientId: record.clientId,
+      clientName: record.clientName,
+      redirectUris: record.redirectUris,
+      firstParty: record.firstParty === true,
+      blocked: record.blocked === true,
+    },
   }), true;
 }
 
@@ -1725,11 +2017,4 @@ export function isPrivateOrInternalHost(rawHostname: string): boolean {
   return false;
 }
 
-export function mapOAuthScopeToKeyScopes(scopeStr?: string): KeyScopes | undefined {
-  if (!scopeStr || scopeStr.trim() === '' || scopeStr.trim() === 'mcp:full') return undefined;
-  const parts = scopeStr.split(/\s+/).filter(Boolean);
-  if (parts.length === 0 || parts.includes('mcp:full')) return undefined;
-  const privs = new Set(parts);
-  privs.add('mcp.use');
-  return { privileges: Array.from(privs) };
-}
+export { mapOAuthScopeToKeyScopes } from './oauth-scopes.js';

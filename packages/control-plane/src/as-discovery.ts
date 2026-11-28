@@ -1,6 +1,7 @@
 // Front-door auth Phase 1 Slice 1: AS JWKS + OIDC discovery (docs/design/front-door-auth.md §7 / §10 item 4).
 import type http from 'node:http';
 import {
+  FACTORY_SCOPES,
   JWKS_CACHE_CONTROL,
   generateEphemeralAsKey,
   publicJwksOf,
@@ -63,7 +64,7 @@ export function buildAsMetadata(issuer: string): Record<string, unknown> {
     authorization_response_iss_parameter_supported: true,
     id_token_signing_alg_values_supported: ['ES256'],
     subject_types_supported: ['public'],
-    scopes_supported: ['mcp:full'],
+    scopes_supported: [...FACTORY_SCOPES],
   };
 }
 

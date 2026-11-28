@@ -238,6 +238,8 @@ const idpConfig = await IdpConfigStore.open(
 const mcpOAuthStore = await McpOAuthStore.open(
   docBackendFromUri<McpOAuthDoc>(process.env.FACTORY_MCP_OAUTH_STORE_URI, join(DATA_DIR, 'auth', 'mcp-oauth')),
 );
+const factoryOrigin = process.env.FACTORY_FACTORY_ORIGIN?.trim();
+if (factoryOrigin) await mcpOAuthStore.ensureFirstPartyHeads(factoryOrigin);
 const sessions = await SessionStore.open(
   docBackendFromUri<SessionsDoc>(process.env.FACTORY_SESSIONS_STORE_URI, join(DATA_DIR, 'auth', 'sessions')),
 );

@@ -779,7 +779,8 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     );
     assert.equal(authRes.status, 200);
     const html = await authRes.text();
-    assert.ok(html.includes('agents.read'), 'Consent screen displays requested scope agents.read');
+    assert.ok(html.includes('agents:read'), 'Consent screen displays requested scope agents:read');
+    assert.ok(html.includes('See your agents and their status'), 'Consent screen names the scope in plain language');
 
     const { nonce, csrfToken } = extractConsentForm(html);
     const approve = await postForm('/authorize', {
@@ -803,7 +804,7 @@ describe('TSK-339: MCP OAuth 2.1 AS, RFC 9728 Discovery, Consent, Multi-Client D
     });
     assert.equal(tokRes.status, 200);
     const tokData = (await tokRes.json()) as any;
-    assert.equal(tokData.scope, 'agents.read');
+    assert.equal(tokData.scope, 'agents:read');
     const fkAt = tokData.access_token;
 
     // 1) tools/list with this token should only include tools requiring agents.read or mcp.use
