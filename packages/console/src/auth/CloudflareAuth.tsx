@@ -71,10 +71,17 @@ export const CloudflareAuthProvider: React.FC<{ children: React.ReactNode }> = (
     const onStale = () => {
       void loadIdentity();
     };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void loadIdentity();
+    };
     window.addEventListener('factory-grants-stale', onStale);
+    document.addEventListener('visibilitychange', onVisible);
+    const interval = window.setInterval(onVisible, 60_000);
     return () => {
       cancelled = true;
       window.removeEventListener('factory-grants-stale', onStale);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.clearInterval(interval);
     };
   }, []);
 

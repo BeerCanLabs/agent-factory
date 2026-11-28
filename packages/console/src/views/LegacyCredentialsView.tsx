@@ -19,10 +19,17 @@ export const LegacyCredentialsView: React.FC = () => {
         });
     };
     load();
-    window.addEventListener('factory-grants-stale', load);
+    const refresh = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    window.addEventListener('factory-grants-stale', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    const interval = window.setInterval(refresh, 60_000);
     return () => {
       cancelled = true;
-      window.removeEventListener('factory-grants-stale', load);
+      window.removeEventListener('factory-grants-stale', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      window.clearInterval(interval);
     };
   }, []);
 

@@ -82,8 +82,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
     headers,
   });
-  // D-5: the factory sets this when the caller's grants changed after the token was issued. The console reloads whoami.
-  if (res.headers.get('x-factory-grants-stale') === '1' && typeof window !== 'undefined') {
+  // D-5: reload whoami when grants moved (JWT hint) or a call was refused, including a session cookie that carries no grants_v.
+  if (
+    typeof window !== 'undefined' &&
+    (res.headers.get('x-factory-grants-stale') === '1' || res.status === 403)
+  ) {
     window.dispatchEvent(new Event('factory-grants-stale'));
   }
 

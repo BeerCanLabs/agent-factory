@@ -33,6 +33,13 @@ it('S9: a stale grants header asks the console to reload whoami', async () => {
   })) as typeof fetch;
   await factoryApi.legacyCredentialUse();
   assert.deepEqual(events, ['factory-grants-stale']);
+  events.length = 0;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'forbidden' }), {
+    status: 403,
+    headers: { 'content-type': 'application/json' },
+  })) as typeof fetch;
+  await factoryApi.legacyCredentialUse().catch(() => undefined);
+  assert.deepEqual(events, ['factory-grants-stale']);
   if (previous) (globalThis as { window?: typeof previous }).window = previous;
   else delete (globalThis as { window?: unknown }).window;
 });
