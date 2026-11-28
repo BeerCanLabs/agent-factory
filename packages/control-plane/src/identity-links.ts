@@ -4,8 +4,11 @@
 // authentication data: it holds no authority by itself, and the Bouncer still decides what the person may do.
 //
 //   GET    /api/v1/identity-links                    every link (admin)
-//   PUT    /api/v1/identity-links/:provider/:id      `{ actor }`: link, or replace the link (admin; ledgered)
+//   PUT    /api/v1/identity-links/:provider/:id      `{ actor }` or `{ principalName }`: link, or replace the link (admin; ledgered)
 //   DELETE /api/v1/identity-links/:provider/:id      unlink (admin; ledgered)
+//
+// `actor` is the legacy IdP string (`cloudflare:`, `oidc:`, `token:`, `user:`) and is stored as given.
+// `principalName` is the factory person's friendly name (#439). The stored actor is that principal's id.
 import type http from 'node:http';
 import type { Role } from '@beercanlabs/factory-auth';
 import { ROLES } from '@beercanlabs/factory-auth';
@@ -15,6 +18,8 @@ import {
   PRINCIPAL_ACTOR,
   PROVIDERS,
   isProvider,
+  matchPrincipalsByDisplayName,
+  normalizeActorToPrincipal,
   parseActor,
   type IdentityLink,
   type IdentityProvider,
@@ -27,10 +32,74 @@ export {
   PRINCIPAL_ACTOR,
   PROVIDERS,
   isProvider,
+  matchPrincipalsByDisplayName,
   parseActor,
   type IdentityLink,
   type IdentityProvider,
 };
+
+const ACTOR_HINT = 'actor must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...';
+
+/** The actor a link stores: the legacy string, or the principal id a friendly name resolved to. */
+export function actorForIdentityLink(
+  state: FactoryState,
+  body: Record<string, unknown>,
+): { ok: true; actor: string } | { ok: false; status: number; body: Record<string, unknown> } {
+  const named = body.principalName !== undefined && body.principalName !== null;
+  if (!named) {
+    const actor = parseActor(body.actor);
+    if (!actor) {
+      // A body that still sends `actor` keeps the original error. Only a body that omits it mentions principalName.
+      const error = body.actor !== undefined && body.actor !== null
+        ? ACTOR_HINT
+        : `${ACTOR_HINT}, or principalName must be the person's friendly name`;
+      return { ok: false, status: 400, body: { error } };
+    }
+    return { ok: true, actor };
+  }
+  const store = state.principals;
+  if (!store) return { ok: false, status: 503, body: { error: 'principal_store_unavailable' } };
+  let records: { id: string; displayName: string }[];
+  try {
+    records = store.list();
+  } catch {
+    return { ok: false, status: 503, body: { error: 'principal_store_unavailable' } };
+  }
+  const matched = matchPrincipalsByDisplayName(records, body.principalName);
+  if (!matched.ok) {
+    return {
+      ok: false,
+      status: matched.status,
+      body: {
+        error: matched.error,
+        message: matched.message,
+        ...(matched.matches ? { matches: matched.matches } : {}),
+      },
+    };
+  }
+  if (body.actor !== undefined && body.actor !== null) {
+    const parsed = parseActor(body.actor);
+    if (!parsed) return { ok: false, status: 400, body: { error: ACTOR_HINT } };
+    let normalized: string;
+    try {
+      normalized = normalizeActorToPrincipal(parsed, store);
+    } catch {
+      return { ok: false, status: 400, body: { error: ACTOR_HINT } };
+    }
+    if (normalized !== matched.match.id) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: 'actor_name_mismatch',
+          message: 'actor does not name the same person as principalName',
+          principalId: matched.match.id,
+        },
+      };
+    }
+  }
+  return { ok: true, actor: matched.match.id };
+}
 
 const EXTERNAL_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const AGENT_ID_REGEX = /^[a-z0-9][a-z0-9-_]{0,63}$/i;
@@ -85,8 +154,9 @@ export async function handleIdentityLinks(state: FactoryState, req: http.Incomin
     return true;
   }
   const body = await readJson(req);
-  const actor = parseActor(body.actor);
-  if (!actor) return json(res, 400, { error: 'actor must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...' }), true;
+  const resolved = actorForIdentityLink(state, body);
+  if (!resolved.ok) return json(res, resolved.status, resolved.body), true;
+  const actor = resolved.actor;
   let name: string | undefined;
   if (body.name !== undefined && body.name !== null) {
     if (typeof body.name !== 'string' || body.name.length > 128) {

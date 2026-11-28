@@ -17,6 +17,8 @@ export type {
   IdentityProvider,
   IngressAuthorizeRequest,
   IngressAuthorizeResult,
+  PrincipalNameMatch,
+  PrincipalNameResolution,
 } from './identity.js';
 export {
   IdentityLinkStore,
@@ -25,6 +27,7 @@ export {
   authorizeIngress,
   directCaller,
   isProvider,
+  matchPrincipalsByDisplayName,
   normalizeActorToPrincipal,
   normalizeGroupMembersToPrincipals,
   normalizeIdentityLink,

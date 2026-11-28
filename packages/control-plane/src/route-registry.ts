@@ -1132,11 +1132,12 @@ const SubscriptionUpdateBodySchema: JsonSchemaObject = jsonSchema.object({
 }, { required: ['name'] });
 
 const IdentityLinkBodySchema: JsonSchemaObject = jsonSchema.object({
-  actor: jsonSchema.string({ description: 'Internal principal actor string' }),
+  actor: jsonSchema.string({ description: 'Legacy principal actor (cloudflare:, oidc:, token:, or user:). Stored as given. Required when principalName is omitted.' }),
+  principalName: jsonSchema.string({ description: "Friendly name of the factory person (exact display name, case-insensitive). The link is stored as that principal's id. Required when actor is omitted. An ambiguous name is refused." }),
   name: jsonSchema.string({ description: 'External display name' }),
   roles: jsonSchema.array(jsonSchema.string(), { description: 'Global roles mapped to this identity' }),
   agentRoles: jsonSchema.object({}, { description: 'Agent-scoped role mappings' }),
-}, { required: ['actor'] });
+}, { description: 'Send actor, principalName, or both when they name the same person.' });
 
 const ApiKeyCreateBodySchema: JsonSchemaObject = jsonSchema.object({
   name: jsonSchema.string({ description: 'Human-readable description or label' }),
@@ -4595,6 +4596,7 @@ export const RAW_CONTROL_PLANE_ROUTES: readonly ControlPlaneRoute[] = [
     method: "PUT",
     pattern: "/api/v1/identity-links/:provider/:id",
     summary: "Create or update identity link",
+    description: "Link a channel account to a legacy actor, or to a factory person by friendly name (principalName). Admin only. Ledgered.",
     staff: "bouncer",
     mcpExposure: "tool-confirm",
     toolset: "access",

@@ -15,6 +15,7 @@ import { createFactoryServer, type FactoryState } from './app.js';
 import { MemoryRunStore, noopRuntime } from '@beercanlabs/factory-property-manager';
 import { PolicyStore } from '@beercanlabs/factory-gatekeeper/policy';
 import { IdentityLinkStore } from './identity-links.js';
+import { PrincipalStore } from '@beercanlabs/factory-bouncer';
 
 const ADMIN = 'admin-identity-links';
 const OPERATOR = 'operator-identity-links';
@@ -357,6 +358,213 @@ describe('the identity link store keeps memory and disk in step', () => {
       assert.equal(again.list().length, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('channel identity linked to a principal by name (#439)', { concurrency: false }, () => {
+  let cp: http.Server;
+  let port = 0;
+  let dir: string;
+  let ledger: MemoryLedger;
+  let state: FactoryState;
+  let principals: PrincipalStore;
+  const DISCORD = '555001122334455667';
+  const SLACK = 'U0DALE123';
+  const call = (path: string, method = 'GET', token?: string, body?: unknown) =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: body === undefined || method === 'GET' || method === 'DELETE' ? undefined : JSON.stringify(body),
+    }).then(async (res) => {
+      const text = await res.text();
+      return { status: res.status, body: text ? JSON.parse(text) : null };
+    });
+  const mcp = (token: string | undefined, payload: unknown) => call('/mcp/x/access', 'POST', token, payload);
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cp-identity-by-name-'));
+    ledger = new MemoryLedger();
+    principals = PrincipalStore.inMemory();
+    await principals.create({ id: 'user:dale', displayName: 'Dale', emails: ['dale@example.com'], by: 'user:admin' });
+    await principals.create({ id: 'user:dale.sackrider', displayName: 'Dale Sackrider', emails: ['dale.sackrider@gmail.com'], by: 'user:admin' });
+    await principals.create({ id: 'user:sam.a', displayName: 'Sam', emails: ['sam.a@example.com'], by: 'user:admin' });
+    await principals.create({ id: 'user:sam.b', displayName: 'Sam', emails: ['sam.b@example.com'], by: 'user:admin' });
+    state = {
+      agents: new Map(),
+      ledger,
+      auth: bearerAuth([
+        { name: 'admin', token: ADMIN, roles: ['admin'] },
+        { name: 'operator', token: OPERATOR, roles: ['operator'] },
+      ]),
+      version: '0.1.0',
+      providers: [envProvider({})],
+      runtime: noopRuntime(),
+      runs: new MemoryRunStore(),
+      approvals: new ApprovalStore(),
+      policies: new PolicyStore(),
+      spend: new SpendTracker(),
+      identityLinks: new IdentityLinkStore(join(dir, 'links')),
+      principals,
+      secretValues: new Set(),
+      idleMs: 0,
+      idleTimers: new Map(),
+    } as unknown as FactoryState;
+    cp = createFactoryServer(state);
+    port = await listen(cp);
+  });
+
+  after(() => {
+    cp.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('links Discord and Slack accounts to a person by friendly name and unlinks them, ledgered, with no external id in the row', async () => {
+    const before = ledger.query({ agentId: 'factory' }).length;
+    const discord = await call(`/api/v1/identity-links/discord/${DISCORD}`, 'PUT', ADMIN, { principalName: '  dale ' });
+    assert.equal(discord.status, 200, JSON.stringify(discord.body));
+    assert.equal(discord.body.actor, 'user:dale');
+    assert.equal(discord.body.provider, 'discord');
+    assert.equal(discord.body.roles, undefined);
+    assert.equal(discord.body.name, undefined);
+    assert.equal(state.identityLinks!.resolve('discord', DISCORD), 'user:dale');
+    const again = await call(`/api/v1/identity-links/discord/${DISCORD}`, 'PUT', ADMIN, { principalName: 'Dale' });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.actor, 'user:dale');
+
+    const listed = await mcp(ADMIN, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    assert.equal(listed.status, 200, JSON.stringify(listed.body));
+    const tool = listed.body.result.tools.find((t: { name: string }) => t.name === 'set_identity_link');
+    const unlinkTool = listed.body.result.tools.find((t: { name: string }) => t.name === 'delete_identity_link');
+    assert.ok(tool, 'set_identity_link is on the access toolset');
+    assert.ok(tool.inputSchema.properties.principalName);
+    assert.ok(!tool.inputSchema.required?.includes('actor'));
+    assert.ok(tool.inputSchema.required?.includes('provider'));
+    assert.ok(unlinkTool);
+
+    const slack = await mcp(ADMIN, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'set_identity_link', arguments: { provider: 'slack', id: SLACK, principalName: 'Dale' } },
+    });
+    assert.equal(slack.status, 200, JSON.stringify(slack.body));
+    assert.equal(slack.body.result?.isError, undefined);
+    assert.equal(slack.body.result.structuredContent.actor, 'user:dale');
+    assert.equal(state.identityLinks!.resolve('slack', SLACK), 'user:dale');
+
+    const dropDiscord = await mcp(ADMIN, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'delete_identity_link', arguments: { provider: 'discord', id: DISCORD } },
+    });
+    assert.equal(dropDiscord.body.result?.isError, undefined, JSON.stringify(dropDiscord.body));
+    assert.equal(dropDiscord.body.result.structuredContent.ok, true);
+    assert.equal(state.identityLinks!.resolve('discord', DISCORD), undefined);
+
+    const dropSlack = await call(`/api/v1/identity-links/slack/${SLACK}`, 'DELETE', ADMIN);
+    assert.equal(dropSlack.status, 200, JSON.stringify(dropSlack.body));
+    assert.equal(state.identityLinks!.resolve('slack', SLACK), undefined);
+
+    const rows = ledger.query({ agentId: 'factory' }).slice(before);
+    assert.deepEqual(rows.map((r) => r.action), ['IDENTITY_LINKED', 'IDENTITY_LINKED', 'IDENTITY_UNLINKED', 'IDENTITY_UNLINKED']);
+    assert.ok(rows.every((r) => r.actor === 'token:admin' && /^[0-9a-f]{64}$/.test(String(r.payloadSha256))));
+    const dumped = JSON.stringify(rows);
+    assert.equal(dumped.includes(DISCORD), false);
+    assert.equal(dumped.includes(SLACK), false);
+  });
+
+  it('keeps an actor-only link as the legacy IdP string, even when that email belongs to a principal', async () => {
+    const put = await call('/api/v1/identity-links/discord/legacy-dale', 'PUT', ADMIN, { actor: 'Cloudflare:Dale@Example.com' });
+    assert.equal(put.status, 200, JSON.stringify(put.body));
+    assert.equal(put.body.actor, 'cloudflare:dale@example.com');
+    assert.equal(state.identityLinks!.resolve('discord', 'legacy-dale'), 'cloudflare:dale@example.com');
+    const agreed = await call('/api/v1/identity-links/slack/agreed-dale', 'PUT', ADMIN, {
+      actor: 'cloudflare:dale@example.com',
+      principalName: 'Dale',
+    });
+    assert.equal(agreed.status, 200, JSON.stringify(agreed.body));
+    assert.equal(agreed.body.actor, 'user:dale');
+    await call('/api/v1/identity-links/discord/legacy-dale', 'DELETE', ADMIN);
+    await call('/api/v1/identity-links/slack/agreed-dale', 'DELETE', ADMIN);
+  });
+
+  it('refuses a missing, ambiguous, or disagreeing name, and a longer name is a different person', async () => {
+    const before = ledger.query({ agentId: 'factory' }).length;
+    const missing = await call('/api/v1/identity-links/discord/no-such', 'PUT', ADMIN, { principalName: 'Nobody' });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error, 'principal_not_found');
+    const longer = await call('/api/v1/identity-links/discord/no-such', 'PUT', ADMIN, { principalName: 'Dale' });
+    assert.equal(longer.status, 200);
+    assert.equal(longer.body.actor, 'user:dale');
+    assert.notEqual(state.identityLinks!.resolve('discord', 'no-such'), 'user:dale.sackrider');
+    await call('/api/v1/identity-links/discord/no-such', 'DELETE', ADMIN);
+
+    const ambiguous = await call('/api/v1/identity-links/slack/sam-acct', 'PUT', ADMIN, { principalName: 'Sam' });
+    assert.equal(ambiguous.status, 409);
+    assert.equal(ambiguous.body.error, 'ambiguous_principal');
+    assert.deepEqual(ambiguous.body.matches.map((m: { id: string }) => m.id), ['user:sam.a', 'user:sam.b']);
+    assert.equal(state.identityLinks!.resolve('slack', 'sam-acct'), undefined);
+
+    const mismatch = await call('/api/v1/identity-links/discord/mismatch', 'PUT', ADMIN, {
+      principalName: 'Dale',
+      actor: 'token:someone',
+    });
+    assert.equal(mismatch.status, 400);
+    assert.equal(mismatch.body.error, 'actor_name_mismatch');
+    assert.equal(state.identityLinks!.resolve('discord', 'mismatch'), undefined);
+
+    const neither = await call('/api/v1/identity-links/discord/neither', 'PUT', ADMIN, {});
+    assert.equal(neither.status, 400);
+    assert.match(neither.body.error, /principalName/);
+    const badActor = await call('/api/v1/identity-links/discord/neither', 'PUT', ADMIN, { actor: 'alice' });
+    assert.equal(badActor.status, 400);
+    assert.equal(badActor.body.error, 'actor must be a principal actor such as cloudflare:alice@example.com, oidc:... or token:...');
+    const rows = ledger.query({ agentId: 'factory' }).slice(before);
+    assert.deepEqual(rows.map((r) => r.action), ['IDENTITY_LINKED', 'IDENTITY_UNLINKED']);
+  });
+
+  it('only an admin may link or unlink by name, on the API and the MCP', async () => {
+    const rest = await call('/api/v1/identity-links/discord/priv', 'PUT', OPERATOR, { principalName: 'Dale' });
+    assert.equal(rest.status, 403);
+    assert.equal(rest.body.required, 'admin');
+    assert.equal((await call('/api/v1/identity-links/discord/priv', 'PUT', undefined, { principalName: 'Dale' })).status, 401);
+    assert.equal((await call('/api/v1/identity-links/discord/priv', 'DELETE', OPERATOR)).status, 403);
+    const denied = await mcp(OPERATOR, {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: { name: 'set_identity_link', arguments: { provider: 'discord', id: 'priv', principalName: 'Dale' } },
+    });
+    assert.equal(denied.body.result.isError, true);
+    assert.equal(denied.body.result.structuredContent.required, 'admin');
+    const deniedUnlink = await mcp(OPERATOR, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: { name: 'delete_identity_link', arguments: { provider: 'discord', id: 'priv' } },
+    });
+    assert.equal(deniedUnlink.body.result.isError, true);
+    assert.equal(deniedUnlink.body.result.structuredContent.required, 'admin');
+    assert.equal(state.identityLinks!.resolve('discord', 'priv'), undefined);
+  });
+
+  it('refuses a name link when the principal store is down', async () => {
+    const saved = state.principals;
+    const sick = PrincipalStore.inMemory();
+    sick.markUnhealthy(new Error('down'));
+    state.principals = sick;
+    try {
+      const down = await call(`/api/v1/identity-links/discord/${DISCORD}`, 'PUT', ADMIN, { principalName: 'Dale' });
+      assert.equal(down.status, 503);
+      assert.equal(down.body.error, 'principal_store_unavailable');
+      const legacy = await call('/api/v1/identity-links/discord/still-legacy', 'PUT', ADMIN, { actor: 'token:carol' });
+      assert.equal(legacy.status, 200);
+      assert.equal(legacy.body.actor, 'token:carol');
+      await call('/api/v1/identity-links/discord/still-legacy', 'DELETE', ADMIN);
+    } finally {
+      state.principals = saved;
     }
   });
 });
