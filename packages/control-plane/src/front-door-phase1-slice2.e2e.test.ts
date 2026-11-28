@@ -330,8 +330,10 @@ describe('front-door Phase 1 Slice 2: JWT access tokens', { concurrency: false }
   it('stops accepting a JWT when its key anchor is revoked', async () => {
     const tokens = await issue(API);
     const sid = String(decodeJwt(tokens.access_token).sid);
+    const family = state.mcpOAuthStore!.liveFamily(sid);
+    assert.ok(family, 'Slice 3: sid is the refresh family');
     assert.equal((await call('/api/v1/whoami', { authorization: `Bearer ${tokens.access_token}` })).status, 200);
-    await state.keys!.revoke(sid, { by: 'user:stephanie' });
+    await state.keys!.revoke(family.keyId, { by: 'user:stephanie' });
     const after = await call('/api/v1/whoami', { authorization: `Bearer ${tokens.access_token}` });
     assert.equal(after.status, 401);
     assert.equal(after.body.error, 'invalid_token');

@@ -1,8 +1,65 @@
 import React, { useEffect, useState } from 'react';
-import { factoryApi, type GrantView, type PrincipalView } from '../api/client.js';
+import { factoryApi, type AccountSession, type GrantView, type PrincipalView, type RefreshFamily } from '../api/client.js';
 import { useAuth } from '../auth/CloudflareAuth.js';
 import { validActAs } from '../auth/access-gate.js';
 import { AGENT_ROLES, FLEET_ROLES, filterAccess, grantsToCreate, groupGrants } from './people-model.js';
+import { sessionLifetimeCopy } from './keys-model.js';
+
+/** Admin list/revoke of one person's sessions and refresh families (D-4, #436). */
+function PersonSessions({ owner }: { owner: string }) {
+  const [open, setOpen] = useState(false);
+  const [sessions, setSessions] = useState<AccountSession[]>([]);
+  const [families, setFamilies] = useState<RefreshFamily[]>([]);
+  const [error, setError] = useState('');
+  const load = async () => {
+    const [s, f] = await Promise.all([factoryApi.listAccountSessions(owner), factoryApi.listRefreshFamilies(owner)]);
+    setSessions(s.sessions);
+    setFamilies(f.refreshFamilies);
+  };
+  const toggle = async () => {
+    if (open) return setOpen(false);
+    setError('');
+    try {
+      await load();
+      setOpen(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  const revoke = async (f: () => Promise<unknown>) => {
+    setError('');
+    try {
+      await f();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (
+    <div className="mt-1">
+      <button className={btn} onClick={() => void toggle()}>{open ? 'Hide sessions' : 'Sessions'}</button>
+      {error && <p className="text-red-600">{error}</p>}
+      {open && (
+        <div className="mt-1 space-y-1">
+          <p className="text-slate-500">{sessionLifetimeCopy()}</p>
+          {sessions.length === 0 && <p className="text-slate-500">No browser sessions.</p>}
+          {sessions.map((s) => (
+            <div key={s.sid} className="flex items-center justify-between">
+              <span className="font-mono">{s.sid} · {s.idp} · idle until {new Date(s.idleExpiresAt).toLocaleString()}</span>
+              <button className={btn} onClick={() => void revoke(() => factoryApi.revokeAccountSession(s.sid, owner))}>Revoke session</button>
+            </div>
+          ))}
+          {families.map((f) => (
+            <div key={f.familyId} className="flex items-center justify-between">
+              <span>{f.clientName} · {f.holder === 'device' ? 'device, 90-day refresh' : 'person, 30-day refresh'}</span>
+              <button className={btn} onClick={() => void revoke(() => factoryApi.revokeRefreshFamily(f.familyId, owner))}>Revoke family</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const box = 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 text-xs';
 const input = 'border border-slate-300 dark:border-slate-700 rounded px-2 py-1 bg-transparent';
@@ -145,6 +202,7 @@ export const PeopleView: React.FC = () => {
                 <div><span className="font-medium">{p.name}</span> <span className="font-mono text-slate-500">{p.subject}</span></div>
                 {p.subject.startsWith('user:') && <button className={`${btn} text-red-700 dark:text-red-400`} onClick={() => revokeAll(p.subject, p.name)}>Revoke all access</button>}
               </div>
+              {p.subject.startsWith('user:') && <PersonSessions owner={p.subject} />}
               {p.fleet.length > 0 && (
                 <div className="mt-1">Fleet: {p.fleet.map((f) => (
                   <span key={f.grantId} className="inline-flex items-center mr-2">{f.role}<button className="ml-1 text-slate-400 hover:text-red-600" aria-label={`Revoke ${f.role}`} onClick={() => act(() => factoryApi.revokeGrant(f.grantId))}>×</button></span>

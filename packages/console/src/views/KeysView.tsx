@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { factoryApi, type KeyView, type OAuthConsentView } from '../api/client.js';
-import { factoryIssuerInfo, keysAccessTokenCopy, type FactoryIssuerInfo } from './keys-model.js';
+import { factoryApi, type AccountSession, type KeyView, type OAuthConsentView, type RefreshFamily } from '../api/client.js';
+import { factoryIssuerInfo, keysAccessTokenCopy, sessionLifetimeCopy, type FactoryIssuerInfo } from './keys-model.js';
 
 const btn = 'px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 transition';
 const dangerBtn = 'px-2 py-1 rounded border border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/60 disabled:opacity-50 transition';
@@ -16,19 +16,25 @@ export const KeysView: React.FC = () => {
   const [issuer, setIssuer] = useState<FactoryIssuerInfo>(() =>
     factoryIssuerInfo(typeof window !== 'undefined' ? window.location.origin : ''),
   );
+  const [sessions, setSessions] = useState<AccountSession[]>([]);
+  const [families, setFamilies] = useState<RefreshFamily[]>([]);
 
   const load = async () => {
     try {
       const origin = window.location.origin;
-      const [keysRes, consentsRes, discovery] = await Promise.all([
+      const [keysRes, consentsRes, sessionRes, familyRes, discovery] = await Promise.all([
         factoryApi.listKeys(),
         factoryApi.listOAuthConsents().catch(() => ({ consents: [] })),
+        factoryApi.listAccountSessions().catch(() => ({ sessions: [] as AccountSession[] })),
+        factoryApi.listRefreshFamilies().catch(() => ({ refreshFamilies: [] as RefreshFamily[] })),
         fetch(`${origin}/.well-known/openid-configuration`)
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null),
       ]);
       setKeys(keysRes.keys);
       setConsents(consentsRes.consents || []);
+      setSessions(sessionRes.sessions || []);
+      setFamilies(familyRes.refreshFamilies || []);
       setIssuer(factoryIssuerInfo(origin, discovery));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -80,6 +86,64 @@ export const KeysView: React.FC = () => {
             <dd className="break-all text-slate-800 dark:text-slate-200">{issuer.jwksUri || '—'}</dd>
           </div>
         </dl>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+        <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Sign-in sessions</h2>
+        <p className="text-slate-500 dark:text-slate-400">{sessionLifetimeCopy()}</p>
+        <table className="w-full text-left">
+          <thead className="text-[11px] font-semibold text-slate-500">
+            <tr>
+              <th className="px-2 py-1">Session</th>
+              <th className="px-2 py-1">Signed in with</th>
+              <th className="px-2 py-1">Last used</th>
+              <th className="px-2 py-1 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.length === 0 ? (
+              <tr><td colSpan={4} className="px-2 py-3 text-slate-500">No browser sessions.</td></tr>
+            ) : sessions.map((s) => (
+              <tr key={s.sid} className="border-t border-slate-100 dark:border-slate-800">
+                <td className="px-2 py-2 font-mono text-[11px]">{s.sid}{s.current ? ' (this browser)' : ''}</td>
+                <td className="px-2 py-2">{s.idp}</td>
+                <td className="px-2 py-2 text-slate-500">{new Date(s.lastSeenAt).toLocaleString()}</td>
+                <td className="px-2 py-2 text-right">
+                  <button className={dangerBtn} onClick={() => run(() => factoryApi.revokeAccountSession(s.sid))}>Revoke</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+        <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Refresh tokens</h2>
+        <p className="text-slate-500 dark:text-slate-400">People: 30-day sliding refresh. Devices: 90-day sliding refresh. Revoking a family signs that app out.</p>
+        <table className="w-full text-left">
+          <thead className="text-[11px] font-semibold text-slate-500">
+            <tr>
+              <th className="px-2 py-1">App</th>
+              <th className="px-2 py-1">Holder</th>
+              <th className="px-2 py-1">Expires</th>
+              <th className="px-2 py-1 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {families.length === 0 ? (
+              <tr><td colSpan={4} className="px-2 py-3 text-slate-500">No refresh families.</td></tr>
+            ) : families.map((f) => (
+              <tr key={f.familyId} className="border-t border-slate-100 dark:border-slate-800">
+                <td className="px-2 py-2">{f.clientName}</td>
+                <td className="px-2 py-2">{f.holder === 'device' ? 'device (90-day)' : 'person (30-day)'}</td>
+                <td className="px-2 py-2 text-slate-500">{new Date(f.expiresAt).toLocaleString()}</td>
+                <td className="px-2 py-2 text-right">
+                  <button className={dangerBtn} onClick={() => run(() => factoryApi.revokeRefreshFamily(f.familyId))}>Revoke</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       {/* API Keys Section */}

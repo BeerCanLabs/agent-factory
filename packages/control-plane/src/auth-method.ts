@@ -46,7 +46,7 @@ export const principalAuthMethod = new WeakMap<object, AuthMethod>();
 /**
  * A verified factory JWT access token (Slice 2). `roles` / `grants_v` / `agents` from the token are not stored here:
  * identify() loads the subject's live grants and must not trust those hints (D-5; the unified check is Slice 5).
- * `sid` is the OAuth key-store anchor Slice 3's revocation set replaces.
+ * `sid` is the refresh-family id. Tokens issued before Slice 3 still carry the OAuth key id.
  */
 export type AccessJwtContext = {
   sub: string;

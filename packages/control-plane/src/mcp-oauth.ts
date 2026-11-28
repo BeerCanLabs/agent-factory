@@ -1,13 +1,16 @@
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
+  ACCESS_TOKEN_TTL_SECONDS,
   ROLES,
   accessKindOfUrl,
   canonicalAccessResource,
   canonicalAudiences,
   hashApiKey,
+  isFactoryAccessJwt,
   sameHash,
   signAccessToken,
+  verifyAccessToken,
   type AccessTokenHints,
   type KeyScopes,
   type Principal,
@@ -15,8 +18,9 @@ import {
 } from '@beercanlabs/factory-auth';
 import { MemoryDocBackend, snapshotSha256, type VersionedDocBackend } from '@beercanlabs/factory-bouncer';
 import { actorIsAdmin, effectiveGrantsForActor, identify, json, readBody, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
-import { sessionEmail, sessionIdp } from './login.js';
-import { ensureAsKeys, resolveAsIssuer } from './as-discovery.js';
+import { allowedIssuerOrigins, ensureAsKeys, resolveAsIssuer } from './as-discovery.js';
+import { SESSION_COOKIE, cookieValue, sessionEmail, sessionIdp } from './login.js';
+import { isSnapshotConflict } from './revocation-set.js';
 
 export type McpOAuthClientRecord = {
   clientId: string;
@@ -59,7 +63,37 @@ export type McpOAuthRefreshTokenRecord = {
   createdAt: string;
   rotatedAt?: string;
   familyRevoked?: boolean;
+  /**
+   * D-4 holder. Absent means a person (30-day sliding). `device` is the 90-day sliding lifetime.
+   * Device-flow issuance is Phase 2, so authorization-code grants stay `person` until a record says otherwise.
+   */
+  holder?: 'person' | 'device';
+  /** Browser session that approved this family. Sign-out revokes every family carrying its sid. */
+  sessionSid?: string;
 };
+
+export type RefreshHolder = 'person' | 'device';
+
+/** D-4: people slide 30 days; approved devices slide 90 days. */
+export const REFRESH_PERSON_MS = 30 * 24 * 60 * 60 * 1000;
+export const REFRESH_DEVICE_MS = 90 * 24 * 60 * 60 * 1000;
+
+export function refreshLifetimeMs(holder: RefreshHolder | undefined): number {
+  return holder === 'device' ? REFRESH_DEVICE_MS : REFRESH_PERSON_MS;
+}
+
+export function refreshHolderOf(holder: RefreshHolder | undefined): RefreshHolder {
+  return holder === 'device' ? 'device' : 'person';
+}
+
+/** The presented refresh token was already rotated or its family was already revoked. The caller revokes the family. */
+export class RefreshReuseError extends Error {
+  readonly code = 'refresh_reuse';
+  constructor(readonly familyId: string, readonly principalId: string) {
+    super('refresh_reuse');
+    this.name = 'RefreshReuseError';
+  }
+}
 
 export type McpOAuthDoc = {
   clients: McpOAuthClientRecord[];
@@ -93,6 +127,8 @@ export type PendingAuthCode = {
   resource?: string;
   /** IdP that proved the person at authorize time (`amr` on the access token). */
   amr?: string[];
+  /** Browser session that approved the consent, copied onto the refresh family. */
+  sessionSid?: string;
   expiresAt: number;
 };
 
@@ -137,6 +173,7 @@ export class McpOAuthStore {
   private docVersion = 0;
   private unhealthy?: unknown;
   private queue: Promise<unknown> = Promise.resolve();
+  private reloadFlight?: Promise<void>;
 
   private clientsById = new Map<string, McpOAuthClientRecord>();
   private consentsByPrincipal = new Map<string, Map<string, McpOAuthConsentRecord>>();
@@ -174,6 +211,17 @@ export class McpOAuthStore {
   }
 
   async reload(): Promise<void> {
+    if (this.reloadFlight) return this.reloadFlight;
+    const flight = this.serial(() => this.reloadUnlocked());
+    this.reloadFlight = flight;
+    try {
+      await flight;
+    } finally {
+      if (this.reloadFlight === flight) this.reloadFlight = undefined;
+    }
+  }
+
+  private async reloadUnlocked(): Promise<void> {
     try {
       const st = this.backend.loadState
         ? await this.backend.loadState()
@@ -207,7 +255,9 @@ export class McpOAuthStore {
       this.clientsById = nextClients;
       this.consentsByPrincipal = nextConsents;
       this.refreshTokensByHash = nextRefresh;
-      this.docVersion = Math.max(st.snapshot?.version ?? 0, st.maxSeenVersion);
+      // Follow the current pointer only. A version file whose pointer has not landed yet must not
+      // be skipped: writing the older body at a higher version would hide the other task's update.
+      this.docVersion = st.snapshot?.version ?? 0;
       this.unhealthy = undefined;
     } catch (err) {
       this.unhealthy = err;
@@ -219,6 +269,34 @@ export class McpOAuthStore {
     const run = this.queue.then(fn, fn);
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  /**
+   * Reload, apply, commit. A version clash with another task reloads and applies again so neither write is dropped.
+   * `apply` must only touch the in-memory maps; a throw restores the durable snapshot.
+   */
+  private async change<T>(by: string, apply: () => T): Promise<T> {
+    return this.serial(async () => {
+      let last: unknown;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await this.reloadUnlocked();
+        let result: T;
+        try {
+          result = apply();
+        } catch (err) {
+          await this.reloadUnlocked().catch(() => undefined);
+          throw err;
+        }
+        try {
+          await this.commit(by);
+          return result;
+        } catch (err) {
+          last = err;
+          if (!isSnapshotConflict(err)) throw err;
+        }
+      }
+      throw last instanceof Error ? last : new Error('oauth_conflict');
+    });
   }
 
   private async commit(by: string): Promise<void> {
@@ -254,14 +332,14 @@ export class McpOAuthStore {
   }
 
   async registerClient(client: McpOAuthClientRecord, by = 'dcr'): Promise<McpOAuthClientRecord> {
-    return this.serial(async () => {
+    return this.change(by, () => {
       // Bound total unconsented clients to 1000
       if (this.clientsById.size >= 1000) {
         const consentedClientIds = new Set<string>();
         for (const userMap of this.consentsByPrincipal.values()) {
           for (const c of userMap.keys()) consentedClientIds.add(c);
         }
-        for (const [id, c] of this.clientsById.entries()) {
+        for (const [id] of this.clientsById.entries()) {
           if (!consentedClientIds.has(id)) {
             this.clientsById.delete(id);
             if (this.clientsById.size < 950) break;
@@ -269,7 +347,6 @@ export class McpOAuthStore {
         }
       }
       this.clientsById.set(client.clientId, structuredClone(client));
-      await this.commit(by);
       return structuredClone(client);
     });
   }
@@ -400,7 +477,7 @@ export class McpOAuthStore {
   }
 
   async saveConsent(consent: Omit<McpOAuthConsentRecord, 'createdAt' | 'updatedAt'>): Promise<McpOAuthConsentRecord> {
-    return this.serial(async () => {
+    return this.change(consent.principalId, () => {
       let userMap = this.consentsByPrincipal.get(consent.principalId);
       if (!userMap) {
         userMap = new Map();
@@ -414,24 +491,19 @@ export class McpOAuthStore {
         updatedAt: nowIso,
       };
       userMap.set(consent.clientId, rec);
-      await this.commit(consent.principalId);
       return structuredClone(rec);
     });
   }
 
   async revokeConsent(principalId: string, clientId: string): Promise<boolean> {
-    return this.serial(async () => {
+    return this.change(principalId, () => {
       const userMap = this.consentsByPrincipal.get(principalId);
       if (!userMap) return false;
       const existed = userMap.delete(clientId);
       if (existed) {
-        // Also revoke all refresh token families for (principalId, clientId)
-        for (const [h, r] of this.refreshTokensByHash.entries()) {
-          if (r.principalId === principalId && r.clientId === clientId) {
-            r.familyRevoked = true;
-          }
+        for (const r of this.refreshTokensByHash.values()) {
+          if (r.principalId === principalId && r.clientId === clientId) r.familyRevoked = true;
         }
-        await this.commit(principalId);
       }
       return existed;
     });
@@ -479,9 +551,8 @@ export class McpOAuthStore {
   }
 
   async saveRefreshToken(tokenRec: McpOAuthRefreshTokenRecord): Promise<void> {
-    return this.serial(async () => {
+    await this.change(tokenRec.principalId, () => {
       this.refreshTokensByHash.set(tokenRec.tokenHash, structuredClone(tokenRec));
-      await this.commit(tokenRec.principalId);
     });
   }
 
@@ -490,11 +561,14 @@ export class McpOAuthStore {
     newTokenHash: string,
     newExpiresAt: string,
     keyId: string,
-    patch?: { audience?: string; audiences?: string[]; amr?: string[] },
+    patch?: { audience?: string; audiences?: string[]; amr?: string[]; holder?: RefreshHolder },
   ): Promise<McpOAuthRefreshTokenRecord> {
-    return this.serial(async () => {
+    return this.change('refresh', () => {
       const cur = this.refreshTokensByHash.get(oldTokenHash);
       if (!cur) throw new Error('refresh_token_not_found');
+      // Inside the write lock, after reload. A second presentation of this generation is reuse,
+      // including when the conflict retry observes the other task's rotation.
+      if (cur.rotatedAt || cur.familyRevoked) throw new RefreshReuseError(cur.familyId, cur.principalId);
       cur.rotatedAt = this.now().toISOString();
       const next: McpOAuthRefreshTokenRecord = {
         ...structuredClone(cur),
@@ -506,26 +580,130 @@ export class McpOAuthStore {
         ...(patch?.audience ? { audience: patch.audience } : {}),
         ...(patch?.audiences ? { audiences: patch.audiences } : {}),
         ...(patch?.amr ? { amr: patch.amr } : {}),
+        ...(patch?.holder ? { holder: patch.holder } : {}),
       };
       delete next.rotatedAt;
       this.refreshTokensByHash.set(newTokenHash, next);
-      await this.commit(cur.principalId);
       return structuredClone(next);
     });
   }
 
   async revokeRefreshTokenFamily(familyId: string, by = 'system'): Promise<string[]> {
-    return this.serial(async () => {
-      const affectedKeyIds: string[] = [];
+    return this.revokeMatching((r) => r.familyId === familyId, by);
+  }
+
+  /** End every family approved by this browser session. */
+  async revokeFamiliesForSession(sessionSid: string, by = 'sign-out'): Promise<FamilyRevocation[]> {
+    return this.revokeGrouped((r) => r.sessionSid === sessionSid, by);
+  }
+
+  /** End every refresh family owned by this principal (#436). */
+  async revokeFamiliesForPrincipal(principalId: string, by = 'revoke-all'): Promise<FamilyRevocation[]> {
+    return this.revokeGrouped((r) => r.principalId === principalId, by);
+  }
+
+  /** End families for one connected app. */
+  async revokeFamiliesForClient(principalId: string, clientId: string, by = 'consent'): Promise<FamilyRevocation[]> {
+    return this.revokeGrouped((r) => r.principalId === principalId && r.clientId === clientId, by);
+  }
+
+  /**
+   * The current generation of a family, or undefined when no record uses this id.
+   * `revoked` is true when the family was revoked (reuse, sign-out, consent, or an explicit revoke).
+   */
+  liveFamily(familyId: string): { familyId: string; principalId: string; clientId: string; keyId: string; revoked: boolean } | undefined {
+    let current: McpOAuthRefreshTokenRecord | undefined;
+    let any: McpOAuthRefreshTokenRecord | undefined;
+    for (const r of this.refreshTokensByHash.values()) {
+      if (r.familyId !== familyId) continue;
+      any = r;
+      if (!r.rotatedAt) current = r;
+    }
+    const row = current ?? any;
+    if (!row) return undefined;
+    return {
+      familyId,
+      principalId: row.principalId,
+      clientId: row.clientId,
+      keyId: row.keyId,
+      revoked: Boolean(row.familyRevoked),
+    };
+  }
+
+  /** One row per live family: the generation a client can still present. */
+  listFamilies(principalId: string): RefreshFamilyView[] {
+    const now = this.now().getTime();
+    const rows: RefreshFamilyView[] = [];
+    for (const r of this.refreshTokensByHash.values()) {
+      if (r.principalId !== principalId || r.rotatedAt || r.familyRevoked) continue;
+      if (Date.parse(r.expiresAt) <= now) continue;
+      rows.push(familyView(r));
+    }
+    return rows.sort((a, b) => a.familyId.localeCompare(b.familyId));
+  }
+
+  private async revokeMatching(match: (r: McpOAuthRefreshTokenRecord) => boolean, by: string): Promise<string[]> {
+    const grouped = await this.revokeGrouped(match, by);
+    return [...new Set(grouped.flatMap((g) => g.keyIds))];
+  }
+
+  private async revokeGrouped(match: (r: McpOAuthRefreshTokenRecord) => boolean, by: string): Promise<FamilyRevocation[]> {
+    return this.change(by, () => {
+      const byFamily = new Map<string, string[]>();
       for (const r of this.refreshTokensByHash.values()) {
-        if (r.familyId === familyId) {
-          r.familyRevoked = true;
-          if (!affectedKeyIds.includes(r.keyId)) affectedKeyIds.push(r.keyId);
-        }
+        if (!match(r)) continue;
+        r.familyRevoked = true;
+        const keys = byFamily.get(r.familyId) ?? [];
+        if (r.keyId && !keys.includes(r.keyId)) keys.push(r.keyId);
+        byFamily.set(r.familyId, keys);
       }
-      await this.commit(by);
-      return affectedKeyIds;
+      return [...byFamily.entries()].map(([familyId, keyIds]) => ({ familyId, keyIds }));
     });
+  }
+}
+
+export type FamilyRevocation = { familyId: string; keyIds: string[] };
+
+export type RefreshFamilyView = {
+  familyId: string;
+  clientId: string;
+  clientName: string;
+  holder: RefreshHolder;
+  createdAt: string;
+  expiresAt: string;
+  generation: number;
+  sessionSid?: string;
+};
+
+function familyView(r: McpOAuthRefreshTokenRecord): RefreshFamilyView {
+  return {
+    familyId: r.familyId,
+    clientId: r.clientId,
+    clientName: r.clientName,
+    holder: refreshHolderOf(r.holder),
+    createdAt: r.createdAt,
+    expiresAt: r.expiresAt,
+    generation: r.generation,
+    ...(r.sessionSid ? { sessionSid: r.sessionSid } : {}),
+  };
+}
+
+/** Record family and legacy anchor ids in the revocation set, and revoke the anchor keys. */
+export async function applyFamilyRevocation(state: FactoryState, families: readonly FamilyRevocation[], reason: string): Promise<void> {
+  const until = Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000;
+  const batch = families.flatMap((family) => [
+    { id: family.familyId, kind: 'sid' as const, expiresAt: until, reason },
+    ...family.keyIds.filter(Boolean).map((id) => ({ id, kind: 'sid' as const, expiresAt: until, reason })),
+  ]);
+  if (batch.length > 0) await state.revocations?.revokeMany(batch);
+  if (!state.keys) return;
+  const seen = new Set<string>();
+  for (const family of families) {
+    for (const id of family.keyIds) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      await state.keys.revoke(id, { by: 'service:mcp-oauth' }).catch(() => undefined);
+    }
   }
 }
 
@@ -789,6 +967,7 @@ async function handleAuthorizeGet(
       scope,
       resource,
       amr: amrOf(state, req),
+      sessionSid: state.sessions?.get(cookieValue(req, SESSION_COOKIE))?.sid,
     });
     const targetUrl = new URL(redirectUri);
     targetUrl.searchParams.set('code', code);
@@ -964,6 +1143,7 @@ async function handleAuthorizePost(
     scope,
     resource: pending.resource,
     amr: amrOf(state, req),
+    sessionSid: state.sessions?.get(cookieValue(req, SESSION_COOKIE))?.sid,
   });
 
   redirectUrl.searchParams.set('code', code);
@@ -979,8 +1159,6 @@ function anchorLive(k: { revokedAt?: string; expiresAt: string | null }, now: nu
   return !k.revokedAt && (k.expiresAt === null || Date.parse(k.expiresAt) > now);
 }
 
-/** Current refresh lifetime. Slice 3 (#564) applies D-4 (30 days for people, 90 for devices). */
-const REFRESH_TTL_MS = 60 * 24 * 3600 * 1000;
 const HINT_AGENT_CAP = 16;
 
 function resourceParams(values: readonly string[]): string[] {
@@ -1092,13 +1270,16 @@ async function mintAccessToken(
     audiences: string[];
     amr?: string[];
     anchorId?: string;
+    /** Refresh-family id. Slice 3 puts this in `sid` so the revocation set can kill the token. */
+    sid: string;
+    refreshTtlMs: number;
   },
 ): Promise<{ accessToken: string; expiresIn: number; keyId: string; deviceFamily: string }> {
   const keys = state.keys;
   if (!keys) throw Object.assign(new Error('Key store unavailable'), { status: 503 });
   const deviceFamily = `mcp:${input.clientId.slice(0, 60)}`;
   const scopes = mapOAuthScopeToKeyScopes(input.scope);
-  const anchorExpiry = new Date(Date.now() + REFRESH_TTL_MS).toISOString();
+  const anchorExpiry = new Date(Date.now() + input.refreshTtlMs).toISOString();
   const rotateInput = {
     by: input.principalId,
     expiresAt: anchorExpiry,
@@ -1151,7 +1332,7 @@ async function mintAccessToken(
     audiences: input.audiences,
     clientId: input.clientId,
     scope: input.scope,
-    sid: recordId,
+    sid: input.sid,
     amr: input.amr,
     actSub: `client:${input.clientId}`,
     hints: grantHints(state, input.principalId),
@@ -1206,10 +1387,22 @@ async function handleTokenPost(
 
     const client = store.getClient(clientId);
     const clientName = client?.clientName ?? clientId;
+    if (auth.sessionSid) {
+      try {
+        await state.revocations?.reload();
+      } catch {
+        return json(res, 503, { error: 'server_error', error_description: 'Sign-in state could not be read' }), true;
+      }
+      if (state.revocations?.has(auth.sessionSid)) {
+        return json(res, 400, { error: 'invalid_grant', error_description: 'Invalid or expired authorization code' }), true;
+      }
+    }
     if (!state.keys) {
       return json(res, 503, { error: 'server_error', error_description: 'Key store unavailable' }), true;
     }
 
+    const familyId = 'fam_' + randomBytes(16).toString('hex');
+    const refreshTtl = refreshLifetimeMs('person');
     const minted = await mintAccessToken(state, {
       issuer,
       principalId: auth.principalId,
@@ -1218,13 +1411,13 @@ async function handleTokenPost(
       scope: auth.scope,
       audiences: selected.audiences,
       amr: auth.amr,
+      sid: familyId,
+      refreshTtlMs: refreshTtl,
     });
 
-    // Refresh tokens stay opaque. Slice 3 (#564) makes the family durable across tasks and applies D-4 lifetimes.
     const refreshTokenPlaintext = 'fk_rt_' + b64url(randomBytes(32));
     const tokenHash = hashApiKey(refreshTokenPlaintext);
-    const familyId = 'fam_' + randomBytes(16).toString('hex');
-    const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS).toISOString();
+    const refreshExpiresAt = new Date(Date.now() + refreshTtl).toISOString();
 
     await store.saveRefreshToken({
       tokenHash,
@@ -1239,6 +1432,8 @@ async function handleTokenPost(
       audience: selected.audiences[0],
       audiences: selected.audiences,
       amr: auth.amr,
+      holder: 'person',
+      ...(auth.sessionSid ? { sessionSid: auth.sessionSid } : {}),
       expiresAt: refreshExpiresAt,
       createdAt: new Date().toISOString(),
     });
@@ -1259,17 +1454,13 @@ async function handleTokenPost(
     }
 
     const tokenHash = hashApiKey(refreshToken);
+    await store.reload();
     const rec = store.getRefreshTokenByHash(tokenHash);
 
-    // Reuse detection
+    // Reuse detection. reload() above is what makes this true on a task that did not rotate the token.
     if (rec && (rec.rotatedAt !== undefined || rec.familyRevoked)) {
-      // Reuse detected! Revoke entire family + revoke KeyStore key + ledger alert
       const keyIds = await store.revokeRefreshTokenFamily(rec.familyId, rec.principalId);
-      if (state.keys) {
-        for (const kid of keyIds) {
-          await state.keys.revoke(kid, { by: 'service:mcp-oauth' }).catch(() => undefined);
-        }
-      }
+      await applyFamilyRevocation(state, [{ familyId: rec.familyId, keyIds }], 'refresh-reuse');
       state.ledger.append({
         timestamp: new Date().toISOString(),
         agentId: 'control-plane',
@@ -1296,6 +1487,7 @@ async function handleTokenPost(
       return json(res, 400, { error: 'invalid_target', error_description: 'resource is not an authorized api or mcp audience' }), true;
     }
 
+    const refreshTtl = refreshLifetimeMs(rec.holder);
     const minted = await mintAccessToken(state, {
       issuer,
       principalId: rec.principalId,
@@ -1305,17 +1497,43 @@ async function handleTokenPost(
       audiences: selected.audiences,
       amr: rec.amr,
       anchorId: rec.keyId,
+      sid: rec.familyId,
+      refreshTtlMs: refreshTtl,
     });
 
     const newRefreshToken = 'fk_rt_' + b64url(randomBytes(32));
     const newTokenHash = hashApiKey(newRefreshToken);
-    const newRefreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS).toISOString();
+    const newRefreshExpiresAt = new Date(Date.now() + refreshTtl).toISOString();
 
-    await store.rotateRefreshTokenFamily(tokenHash, newTokenHash, newRefreshExpiresAt, minted.keyId, {
-      audience: selected.audiences[0],
-      audiences: selected.audiences,
-      ...(rec.amr ? { amr: rec.amr } : {}),
-    });
+    try {
+      await store.rotateRefreshTokenFamily(tokenHash, newTokenHash, newRefreshExpiresAt, minted.keyId, {
+        audience: selected.audiences[0],
+        audiences: selected.audiences,
+        holder: refreshHolderOf(rec.holder),
+        ...(rec.amr ? { amr: rec.amr } : {}),
+      });
+    } catch (err) {
+      await state.keys?.revoke(minted.keyId, { by: 'service:mcp-oauth' }).catch(() => undefined);
+      if (err instanceof RefreshReuseError) {
+        const keyIds = await store.revokeRefreshTokenFamily(err.familyId, err.principalId);
+        const anchors = keyIds.includes(minted.keyId) ? keyIds : [...keyIds, minted.keyId];
+        await applyFamilyRevocation(state, [{ familyId: err.familyId, keyIds: anchors }], 'refresh-reuse');
+        state.ledger.append({
+          timestamp: new Date().toISOString(),
+          agentId: 'control-plane',
+          type: 'action',
+          action: 'OAUTH_REFRESH_REUSE_DETECTED',
+          actor: err.principalId,
+          subject: rec.clientId,
+          via: `mcp:${rec.clientId}`,
+        });
+        return json(res, 400, { error: 'invalid_grant', error_description: 'Refresh token reuse detected; family revoked' }), true;
+      }
+      if (err instanceof Error && err.message === 'refresh_token_not_found') {
+        return json(res, 400, { error: 'invalid_grant', error_description: 'Invalid or expired refresh token' }), true;
+      }
+      throw err;
+    }
 
     return json(res, 200, {
       access_token: minted.accessToken,
@@ -1327,6 +1545,31 @@ async function handleTokenPost(
   }
 
   return json(res, 400, { error: 'unsupported_grant_type', error_description: 'Grant type not supported' }), true;
+}
+
+/** RFC 7009 for a factory access JWT: one verified `jti` joins the revocation set until that token's own exp. */
+async function revokeAccessJwt(state: FactoryState, req: http.IncomingMessage, token: string): Promise<void> {
+  const issuer = getOAuthIssuer(state, req);
+  const configured = allowedIssuerOrigins(state);
+  const keys = await ensureAsKeys(state);
+  for (const kind of ['api', 'mcp'] as const) {
+    const verdict = await verifyAccessToken(token, {
+      keys,
+      issuers: configured.length > 0 ? configured : [issuer],
+      audience: canonicalAccessResource(issuer, kind),
+    });
+    if (!verdict.ok) {
+      if (verdict.reason === 'audience') continue;
+      return;
+    }
+    await state.revocations?.revoke({
+      id: verdict.token.jti,
+      kind: 'jti',
+      expiresAt: verdict.token.exp * 1000,
+      reason: 'revoke',
+    });
+    return;
+  }
 }
 
 async function handleRevokePost(
@@ -1350,16 +1593,15 @@ async function handleRevokePost(
   const token = body.token;
   if (!token) return json(res, 200, { ok: true }), true;
 
-  if (token.startsWith('fk_rt_')) {
+  if (isFactoryAccessJwt(token)) {
+    await revokeAccessJwt(state, req, token);
+  } else if (token.startsWith('fk_rt_')) {
     const hash = hashApiKey(token);
+    await store.reload();
     const rec = store.getRefreshTokenByHash(hash);
     if (rec) {
       const keyIds = await store.revokeRefreshTokenFamily(rec.familyId, rec.principalId);
-      if (state.keys) {
-        for (const kid of keyIds) {
-          await state.keys.revoke(kid, { by: 'service:mcp-oauth' }).catch(() => undefined);
-        }
-      }
+      await applyFamilyRevocation(state, [{ familyId: rec.familyId, keyIds }], 'revoke');
       await store.revokeConsent(rec.principalId, rec.clientId);
     }
   } else if (token.startsWith('fk_at_') || token.startsWith('fk_')) {
@@ -1420,8 +1662,10 @@ async function handleConsentDelete(
   const ownerQ = new URL(req.url ?? '/', 'http://x').searchParams.get('owner')?.toLowerCase();
   const owner = isAdmin && ownerQ ? ownerQ : who.principal.actor;
 
-  // Revoke consent
+  // Revoke consent (also marks that client's refresh families revoked) and record the ids.
   const existed = await state.mcpOAuthStore!.revokeConsent(owner, clientId);
+  const families = await state.mcpOAuthStore!.revokeFamiliesForClient(owner, clientId, who.principal.actor);
+  await applyFamilyRevocation(state, families, 'consent');
 
   // Revoke active KeyStore key for owner with deviceFamily: "mcp:" + clientId
   if (state.keys) {

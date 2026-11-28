@@ -1,6 +1,17 @@
-/** Factory issuer URLs and the Slice 2 access-token note shown on Your API Keys. */
+/** Factory issuer URLs, the Slice 2 access-token note, and the Slice 3 D-4 lifetime copy. */
 
 export const ACCESS_TOKEN_LIFETIME_MINUTES = 10;
+
+/** D-4, locked 27 Nov 2026. The control plane enforces these same numbers. */
+export const SESSION_IDLE_HOURS = 12;
+export const SESSION_ABSOLUTE_DAYS = 7;
+export const REFRESH_PERSON_DAYS = 30;
+export const REFRESH_DEVICE_DAYS = 90;
+
+/** Plain-language policy shown on Account and People & Access. */
+export function sessionLifetimeCopy(): string {
+  return `A sign-in stays active for ${SESSION_IDLE_HOURS} hours after you last use it (idle), and you stay signed in for at most ${SESSION_ABSOLUTE_DAYS} days. Refresh tokens for people last ${REFRESH_PERSON_DAYS} days and slide forward when used. Refresh tokens for devices last ${REFRESH_DEVICE_DAYS} days and slide forward when used.`;
+}
 
 /** Copy for the issuer card and the static-keys section. Static keys stay; retirement is Phase 3. */
 export function keysAccessTokenCopy(): { issuer: string; keys: string } {

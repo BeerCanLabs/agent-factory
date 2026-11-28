@@ -25,6 +25,8 @@ import { SpendTracker, type CloudCostSource, type ComputeSource } from '@beercan
 import { isServiceTier } from '@beercanlabs/factory-executive';
 import { IdpConfigStore, type IdpConfigDoc } from './idp-config.js';
 import { McpOAuthStore, type McpOAuthDoc } from './mcp-oauth.js';
+import { SessionStore, type SessionsDoc } from './login.js';
+import { RevocationSet, type RevocationDoc } from './revocation-set.js';
 import { bootstrapAdmin, drainRecoveryOutbox, type RecoveryOutboxDoc } from './recover.js';
 import { SpendAccountStore, settleOnEnd } from './spend-accounts.js';
 import { ApiKeyStore, ApprovalStore, docBackendFromUri, type ApiKeysDoc, GrantStore, PrincipalStore, SpeakAsGrantStore, type GrantsDoc, type PrincipalsDoc, type SpeakAsDoc } from '@beercanlabs/factory-bouncer';
@@ -236,6 +238,12 @@ const idpConfig = await IdpConfigStore.open(
 const mcpOAuthStore = await McpOAuthStore.open(
   docBackendFromUri<McpOAuthDoc>(process.env.FACTORY_MCP_OAUTH_STORE_URI, join(DATA_DIR, 'auth', 'mcp-oauth')),
 );
+const sessions = await SessionStore.open(
+  docBackendFromUri<SessionsDoc>(process.env.FACTORY_SESSIONS_STORE_URI, join(DATA_DIR, 'auth', 'sessions')),
+);
+const revocations = await RevocationSet.open(
+  docBackendFromUri<RevocationDoc>(process.env.FACTORY_REVOCATION_STORE_URI, join(DATA_DIR, 'auth', 'revocations')),
+);
 const providers = providersFromEnv();
 const asKeys = await loadAsKeySetFromEnv(process.env, providers);
 if (asKeys.ephemeral) {
@@ -280,6 +288,8 @@ const state: FactoryState = {
   keys,
   idpConfig,
   mcpOAuthStore,
+  sessions,
+  revocations,
   // §6.12 A2: FACTORY_ACCESS_TEAM_DOMAIN + FACTORY_ACCESS_AUD; unset disables Access identity (bearer tokens only).
   access: accessAuthFromEnv(),
   version: VERSION,

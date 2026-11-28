@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { ACCESS_TOKEN_LIFETIME_MINUTES, factoryIssuerInfo, keysAccessTokenCopy } from './keys-model.js';
+import { ACCESS_TOKEN_LIFETIME_MINUTES, REFRESH_DEVICE_DAYS, REFRESH_PERSON_DAYS, SESSION_ABSOLUTE_DAYS, SESSION_IDLE_HOURS, factoryIssuerInfo, keysAccessTokenCopy, sessionLifetimeCopy } from './keys-model.js';
 
 describe('keys access-token copy (front-door Phase 1 Slice 2)', () => {
   it('says new access tokens are 10-minute JWTs and that legacy keys still work', () => {
@@ -13,6 +13,23 @@ describe('keys access-token copy (front-door Phase 1 Slice 2)', () => {
     assert.match(copy.keys, /dual-run/);
     assert.doesNotMatch(copy.issuer, /next slice/i);
     assert.doesNotMatch(copy.keys, /next slice/i);
+  });
+});
+
+describe('session lifetime copy (front-door Phase 1 Slice 3)', () => {
+  it('names the D-4 lifetimes in plain language', () => {
+    const copy = sessionLifetimeCopy();
+    assert.equal(SESSION_IDLE_HOURS, 12);
+    assert.equal(SESSION_ABSOLUTE_DAYS, 7);
+    assert.equal(REFRESH_PERSON_DAYS, 30);
+    assert.equal(REFRESH_DEVICE_DAYS, 90);
+    assert.match(copy, /12 hours/);
+    assert.match(copy, /idle/);
+    assert.match(copy, /7 days/);
+    assert.match(copy, /30 days/);
+    assert.match(copy, /people/);
+    assert.match(copy, /90 days/);
+    assert.match(copy, /devices/);
   });
 });
 
