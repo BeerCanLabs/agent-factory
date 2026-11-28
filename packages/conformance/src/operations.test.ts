@@ -369,6 +369,8 @@ describe('Operations Contract & Schema Conformance (GAP-249, CL11, TSK-336)', ()
   it('Round 3 Conformance Guard: every noRequestBody: true route is in an audited explicit allowlist of verified bodyless handlers', () => {
     const AUDITED_NO_REQUEST_BODY_OPERATIONS = new Set([
       'logout_session',
+      'revoke_account_session',
+      'revoke_refresh_family',
       'cutover_auth_migration',
       'pause_agent',
       'resume_agent',

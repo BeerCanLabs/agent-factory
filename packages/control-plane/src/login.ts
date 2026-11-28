@@ -3,18 +3,38 @@ import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { bindSecrets } from '@beercanlabs/factory-secrets-bind';
 import type { AuthResult } from '@beercanlabs/factory-auth';
-import { publicKeyView } from '@beercanlabs/factory-bouncer';
+import { MemoryDocBackend, publicKeyView, snapshotSha256, type VersionedDocBackend } from '@beercanlabs/factory-bouncer';
 import { json, readJson, resolveVerifiedPrincipal, type FactoryState } from './app.js';
 import type { IdpKind, IdpProvider } from './idp-config.js';
+import { isSnapshotConflict } from './revocation-set.js';
 
 export const SESSION_COOKIE = 'factory_session';
 /** Binds an OAuth state to the browser that started it, so nobody can sign a victim in as themselves (login CSRF). */
 const STATE_COOKIE = 'factory_oauth_state';
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+/** D-4: a session ends after this long with no use. */
+export const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
+/** D-4: a session ends this long after it was created, even if it is still in use. */
+export const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * An idle slide is written at least this often. A crash can only make the recorded idle shorter, so the session
+ * ends early by at most this much. It never extends the 12 h idle window.
+ */
+const SESSION_TOUCH_COALESCE_MS = 60 * 1000;
 const STATE_TTL_MS = 10 * 60 * 1000;
 const LABELS: Record<IdpKind, string> = { google: 'Google', meta: 'Meta', cloudflare: 'Cloudflare', oidc: 'Single sign-on' };
 
-type Session = { email: string; idp: IdpKind; expiresAt: number };
+/** What a caller may see. The cookie secret and its hash never leave the store. */
+export type Session = {
+  sid: string;
+  email: string;
+  idp: IdpKind;
+  createdAt: number;
+  lastSeenAt: number;
+  absoluteExpiresAt: number;
+  revokedAt?: number;
+};
+type StoredSession = Session & { idHash: string };
+export type SessionsDoc = { sessions: StoredSession[] };
 type Pending = { idp: IdpKind | 'cli'; verifier: string; expiresAt: number; cli?: CliLogin; owner?: string; oauthReq?: string };
 /** S13: a CLI sign-in in flight: the loopback port, the CLI's own state, and its PKCE challenge for the key exchange. */
 export type CliLogin = { port: number; state: string; challenge: string };
@@ -23,42 +43,245 @@ type Endpoints = { authorize: string; token: string; userinfo: string; scope: st
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest();
 const b64url = (b: Buffer) => b.toString('base64url');
+const earliest = (a?: number, b?: number): number | undefined => (a === undefined ? b : b === undefined ? a : Math.min(a, b));
 
 /**
- * Server-backed sessions: the cookie holds a random id, the store holds only its SHA-256, so a leaked store names no
- * live cookie. Each request re-resolves the email to the principal, so grants stay live (D2). A restart signs users out.
+ * Server-backed sessions (D-4, #564). The cookie holds a random id; the store holds only its SHA-256 plus a public
+ * `sid` for listing and revocation, so a leaked store names no live cookie. Idle is 12 h, absolute life is 7 days.
+ * With a document backend the record survives a restart and is visible to other tasks after `reload`. Each request
+ * re-resolves the email to the principal, so grants stay live (D2).
  */
 export class SessionStore {
-  private readonly sessions = new Map<string, Session>();
+  private readonly sessions = new Map<string, StoredSession>();
   private readonly pending = new Map<string, Pending>();
-  constructor(private readonly now: () => number = Date.now) {}
+  private readonly dirty = new Set<string>();
+  private docVersion = 0;
+  private queue: Promise<unknown> = Promise.resolve();
+  private flushTimer?: ReturnType<typeof setTimeout>;
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly backend?: VersionedDocBackend<SessionsDoc>,
+  ) {}
+
+  static async open(
+    backend: VersionedDocBackend<SessionsDoc> = new MemoryDocBackend<SessionsDoc>(),
+    opts?: { now?: () => number },
+  ): Promise<SessionStore> {
+    const store = new SessionStore(opts?.now ?? Date.now, backend);
+    await store.reload();
+    return store;
+  }
 
   create(email: string, idp: IdpKind): string {
     const id = b64url(randomBytes(32));
-    this.sessions.set(b64url(sha256(id)), { email, idp, expiresAt: this.now() + SESSION_TTL_MS });
+    const now = this.now();
+    const idHash = b64url(sha256(id));
+    this.sessions.set(idHash, {
+      sid: `sess_${randomBytes(16).toString('hex')}`,
+      idHash,
+      email: email.trim().toLowerCase(),
+      idp,
+      createdAt: now,
+      lastSeenAt: now,
+      absoluteExpiresAt: now + SESSION_ABSOLUTE_MS,
+    });
+    this.dirty.add(idHash);
     return id;
   }
+
   get(id: string | undefined): Session | undefined {
     if (!id) return undefined;
     const key = b64url(sha256(id));
     const s = this.sessions.get(key);
     if (!s) return undefined;
-    if (s.expiresAt <= this.now()) return void this.sessions.delete(key);
-    return s;
+    const now = this.now();
+    if (!this.isLive(s, now)) {
+      if (!s.revokedAt) {
+        s.revokedAt = now;
+        this.dirty.add(key);
+        this.scheduleFlush();
+      }
+      return undefined;
+    }
+    if (now > s.lastSeenAt) {
+      s.lastSeenAt = now;
+      this.dirty.add(key);
+      this.scheduleFlush();
+    }
+    return this.view(s);
   }
-  /** #436: end every session of these (verified) emails; returns how many ended. */
-  destroyForEmails(emails: readonly string[]): number {
+
+  /** Live sessions for these emails, newest activity first. No cookie secret, no hash. */
+  listForEmails(emails: readonly string[]): Session[] {
     const set = new Set(emails.map((e) => e.trim().toLowerCase()));
-    let n = 0;
-    for (const [k, s] of this.sessions) if (set.has(s.email)) n += Number(this.sessions.delete(k));
-    return n;
+    const now = this.now();
+    return [...this.sessions.values()]
+      .filter((s) => set.has(s.email) && this.isLive(s, now))
+      .map((s) => this.view(s))
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
+  /** End one session by its public id. Returns the record when it existed. */
+  revokeBySid(sid: string): Session | undefined {
+    for (const s of this.sessions.values()) {
+      if (s.sid !== sid) continue;
+      if (!s.revokedAt) {
+        s.revokedAt = this.now();
+        this.dirty.add(s.idHash);
+      }
+      return this.view(s);
+    }
+    return undefined;
+  }
+
+  /** #436: end every live session of these (verified) emails. */
+  destroyForEmails(emails: readonly string[]): { ended: number; sids: string[] } {
+    const set = new Set(emails.map((e) => e.trim().toLowerCase()));
+    const sids: string[] = [];
+    const now = this.now();
+    for (const s of this.sessions.values()) {
+      if (!set.has(s.email) || !this.isLive(s, now)) continue;
+      s.revokedAt = now;
+      this.dirty.add(s.idHash);
+      sids.push(s.sid);
+    }
+    return { ended: sids.length, sids };
   }
 
   destroy(id: string | undefined): Session | undefined {
-    const s = this.get(id);
-    if (id) this.sessions.delete(b64url(sha256(id)));
-    return s;
+    if (!id) return undefined;
+    const key = b64url(sha256(id));
+    const s = this.sessions.get(key);
+    if (!s) return undefined;
+    if (!s.revokedAt) {
+      s.revokedAt = this.now();
+      this.dirty.add(key);
+    }
+    return this.view(s);
   }
+
+  /** Write dirty records. Create, revoke and sign-out await this so a crash cannot resurrect them. */
+  async flush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    if (!this.backend || this.dirty.size === 0) return;
+    await this.serial(() => this.flushUnlocked());
+  }
+
+  /** Pull another task's creates and revokes. Dirty local slides and revokes still win. */
+  async reload(): Promise<void> {
+    if (!this.backend) return;
+    await this.serial(() => this.reloadUnlocked());
+  }
+
+  private isLive(s: StoredSession, now: number): boolean {
+    return !s.revokedAt && now < s.absoluteExpiresAt && now < s.lastSeenAt + SESSION_IDLE_MS;
+  }
+
+  private view(s: StoredSession): Session {
+    return {
+      sid: s.sid,
+      email: s.email,
+      idp: s.idp,
+      createdAt: s.createdAt,
+      lastSeenAt: s.lastSeenAt,
+      absoluteExpiresAt: s.absoluteExpiresAt,
+      ...(s.revokedAt ? { revokedAt: s.revokedAt } : {}),
+    };
+  }
+
+  private scheduleFlush(): void {
+    if (!this.backend || this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      void this.flush().catch(() => undefined);
+    }, SESSION_TOUCH_COALESCE_MS);
+    this.flushTimer.unref?.();
+  }
+
+  private serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn);
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async reloadUnlocked(): Promise<void> {
+    if (!this.backend) return;
+    const st = this.backend.loadState
+      ? await this.backend.loadState()
+      : await (async () => {
+          const snapshot = await this.backend!.loadLatest();
+          return { snapshot, maxSeenVersion: snapshot?.version ?? 0 };
+        })();
+    const disk = new Map<string, StoredSession>();
+    for (const row of st.snapshot?.data?.sessions ?? []) {
+      if (row?.idHash && row.sid && row.email) disk.set(row.idHash, { ...row });
+    }
+    for (const [key, local] of this.sessions) {
+      if (!this.dirty.has(key)) continue;
+      const stored = disk.get(key);
+      if (!stored) {
+        disk.set(key, { ...local });
+        continue;
+      }
+      const revokedAt = earliest(stored.revokedAt, local.revokedAt);
+      disk.set(key, {
+        ...stored,
+        lastSeenAt: Math.max(stored.lastSeenAt, local.lastSeenAt),
+        ...(revokedAt ? { revokedAt } : {}),
+      });
+    }
+    this.sessions.clear();
+    for (const [key, row] of disk) this.sessions.set(key, row);
+    this.docVersion = st.snapshot?.version ?? 0;
+  }
+
+  private async flushUnlocked(): Promise<void> {
+    if (!this.backend || this.dirty.size === 0) return;
+    let last: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await this.reloadUnlocked();
+      const written = new Map<string, { lastSeenAt: number; revokedAt?: number }>();
+      for (const key of this.dirty) {
+        const row = this.sessions.get(key);
+        if (row) written.set(key, { lastSeenAt: row.lastSeenAt, revokedAt: row.revokedAt });
+      }
+      try {
+        await this.commit();
+        for (const [key, snap] of written) {
+          const cur = this.sessions.get(key);
+          if (cur && cur.lastSeenAt === snap.lastSeenAt && cur.revokedAt === snap.revokedAt) this.dirty.delete(key);
+        }
+        return;
+      } catch (err) {
+        last = err;
+        if (!isSnapshotConflict(err)) throw err;
+      }
+    }
+    throw last instanceof Error ? last : new Error('session_conflict');
+  }
+
+  private async commit(): Promise<void> {
+    if (!this.backend) return;
+    const now = this.now();
+    const sessions = [...this.sessions.values()]
+      .filter((s) => s.absoluteExpiresAt > now)
+      .sort((a, b) => a.idHash.localeCompare(b.idHash));
+    const data: SessionsDoc = { sessions };
+    const version = this.docVersion + 1;
+    await this.backend.write({
+      version,
+      updatedAt: new Date(now).toISOString(),
+      updatedBy: 'session',
+      sha256: snapshotSha256(data),
+      data,
+    });
+    this.docVersion = version;
+  }
+
   /** OAuth state: one-time, short-lived, bound to its IdP and PKCE verifier. */
   begin(idp: IdpKind, cli?: CliLogin, oauthReq?: string): { state: string; challenge: string } {
     for (const [k, p] of this.pending) if (p.expiresAt <= this.now()) this.pending.delete(k);
@@ -119,7 +342,7 @@ export function cookieValue(req: http.IncomingMessage, name: string): string | u
   return undefined;
 }
 
-function sameOrigin(state: FactoryState, req: http.IncomingMessage): boolean {
+export function sameOrigin(state: FactoryState, req: http.IncomingMessage): boolean {
   const origin = req.headers.origin ?? (req.headers.referer ? safeOrigin(String(req.headers.referer)) : undefined);
   if (!origin) return false;
   const allowed = new Set<string>();
@@ -241,7 +464,16 @@ export async function handleLoginRoutes(state: FactoryState, req: http.IncomingM
     const id = cookieValue(req, SESSION_COOKIE);
     if (id && state.sessions?.get(id) && !sessionEmail(state, req)) return json(res, 403, { error: 'cross_origin' }), true;
     const s = state.sessions?.destroy(id);
-    if (s) ledger(state, 'SIGN_OUT', s.email, s.idp);
+    try {
+      await state.sessions?.flush();
+    } catch {
+      return json(res, 503, { error: 'session_store_unavailable', message: 'Sign-out could not be saved' }), true;
+    }
+    if (s) {
+      ledger(state, 'SIGN_OUT', s.email, s.idp);
+      const { endSessionCredentials } = await import('./account-sessions.js');
+      await endSessionCredentials(state, s, 'sign-out');
+    }
     // Also expire a Cloudflare Access cookie on this host (#427): the console host used to sit behind Access, and a
     // browser still holding CF_Authorization stayed signed in as cloudflare:<email> after the factory session ended.
     res.setHeader('set-cookie', [cookie('', 0), 'CF_Authorization=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0']);
@@ -313,9 +545,14 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
   if (p.allowedDomains?.length && !p.allowedDomains.map((d) => d.toLowerCase()).includes(domain)) return sendLoginPage(state, res, 403, 'This email domain may not sign in here.'), true;
 
   const sid = sessions(state).create(email, p.id);
+  try {
+    await sessions(state).flush();
+  } catch {
+    return json(res, 503, { error: 'session_store_unavailable', message: 'The sign-in could not be saved' }), true;
+  }
   ledger(state, 'SIGN_IN', email, p.id);
   if (pending?.oauthReq) {
-    res.writeHead(302, { location: `/authorize?oauth_req=${encodeURIComponent(pending.oauthReq)}`, 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
+    res.writeHead(302, { location: `/authorize?oauth_req=${encodeURIComponent(pending.oauthReq)}`, 'set-cookie': cookie(sid, SESSION_ABSOLUTE_MS / 1000), 'cache-control': 'no-store' });
     res.end();
     return true;
   }
@@ -324,11 +561,11 @@ async function finishSignIn(state: FactoryState, req: http.IncomingMessage, res:
     const who = await resolveVerifiedPrincipal(state, { actor: `oidc:${email}`, roles: [], emailVerified: true }, true);
     if (!state.keys || !/^user:/.test(who.actor)) return sendLoginPage(state, res, 403, 'You are signed in, but this factory has not granted you access yet.'), true;
     const code = sessions(state).cliCode(who.actor, pending.cli.challenge);
-    res.writeHead(302, { location: `http://127.0.0.1:${pending.cli.port}/callback?${new URLSearchParams({ code, state: pending.cli.state })}`, 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
+    res.writeHead(302, { location: `http://127.0.0.1:${pending.cli.port}/callback?${new URLSearchParams({ code, state: pending.cli.state })}`, 'set-cookie': cookie(sid, SESSION_ABSOLUTE_MS / 1000), 'cache-control': 'no-store' });
     res.end();
     return true;
   }
-  res.writeHead(302, { location: '/ui', 'set-cookie': cookie(sid, SESSION_TTL_MS / 1000), 'cache-control': 'no-store' });
+  res.writeHead(302, { location: '/ui', 'set-cookie': cookie(sid, SESSION_ABSOLUTE_MS / 1000), 'cache-control': 'no-store' });
   res.end();
   return true;
 }

@@ -150,6 +150,8 @@ export async function handleKeysRoutes(
     }
     try {
       const out = await state.keys!.revoke(cur.id, { by: c.principal.actor });
+      const { noteRevokedKey } = await import('./account-sessions.js');
+      await noteRevokedKey(state, out);
       ledger(state, 'KEY_REVOKED', c, out);
       json(res, 200, { key: publicKeyView(out) });
     } catch (err) {

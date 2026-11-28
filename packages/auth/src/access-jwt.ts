@@ -1,8 +1,8 @@
 // Front-door Phase 1 Slice 2 (docs/design/front-door-auth.md §4.2, §10 item 5, issue #563).
 // RFC 9068 JWT access tokens, signed with the Slice 1 ES256 key set. This module only signs and checks the token.
 // It does not decide privileges: `roles`, `agents`, and `grants_v` are hints (D-5). The resource server re-reads live
-// grants. `sid` is the current revocation anchor (the OAuth key-store record). Slice 3 (#564) replaces that anchor
-// with the durable session and revocation set. Slice 4 (#565) replaces `mcp:full`. Slice 5 (#566) is the one verifier.
+// grants. `sid` is the refresh-family id (Slice 3). Tokens issued before that still carry the key-store id.
+// Slice 4 (#565) replaces `mcp:full`. Slice 5 (#566) is the one verifier.
 import { randomBytes } from 'node:crypto';
 import { SignJWT, decodeProtectedHeader, importJWK, jwtVerify, type JWTPayload } from 'jose';
 import { AS_SIGNING_ALG, stripTrailingSlash, type AsKey, type AsKeySet } from './as-keys.js';
@@ -33,7 +33,7 @@ export type AccessTokenInput = {
   audiences: string[];
   clientId: string;
   scope?: string;
-  /** Revocation anchor. Slice 2 stores the OAuth key id here; Slice 3 stores the session id. */
+  /** Revocation anchor. Slice 3 stores the refresh-family id. Older tokens still carry the key-store id. */
   sid: string;
   amr?: string[];
   /** RFC 8693 actor hint (`client:<client_id>`). Not consulted on requests. */
@@ -51,6 +51,8 @@ export type VerifiedAccessToken = {
   scope?: string;
   sid: string;
   jti: string;
+  /** Seconds since epoch. The revocation set keeps a revoked `jti` until then. */
+  exp: number;
   audiences: string[];
   amr?: string[];
   hints: AccessTokenHints;
@@ -182,6 +184,7 @@ export async function verifyAccessToken(
         clientId,
         sid,
         jti,
+        exp: typeof payload.exp === 'number' ? payload.exp : 0,
         audiences,
         ...(typeof payload.scope === 'string' && payload.scope ? { scope: payload.scope } : {}),
         ...(Array.isArray(payload.amr) ? { amr: payload.amr.filter((v): v is string => typeof v === 'string') } : {}),

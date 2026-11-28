@@ -121,6 +121,30 @@ export interface OAuthConsentView {
   updatedAt?: string;
   lastUsedAt?: string;
 }
+export type AuthLifetimes = {
+  sessionIdleHours: number;
+  sessionAbsoluteDays: number;
+  refreshPeopleDays: number;
+  refreshDeviceDays: number;
+};
+export type AccountSession = {
+  sid: string;
+  idp: string;
+  createdAt: string;
+  lastSeenAt: string;
+  absoluteExpiresAt: string;
+  idleExpiresAt: string;
+  current: boolean;
+};
+export type RefreshFamily = {
+  familyId: string;
+  clientId: string;
+  clientName: string;
+  holder: 'person' | 'device';
+  createdAt: string;
+  expiresAt: string;
+  generation: number;
+};
 
 export const factoryApi = {
   // S9: people, grants and keys.
@@ -140,6 +164,10 @@ export const factoryApi = {
   revokeKey: (id: string) => request<unknown>(`/keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listOAuthConsents: () => request<{ consents: OAuthConsentView[] }>('/oauth/consents'),
   revokeOAuthConsent: (clientId: string) => request<{ ok: boolean; revoked: boolean }>(`/oauth/consents/${encodeURIComponent(clientId)}`, { method: 'DELETE' }),
+  listAccountSessions: (owner?: string) => request<{ lifetimes: AuthLifetimes; sessions: AccountSession[] }>(`/account/sessions${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
+  revokeAccountSession: (sid: string, owner?: string) => request<{ ok: boolean; revoked: string }>(`/account/sessions/${encodeURIComponent(sid)}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`, { method: 'DELETE' }),
+  listRefreshFamilies: (owner?: string) => request<{ lifetimes: AuthLifetimes; refreshFamilies: RefreshFamily[] }>(`/account/refresh-families${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
+  revokeRefreshFamily: (familyId: string, owner?: string) => request<{ ok: boolean; revoked: string }>(`/account/refresh-families/${encodeURIComponent(familyId)}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`, { method: 'DELETE' }),
   // Agent Registry & Lifecycle
   async listAgents(): Promise<AgentRecord[]> {
     const res = await request<AgentRecord[] | { agents: AgentRecord[] }>('/registry/agents');

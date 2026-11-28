@@ -127,6 +127,8 @@ import { handleSetupRoutes, type IdpConfigStore } from './idp-config.js';
 import { handleSubmissions } from './submissions.js';
 import { handleInterview } from './interview-draft.js';
 import { handleLoginRoutes, sendLoginPage, sessionIdp, verifySession, type SessionStore } from './login.js';
+import { handleAccountSessionRoutes } from './account-sessions.js';
+import type { RevocationSet } from './revocation-set.js';
 import { extractVerifiedEmailFromActor, handleGrantsRoutes, rolesForSubjectActor } from './grants-routes.js';
 import { handleAgentTransfers, purgeUserOAuth } from './transfers.js';
 import { clearSkillBindingsForModel, handleSkillModels, skillModelsForAgent } from './skill-models.js';
@@ -210,8 +212,10 @@ export type FactoryState = {
   keys?: ApiKeyStore;
   /** S6: trusted identity providers for this deployment (a setup value, D16). */
   idpConfig?: IdpConfigStore;
-  /** S12: server-backed browser sessions and pending OAuth states. */
+  /** S12 / D-4: server-backed browser sessions. Durable when the process opened a document backend. */
   sessions?: SessionStore;
+  /** Slice 3: revoked session ids, refresh-family ids, legacy anchor ids and access-token jtis. */
+  revocations?: RevocationSet;
   /** Front-door Phase 0: one structured line per external request naming its verified sign-in method (no secrets). */
   authRequestLog?: (entry: AuthRequestLogEntry) => void;
   /** S12: test seam for the IdP's token/userinfo/discovery calls; defaults to global fetch. */
@@ -3551,7 +3555,22 @@ export async function dispatchControlPlaneHttp(state: FactoryState, req: http.In
   }
 }
 
+async function prepareDurableAuth(state: FactoryState, res: http.ServerResponse): Promise<boolean> {
+  try {
+    await state.sessions?.reload();
+    await state.revocations?.reload();
+  } catch {
+    json(res, 503, { error: 'auth_store_unavailable', message: 'Sign-in state could not be read' });
+    return false;
+  }
+  return true;
+}
+
 async function route(state: FactoryState, req: http.IncomingMessage, res: http.ServerResponse) {
+  const path = (req.url ?? '/').split('?')[0];
+  // Probes must answer even when the session store cannot be read. Auth routes still fail closed.
+  const probe = path === '/healthz' || path === '/api/v1/health' || path === '/' || path === '/metrics';
+  if (!probe && !(await prepareDurableAuth(state, res))) return;
   if (!(await verifyApiKeyBeforeRouting(state, req, res))) return;
   wireGrantStoreKindLookup(state);
   tapActAsLedger(state);
@@ -3632,9 +3651,9 @@ function bearerCredential(authorization: string | undefined): string | undefined
 
 /**
  * Accept one factory access JWT (RFC 9068) for this route's audience. Signature, issuer, expiry and `typ` are checked
- * against the Slice 1 key set. The `sid` claim must still name an active OAuth key anchor, which is how consent
- * revocation and refresh-token reuse keep killing the token until Slice 3's revocation set exists. Role claims are
- * not copied onto the principal.
+ * against the Slice 1 key set. Slice 3: a `jti` or `sid` in the revocation set is dead, and a `sid` that names a
+ * refresh family is dead when that family is revoked. Older tokens whose `sid` is still a key id use the anchor.
+ * Role claims are not copied onto the principal.
  */
 async function acceptFactoryAccessJwt(
   state: FactoryState,
@@ -3667,16 +3686,42 @@ async function acceptFactoryAccessJwt(
     return fail('invalid_token', 'Access token is invalid or expired');
   }
   const token = verdict.token;
-  const anchor = state.keys?.healthy ? state.keys.get(token.sid) : undefined;
-  const now = Date.now();
-  if (
-    !anchor ||
-    anchor.revokedAt ||
-    (anchor.expiresAt !== null && !(Date.parse(anchor.expiresAt) > now)) ||
-    anchor.owner !== token.sub ||
-    anchor.oauthClientId !== token.clientId
-  ) {
+  if (state.revocations?.has(token.jti) || state.revocations?.has(token.sid)) {
     return fail('invalid_token', 'Access token is invalid or expired');
+  }
+  try {
+    await state.mcpOAuthStore?.reload();
+  } catch {
+    json(res, 503, { error: 'auth_store_unavailable', message: 'Sign-in state could not be read' });
+    return false;
+  }
+  const family = state.mcpOAuthStore?.liveFamily(token.sid);
+  const now = Date.now();
+  if (family) {
+    const anchor = family.keyId && state.keys?.healthy ? state.keys.get(family.keyId) : undefined;
+    if (
+      family.revoked ||
+      family.principalId !== token.sub ||
+      family.clientId !== token.clientId ||
+      (anchor &&
+        (anchor.revokedAt ||
+          (anchor.expiresAt !== null && !(Date.parse(anchor.expiresAt) > now)) ||
+          anchor.owner !== token.sub ||
+          (anchor.oauthClientId !== undefined && anchor.oauthClientId !== token.clientId)))
+    ) {
+      return fail('invalid_token', 'Access token is invalid or expired');
+    }
+  } else {
+    const anchor = state.keys?.healthy ? state.keys.get(token.sid) : undefined;
+    if (
+      !anchor ||
+      anchor.revokedAt ||
+      (anchor.expiresAt !== null && !(Date.parse(anchor.expiresAt) > now)) ||
+      anchor.owner !== token.sub ||
+      anchor.oauthClientId !== token.clientId
+    ) {
+      return fail('invalid_token', 'Access token is invalid or expired');
+    }
   }
   if (state.principals?.healthy && token.sub.startsWith('user:') && !state.principals.get(token.sub)) {
     return fail('invalid_token', 'Access token is invalid or expired');
@@ -3699,6 +3744,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
 
   if (await handleAsDiscoveryRoutes(state, req, res, path)) return;
   if (await handleMcpOAuthRoutes(state, req, res, path)) return;
+  if (await handleAccountSessionRoutes(state, req, res, path)) return;
 
   if ((path === '/login' || path.startsWith('/api/v1/auth/')) && (await handleLoginRoutes(state, req, res, path))) return;
 

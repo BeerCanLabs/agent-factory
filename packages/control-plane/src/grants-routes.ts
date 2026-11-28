@@ -643,7 +643,14 @@ export async function revokeAllAccess(state: FactoryState, principal: Principal,
     await state.keys!.revoke(k.id, { by: principal.actor });
     cliTokens.push(k.id);
   }
-  const sessions = state.sessions?.destroyForEmails(target.emails) ?? 0;
+  const ended = state.sessions?.destroyForEmails(target.emails) ?? { ended: 0, sids: [] as string[] };
+  try {
+    await state.sessions?.flush();
+  } catch {
+    return { status: 503, body: { error: 'session_store_unavailable', message: 'Sessions could not be revoked' } };
+  }
+  const { endPrincipalRefresh } = await import('./account-sessions.js');
+  const refreshFamilies = await endPrincipalRefresh(state, target.id, ended.sids);
   const ts = new Date().toISOString();
   const by = { actor: principal.actor, ...(principal.onBehalfOf ? { onBehalfOf: principal.onBehalfOf } : {}) };
   for (const g of grants) {
@@ -652,7 +659,7 @@ export async function revokeAllAccess(state: FactoryState, principal: Principal,
       await detachDisallowedPersonalModelsOnAgent(state, g.scope.id, principal.actor, 'principal access revoked (D15)');
     }
   }
-  const summary = { grants: grants.map((g) => g.id), groups, cliTokens, sessions };
+  const summary = { grants: grants.map((g) => g.id), groups, cliTokens, sessions: ended.ended, refreshFamilies };
   state.ledger.append({ timestamp: ts, agentId: 'control-plane', type: 'action', action: 'ACCESS_REVOKED_ALL', ...by, subject: target.id, after: summary });
   return { status: 200, body: { ok: true, principal: target.id, revoked: summary } };
 }
