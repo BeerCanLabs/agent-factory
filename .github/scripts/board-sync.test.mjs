@@ -14,6 +14,8 @@ import {
   decideBoundaryActions,
   parseLatchKeys,
   parseMode,
+  isTrustedBoardPull,
+  readCompletedBoundaryKeys,
   STATUS,
 } from './board-sync.mjs';
 
@@ -259,4 +261,46 @@ test('parseMode: schedule is boundary; issue events are sync; dispatch honors in
   assert.equal(parseMode({ inputs: { mode: 'reconcile' } }, 'workflow_dispatch', { mode: 'reconcile' }), 'reconcile');
   assert.equal(parseMode({}, 'issues', {}), 'sync');
   assert.equal(parseMode({}, 'pull_request_target', {}), 'sync');
+});
+
+test('isTrustedBoardPull accepts same-repo PRs and rejects forks', () => {
+  const sameWebhook = {
+    number: 1,
+    head: { repo: { full_name: 'BeerCanLabs/agent-factory' } },
+    base: { repo: { full_name: 'BeerCanLabs/agent-factory' } },
+  };
+  const sameGraphql = {
+    number: 2,
+    isCrossRepository: false,
+    headRepository: { nameWithOwner: 'BeerCanLabs/agent-factory' },
+  };
+  const forkWebhook = {
+    number: 3,
+    head: { repo: { full_name: 'attacker/agent-factory' } },
+    base: { repo: { full_name: 'BeerCanLabs/agent-factory' } },
+  };
+  const forkGraphql = {
+    number: 4,
+    isCrossRepository: true,
+    headRepository: { nameWithOwner: 'attacker/agent-factory' },
+  };
+  const deletedFork = { number: 5, head: { repo: null }, base: { repo: { full_name: 'BeerCanLabs/agent-factory' } } };
+  assert.equal(isTrustedBoardPull(sameWebhook), true);
+  assert.equal(isTrustedBoardPull(sameGraphql), true);
+  assert.equal(isTrustedBoardPull(forkWebhook), false);
+  assert.equal(isTrustedBoardPull(forkGraphql), false);
+  assert.equal(isTrustedBoardPull(deletedFork), false);
+  assert.equal(isTrustedBoardPull(null), false);
+});
+
+test('readCompletedBoundaryKeys fails closed when the latch cannot be read', async () => {
+  await assert.rejects(
+    () => readCompletedBoundaryKeys('token', 628, {
+      log: { warn() {} },
+      fetchImpl: async () => {
+        throw new Error('network down');
+      },
+    }),
+    /network down/,
+  );
 });

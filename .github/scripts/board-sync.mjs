@@ -108,6 +108,23 @@ export function parseClosingIssueNumbers(text, { owner = "BeerCanLabs", repo = "
   return [...out].sort((a, b) => a - b);
 }
 
+/**
+ * True when a pull request originates from BeerCanLabs/agent-factory, not a fork.
+ * Fork PR title/body keywords must not move Board 4 issue cards.
+ */
+export function isTrustedBoardPull(pr, { owner = "BeerCanLabs", repo = "agent-factory" } = {}) {
+  if (!pr) return false;
+  if (pr.isCrossRepository === true) return false;
+  const expected = `${owner}/${repo}`.toLowerCase();
+  const headName =
+    pr.headRepository?.nameWithOwner ||
+    pr.head?.repo?.full_name ||
+    pr.head?.repo?.nameWithOwner ||
+    null;
+  if (headName) return String(headName).toLowerCase() === expected;
+  return false;
+}
+
 export function isClaimComment(body) {
   return /\*\*Claimed\b/i.test(body || "");
 }
@@ -280,7 +297,7 @@ export async function readCompletedBoundaryKeys(token, latchIssue, { fetchImpl, 
     return parseLatchKeys(data.repository?.issue?.comments?.nodes || []);
   } catch (err) {
     log.warn?.(`Could not read boundary latch on #${latchIssue}: ${err.message}`);
-    return [];
+    throw err;
   }
 }
 
@@ -484,9 +501,9 @@ export async function setItemStatus(token, itemId, optionId, { fetchImpl, projec
 }
 
 /**
- * Replace the Status option list. Callers must pass a payload produced by
- * buildStatusOptionPayload (every kept option has its existing id).
- * Re-reads items before and after; restores status if any card lost its value.
+ * Return the existing Board 4 item for this content, or add the content to
+ * the project if it is not already on the board. Does not change Status
+ * options or views.
  */
 export async function ensureItemOnProject(token, contentId, state, { fetchImpl, projectId = PROJECT_ID } = {}) {
   const found = state.items.find((it) => it.contentId === contentId);
@@ -526,7 +543,8 @@ async function fetchOpenClosingPrs(token, issueNumber, { fetchImpl, owner = "Bee
       repository(owner: $owner, name: $name) {
         pullRequests(first: 50, states: OPEN) {
           nodes {
-            number isDraft title body
+            number isDraft title body isCrossRepository
+            headRepository { nameWithOwner }
             closingIssuesReferences(first: 20) { nodes { number } }
           }
         }
@@ -538,6 +556,7 @@ async function fetchOpenClosingPrs(token, issueNumber, { fetchImpl, owner = "Bee
   const prs = data.repository.pullRequests.nodes || [];
   return prs.filter((pr) => {
     if (pr.isDraft) return false;
+    if (!isTrustedBoardPull(pr, { owner, repo })) return false;
     const fromRefs = (pr.closingIssuesReferences?.nodes || []).some((n) => n.number === issueNumber);
     const fromText = parseClosingIssueNumbers(`${pr.title}\n${pr.body || ""}`).includes(issueNumber);
     return fromRefs || fromText;
@@ -599,6 +618,10 @@ export async function syncFromEvent(token, event, eventName, { fetchImpl, log = 
 
   if (eventName === "pull_request" || eventName === "pull_request_target") {
     const pr = event.pull_request;
+    if (!isTrustedBoardPull(pr)) {
+      log.info?.(`Ignoring fork or cross-repo PR #${pr.number} for Board 4 moves`);
+      return [{ kind: "pull_request", number: pr.number, target: null, reason: "untrusted-pr", applied: false }];
+    }
     const contentId = pr.node_id;
     const prItem = state.items.find((it) => it.contentId === contentId);
     const prCtx = contextFromPull(pr, { currentStatus: prItem?.statusName || null });
