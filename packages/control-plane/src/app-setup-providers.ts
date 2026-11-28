@@ -76,11 +76,16 @@ export function invalidateSecret(state: FactoryState, name: string): void {
   reading.get(state)?.delete(name);
 }
 
+/** #505, GAP-269: how long a single-flight read may hold its slot before release (>56 s worst legitimate mint). */
+export const SECRET_READ_RELEASE_MS = 75_000;
+
 /**
  * #501: readSecret through the control plane's short-lived secret cache (`state.secretCache`, the one pre-flight
  * uses and the setup flows clear through `invalidateSecret` when they store a new value). For hot paths: each uncached
  * read spawns the AWS CLI, which takes seconds on a busy task. Concurrent reads of one name share a single lookup;
  * absent values are not cached, so a value stored later is seen on the next read.
+ * #505: a lookup that never settles is released after `state.singleFlightReleaseMs ?? SECRET_READ_RELEASE_MS`,
+ * settling to `undefined` so the next request starts fresh.
  */
 export async function readSecretCached(state: FactoryState, name: string, ttlMs = SECRET_TTL_MS): Promise<string | undefined> {
   const cache = (state.secretCache ??= new Map());
@@ -91,19 +96,34 @@ export async function readSecretCached(state: FactoryState, name: string, ttlMs 
   const pending = inFlight.get(name);
   if (pending) return pending;
   const gen = secretGeneration(state, name);
-  const p = readSecret(state, name)
-    .then((v) => {
-      // A value read before an invalidation is returned to this caller but not cached.
-      if (v && secretGeneration(state, name) === gen) {
+  const releaseMs = state.singleFlightReleaseMs ?? SECRET_READ_RELEASE_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let released = false;
+  let p!: Promise<string | undefined>;
+  const lookup = readSecret(state, name).then(
+    (v) => {
+      // A value read before an invalidation or after release is not cached.
+      if (!released && v && secretGeneration(state, name) === gen) {
         cache.set(name, { value: v, at: Date.now() });
         if (v.length >= 4 && !isPublicSecretName(name)) state.secretValues.add(v);
       }
       return v;
-    })
-    .finally(() => {
-      // Remove only this read's entry: a newer read may have replaced it after an invalidation.
+    },
+    () => undefined,
+  );
+  const release = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => {
+      released = true;
       if (inFlight.get(name) === p) inFlight.delete(name);
-    });
+      resolve(undefined);
+    }, releaseMs);
+    timer.unref?.();
+  });
+  p = Promise.race([lookup, release]).finally(() => {
+    clearTimeout(timer);
+    // Remove only this read's entry: a newer read may have replaced it after an invalidation or release.
+    if (inFlight.get(name) === p) inFlight.delete(name);
+  });
   inFlight.set(name, p);
   return p;
 }

@@ -61,6 +61,8 @@ const mintGenerations = new WeakMap<FactoryState, Map<string, number>>();
 export const GITHUB_CALL_TIMEOUT_MS = 8_000;
 /** #501: how long the token route waits for a mint; under the gatekeeper-egress's 10 s call limit. */
 export const TOKEN_ROUTE_DEADLINE_MS = 8_000;
+/** #505, GAP-269: how long a single-flight mint may hold its slot before release (>56 s worst legitimate mint). */
+export const MINT_RELEASE_MS = 75_000;
 
 function mintGeneration(state: FactoryState, agentId: string): number {
   return mintGenerations.get(state)?.get(agentId) ?? 0;
@@ -100,18 +102,41 @@ export async function mintInstallationToken(state: FactoryState, agentId: string
   const inFlight = mapOf(minting, state);
   const pending = inFlight.get(key);
   if (pending) return pending;
-  const p = mint(state, agentId, org, key).finally(() => {
-    // A replacement drops this entry and a newer mint may have taken it. Remove only this mint's own.
+  const releaseMs = state.singleFlightReleaseMs ?? MINT_RELEASE_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let released = false;
+  let p!: Promise<MintResult>;
+  const attempt = mint(state, agentId, org, key, () => !released).catch(
+    (): MintResult => ({ ok: false, status: 502, error: 'github_unavailable' }),
+  );
+  const release = new Promise<MintResult>((resolve) => {
+    timer = setTimeout(() => {
+      released = true;
+      if (inFlight.get(key) === p) inFlight.delete(key);
+      console.error(`[github-app] token ${agentId}/${org}: single-flight mint released after ${releaseMs} ms`);
+      resolve({ ok: false, status: 504, error: 'github_timeout' });
+    }, releaseMs);
+    timer.unref?.();
+  });
+  p = Promise.race([attempt, release]).finally(() => {
+    clearTimeout(timer);
+    // A replacement or release drops this entry and a newer mint may have taken it. Remove only this mint's own.
     if (inFlight.get(key) === p) inFlight.delete(key);
   });
   inFlight.set(key, p);
   return p;
 }
 
-async function mint(state: FactoryState, agentId: string, org: string, key: string): Promise<MintResult> {
-  // Captured before any await. A replacement during this mint bumps the generation and the write below is skipped.
+async function mint(
+  state: FactoryState,
+  agentId: string,
+  org: string,
+  key: string,
+  isActive: () => boolean = () => true,
+): Promise<MintResult> {
+  // Captured before any await. A replacement or release during this mint skips the cache writes below.
   const gen = mintGeneration(state, agentId);
-  const stillCurrent = () => mintGeneration(state, agentId) === gen;
+  const stillCurrent = () => isActive() && mintGeneration(state, agentId) === gen;
   const t0 = Date.now();
   const phases: string[] = [];
   const lap = (name: string, since: number) => (phases.push(`${name} ${Date.now() - since} ms`), Date.now());
@@ -186,6 +211,7 @@ async function mintWithin(state: FactoryState, agentId: string, org: string, ms:
       console.error(`[github-app] token ${agentId}/${org}: not ready after ${ms} ms; the mint continues and caches its key`);
       resolve({ ok: false, status: 504, error: 'github_app_token_slow' });
     }, ms);
+    timer.unref?.();
   });
   try {
     return await Promise.race([mintInstallationToken(state, agentId, org), late]);

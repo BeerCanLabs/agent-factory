@@ -95,27 +95,66 @@ export function fileProvider(filePath: string): SecretProvider {
   };
 }
 
+/** #501, #505, K6: a secret store call that has not settled by then fails, so a stuck call cannot hang its caller. */
+export const SECRET_CALL_TIMEOUT_MS = 10_000;
+
+async function withTimeout<T>(
+  timeoutMs: number,
+  fn: (signal: AbortSignal) => Promise<T>,
+  label = 'Secret call',
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${label} timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fn(controller.signal), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type HttpSecretProviderOptions = {
+  timeoutMs?: number;
+};
+
 /**
  * Generic HTTP secrets backend (Vault / AWS SM proxy / GCP SM proxy).
  * GET {baseUrl}/{name} with optional bearer. Response JSON `{ value }` or raw text.
  */
-export function httpProvider(baseUrl: string, token?: string): SecretProvider {
+export function httpProvider(
+  baseUrl: string,
+  token?: string,
+  options?: HttpSecretProviderOptions,
+): SecretProvider {
+  const timeoutMs = options?.timeoutMs ?? SECRET_CALL_TIMEOUT_MS;
   return {
     name: 'http',
     async get(secretName) {
       const url = `${baseUrl.replace(/\/$/, '')}/${encodeURIComponent(secretName)}`;
       try {
-        const res = await fetch(url, {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        });
-        if (!res.ok) return undefined;
-        const text = await res.text();
-        try {
-          const json = JSON.parse(text) as { value?: string; SecretString?: string };
-          return json.value ?? json.SecretString ?? undefined;
-        } catch {
-          return text || undefined;
-        }
+        return await withTimeout(
+          timeoutMs,
+          async (signal) => {
+            const res = await fetch(url, {
+              headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+              signal,
+            });
+            if (!res.ok) return undefined;
+            const text = await res.text();
+            try {
+              const json = JSON.parse(text) as { value?: string; SecretString?: string };
+              return json.value ?? json.SecretString ?? undefined;
+            } catch {
+              return text || undefined;
+            }
+          },
+          'HTTP secret fetch',
+        );
       } catch {
         return undefined;
       }
@@ -130,9 +169,6 @@ export function httpProvider(baseUrl: string, token?: string): SecretProvider {
 export type SecretsManagerSend = {
   send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
 };
-
-/** #501, K6: a Secrets Manager call that has not settled by then fails, so a stuck call cannot hang its caller. */
-export const SECRET_CALL_TIMEOUT_MS = 10_000;
 
 const errorName = (err: unknown): string | undefined => (err instanceof Error ? err.name : undefined);
 const isCurrent = (stages: Record<string, string[]> | undefined): boolean =>
@@ -154,21 +190,8 @@ export function awsSecretsManagerProvider(
 
   // Each call is bounded by this provider's own timer. The abort signal cancels a request already on the wire, but
   // the SDK honours it only in its network step, so the timer alone decides when the call fails.
-  const call = async (command: unknown): Promise<unknown> => {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error(`Secrets Manager call timed out after ${timeoutMs} ms`));
-      }, timeoutMs);
-    });
-    try {
-      return await Promise.race([sm().send(command, { abortSignal: controller.signal }), timedOut]);
-    } finally {
-      clearTimeout(timer);
-    }
-  };
+  const call = (command: unknown): Promise<unknown> =>
+    withTimeout(timeoutMs, (signal) => sm().send(command, { abortSignal: signal }), 'Secrets Manager call');
 
   return {
     name: 'aws-sm',
@@ -230,6 +253,7 @@ export type GcpSecretManagerOptions = {
   prefix?: string;
   fetch?: typeof fetch;
   getAccessToken?: () => Promise<string>;
+  timeoutMs?: number;
 };
 
 let cachedGcpToken: { token: string; expiresAt: number } | undefined;
@@ -265,7 +289,10 @@ export async function getGcpAccessToken(fetchFn: typeof fetch = fetch): Promise<
   } catch {
     // Fall back to gcloud CLI when outside GCE/Cloud Run metadata environment
   }
-  const { stdout } = await execFileAsync('gcloud', ['auth', 'print-access-token'], { encoding: 'utf8' });
+  const { stdout } = await execFileAsync('gcloud', ['auth', 'print-access-token'], {
+    encoding: 'utf8',
+    timeout: SECRET_CALL_TIMEOUT_MS,
+  });
   return stdout.trim();
 }
 
@@ -295,6 +322,7 @@ export function gcpSecretManagerProvider(
   const prefix = options?.prefix ?? '';
   const fetchFn = options?.fetch ?? fetch;
   const tokenFn = options?.getAccessToken ?? (() => getGcpAccessToken(fetchFn));
+  const timeoutMs = options?.timeoutMs ?? SECRET_CALL_TIMEOUT_MS;
   const baseUrl = `https://secretmanager.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`;
 
   if (cli) {
@@ -356,81 +384,109 @@ export function gcpSecretManagerProvider(
     async get(secretName) {
       const id = toGcpSecretId(prefix, secretName);
       try {
-        const token = await tokenFn();
-        const res = await fetchFn(`${baseUrl}/secrets/${encodeURIComponent(id)}/versions/latest:access`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return undefined;
-        const json = (await res.json()) as { payload?: { data?: string } };
-        if (!json.payload?.data) return undefined;
-        const value = Buffer.from(json.payload.data, 'base64').toString('utf8').replace(/\r?\n$/, '');
-        return value || undefined;
+        return await withTimeout(
+          timeoutMs,
+          async (signal) => {
+            const token = await tokenFn();
+            const res = await fetchFn(`${baseUrl}/secrets/${encodeURIComponent(id)}/versions/latest:access`, {
+              headers: { Authorization: `Bearer ${token}` },
+              signal,
+            });
+            if (!res.ok) return undefined;
+            const json = (await res.json()) as { payload?: { data?: string } };
+            if (!json.payload?.data) return undefined;
+            const value = Buffer.from(json.payload.data, 'base64').toString('utf8').replace(/\r?\n$/, '');
+            return value || undefined;
+          },
+          'GCP Secret Manager call',
+        );
       } catch {
         return undefined;
       }
     },
     async put(secretName, value) {
       const id = toGcpSecretId(prefix, secretName);
-      const token = await tokenFn();
-      const addVersion = () =>
-        fetchFn(`${baseUrl}/secrets/${encodeURIComponent(id)}:addVersion`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ payload: { data: Buffer.from(value, 'utf8').toString('base64') } }),
-        });
+      await withTimeout(
+        timeoutMs,
+        async (signal) => {
+          const token = await tokenFn();
+          const addVersion = () =>
+            fetchFn(`${baseUrl}/secrets/${encodeURIComponent(id)}:addVersion`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ payload: { data: Buffer.from(value, 'utf8').toString('base64') } }),
+              signal,
+            });
 
-      let res = await addVersion();
-      if (res.status === 404) {
-        const createRes = await fetchFn(`${baseUrl}/secrets?secretId=${encodeURIComponent(id)}`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ replication: { automatic: {} } }),
-        });
-        if (!createRes.ok && createRes.status !== 409) {
-          throw new Error(`GCP Secret Manager create failed (${createRes.status})`);
-        }
-        res = await addVersion();
-      }
-      if (!res.ok) {
-        throw new Error(`GCP Secret Manager addVersion failed (${res.status})`);
-      }
+          let res = await addVersion();
+          if (res.status === 404) {
+            const createRes = await fetchFn(`${baseUrl}/secrets?secretId=${encodeURIComponent(id)}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ replication: { automatic: {} } }),
+              signal,
+            });
+            if (!createRes.ok && createRes.status !== 409) {
+              throw new Error(`GCP Secret Manager create failed (${createRes.status})`);
+            }
+            res = await addVersion();
+          }
+          if (!res.ok) {
+            throw new Error(`GCP Secret Manager addVersion failed (${res.status})`);
+          }
+        },
+        'GCP Secret Manager call',
+      );
     },
     async has(secretName) {
       const id = toGcpSecretId(prefix, secretName);
       try {
-        const token = await tokenFn();
-        const res = await fetchFn(
-          `${baseUrl}/secrets/${encodeURIComponent(id)}/versions?filter=state:ENABLED&pageSize=1`,
-          { headers: { Authorization: `Bearer ${token}` } },
+        return await withTimeout(
+          timeoutMs,
+          async (signal) => {
+            const token = await tokenFn();
+            const res = await fetchFn(
+              `${baseUrl}/secrets/${encodeURIComponent(id)}/versions?filter=state:ENABLED&pageSize=1`,
+              { headers: { Authorization: `Bearer ${token}` }, signal },
+            );
+            if (!res.ok) return false;
+            const json = (await res.json()) as { versions?: Array<{ state?: string }> };
+            return Array.isArray(json.versions) && json.versions.length > 0;
+          },
+          'GCP Secret Manager call',
         );
-        if (!res.ok) return false;
-        const json = (await res.json()) as { versions?: Array<{ state?: string }> };
-        return Array.isArray(json.versions) && json.versions.length > 0;
       } catch {
         return false;
       }
     },
     async present() {
-      const token = await tokenFn();
-      const result = new Set<string>();
-      let pageToken: string | undefined;
-      do {
-        const params = new URLSearchParams({ pageSize: '500' });
-        if (prefix) params.set('filter', `name:${prefix}`);
-        if (pageToken) params.set('pageToken', pageToken);
-        const res = await fetchFn(`${baseUrl}/secrets?${params.toString()}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) throw new Error(`GCP Secret Manager list failed (${res.status})`);
-        const json = (await res.json()) as { secrets?: Array<{ name?: string }>; nextPageToken?: string };
-        for (const s of json.secrets ?? []) {
-          const shortName = (s.name ?? '').split('/').pop() ?? '';
-          const decoded = fromGcpSecretId(prefix, shortName);
-          if (decoded) result.add(decoded);
-        }
-        pageToken = json.nextPageToken;
-      } while (pageToken);
-      return result;
+      return await withTimeout(
+        timeoutMs,
+        async (signal) => {
+          const token = await tokenFn();
+          const result = new Set<string>();
+          let pageToken: string | undefined;
+          do {
+            const params = new URLSearchParams({ pageSize: '500' });
+            if (prefix) params.set('filter', `name:${prefix}`);
+            if (pageToken) params.set('pageToken', pageToken);
+            const res = await fetchFn(`${baseUrl}/secrets?${params.toString()}`, {
+              headers: { Authorization: `Bearer ${token}` },
+              signal,
+            });
+            if (!res.ok) throw new Error(`GCP Secret Manager list failed (${res.status})`);
+            const json = (await res.json()) as { secrets?: Array<{ name?: string }>; nextPageToken?: string };
+            for (const s of json.secrets ?? []) {
+              const shortName = (s.name ?? '').split('/').pop() ?? '';
+              const decoded = fromGcpSecretId(prefix, shortName);
+              if (decoded) result.add(decoded);
+            }
+            pageToken = json.nextPageToken;
+          } while (pageToken);
+          return result;
+        },
+        'GCP Secret Manager call',
+      );
     },
   };
 }

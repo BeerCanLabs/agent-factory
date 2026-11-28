@@ -304,6 +304,8 @@ export type FactoryState = {
   githubWebBase?: string;
   /** #501: how long the gatekeeper-egress's GitHub App token route waits for a mint. Default 8 s; tests shorten it. */
   githubAppTokenDeadlineMs?: number;
+  /** #505, GAP-269: how long a single-flight secret read or GitHub App mint may hold its slot before release. Default 75 s (>56 s worst legitimate mint); tests shorten it. */
+  singleFlightReleaseMs?: number;
   /** Discord API origin for bot setup (E5.2). Defaults to discord.com; tests point it at a fake. */
   discordApiBase?: string;
   schedules?: ScheduleStore;

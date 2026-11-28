@@ -10,7 +10,8 @@ import { bearerAuth } from '@beercanlabs/factory-auth';
 import { bumpSecretGeneration, MemoryRunStore, secretGeneration } from '@beercanlabs/factory-property-manager';
 import { createFactoryServer, type FactoryState } from './app.js';
 import { githubAppSecretNames } from './github-app-setup.js';
-import { invalidateSecret, isPublicSecretName, readSecretCached } from './app-setup-providers.js';
+import { invalidateSecret, isPublicSecretName, readSecretCached, SECRET_READ_RELEASE_MS } from './app-setup-providers.js';
+import { invalidateGithubApp, MINT_RELEASE_MS, mintInstallationToken } from './github-app-install.js';
 
 // #501: a cold installation-key mint must fit inside the gatekeeper-egress's 10 s call. Secret reads (each an AWS
 // CLI spawn in prod) are cached and run together, concurrent mints are shared, installation ids are kept, the route
@@ -267,6 +268,112 @@ describe('GitHub App token latency (#501)', { concurrency: false }, () => {
       assert.equal(state.secretValues.has(values[n.webhookSecret]), true, 'the webhook secret is');
     } finally {
       cleanupSecrets(Object.keys(values), Object.values(values));
+    }
+  });
+
+  it('#505: default single-flight release bounds exceed the ~56 s worst legitimate mint', () => {
+    assert.ok(SECRET_READ_RELEASE_MS > 56_000, `SECRET_READ_RELEASE_MS (${SECRET_READ_RELEASE_MS}) must exceed 56 s`);
+    assert.ok(MINT_RELEASE_MS > 56_000, `MINT_RELEASE_MS (${MINT_RELEASE_MS}) must exceed 56 s`);
+  });
+
+  it('#505: readSecretCached releases a never-settling provider to undefined so the next read starts fresh', async () => {
+    const KEY = 'LATENCY_TEST_STUCK_READ';
+    let attempts = 0;
+    let resolveLate: ((v: string | undefined) => void) | undefined;
+    const savedProviders = state.providers;
+    state.singleFlightReleaseMs = 30;
+    state.providers = [
+      {
+        name: 'stuck-then-ok',
+        get() {
+          attempts++;
+          if (attempts === 1) {
+            return new Promise<string | undefined>((resolve) => {
+              resolveLate = resolve;
+            });
+          }
+          return Promise.resolve('recovered-secret');
+        },
+      },
+    ];
+    try {
+      // Two concurrent callers share the stuck read; both settle to undefined when the release timer fires.
+      const [first, sharer] = await Promise.all([readSecretCached(state, KEY), readSecretCached(state, KEY)]);
+      assert.equal(first, undefined);
+      assert.equal(sharer, undefined);
+      assert.equal(attempts, 1, 'concurrent callers shared the single-flight lookup');
+
+      // After release, the next read starts fresh and succeeds.
+      assert.equal(await readSecretCached(state, KEY), 'recovered-secret');
+      assert.equal(attempts, 2, 'post-release read started a fresh provider lookup');
+
+      // A late settlement from the released promise must not overwrite the cache.
+      resolveLate?.('stale-after-release');
+      await sleep(10);
+      assert.equal(state.secretCache?.get(KEY)?.value, 'recovered-secret');
+    } finally {
+      delete state.singleFlightReleaseMs;
+      state.providers = savedProviders;
+      cleanupSecrets([KEY], ['recovered-secret', 'stale-after-release']);
+    }
+  });
+
+  it('#505: mintInstallationToken releases a stuck single-flight entry on a never-settling provider so the next mint succeeds', async () => {
+    const names = githubAppSecretNames('rev');
+    invalidateSecret(state, names.id);
+    invalidateSecret(state, names.privateKey);
+    invalidateGithubApp(state, 'rev');
+    let hang = true;
+    const savedProviders = state.providers;
+    state.singleFlightReleaseMs = 30;
+    state.providers = [
+      {
+        name: 'stuck-mint-provider',
+        get(n: string) {
+          if (hang) return new Promise<string | undefined>(() => {});
+          return Promise.resolve(stored.get(n));
+        },
+      },
+    ];
+    try {
+      const [first, sharer] = await Promise.all([
+        mintInstallationToken(state, 'rev', 'sandbox-org'),
+        mintInstallationToken(state, 'rev', 'sandbox-org'),
+      ]);
+      assert.equal(first.ok, false);
+      assert.equal(sharer.ok, false);
+
+      // Provider recovers; next mint starts fresh instead of joining the dead promise.
+      hang = false;
+      const recovered = await mintInstallationToken(state, 'rev', 'sandbox-org');
+      assert.equal(recovered.ok, true);
+    } finally {
+      delete state.singleFlightReleaseMs;
+      state.providers = savedProviders;
+    }
+  });
+
+  it('#505: mintInstallationToken own release timer frees a stuck GitHub call so the next mint succeeds', async () => {
+    invalidateGithubApp(state, 'rev');
+    const hungGh = http.createServer((_req, _res) => {
+      // Intentionally never respond so mint hangs past singleFlightReleaseMs.
+    });
+    await new Promise<void>((r) => hungGh.listen(0, '127.0.0.1', r));
+    const savedApiBase = state.githubApiBase;
+    state.githubApiBase = `http://127.0.0.1:${(hungGh.address() as any).port}`;
+    state.singleFlightReleaseMs = 30;
+    try {
+      const stuck = await mintInstallationToken(state, 'rev', 'sandbox-org');
+      assert.deepEqual(stuck, { ok: false, status: 504, error: 'github_timeout' });
+
+      state.githubApiBase = savedApiBase;
+      const recovered = await mintInstallationToken(state, 'rev', 'sandbox-org');
+      assert.equal(recovered.ok, true);
+    } finally {
+      delete state.singleFlightReleaseMs;
+      state.githubApiBase = savedApiBase;
+      hungGh.closeAllConnections?.();
+      await new Promise<void>((r) => hungGh.close(() => r()));
     }
   });
 });
