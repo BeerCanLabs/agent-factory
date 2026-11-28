@@ -109,18 +109,30 @@ export function requesterOfRun(state: FactoryState, run: Run): ScheduleRequester
     return isLegacy ? { kind: 'system' } : readRequester(s.requestedBy);
   }
   if (run.requestedBy) return { kind: 'identity', provider: run.requestedBy.provider, id: run.requestedBy.id };
-  // Started by an authenticated principal (a console or API wake); allowlist principal actor kinds (user:, service:, cloudflare:, token:, oidc:, test)
-  const isPrincipal = Boolean(
-    run.actor &&
-      (run.actor.startsWith('user:') ||
-        run.actor.startsWith('service:') ||
-        run.actor.startsWith('cloudflare:') ||
-        run.actor.startsWith('token:') ||
-        run.actor.startsWith('oidc:') ||
-        run.actor === 'test' ||
-        run.actor.startsWith('test:')),
+  // Started by an authenticated principal (a console or API wake).
+  if (isPrincipalActor(run.actor)) return { kind: 'principal', actor: run.actor };
+  // Speak-as (#537, GAP-279): the run is started as the shared device (`agent:<id>`), and the enrolled
+  // speaker is the factory-stamped caller. That person is who the run is for, so a later turn from the
+  // same speaker matches. A caller that is not a principal, and any other non-principal actor, stay unknown.
+  const speaker = run.caller?.actor;
+  if (run.actor.startsWith('agent:') && speaker && isPrincipalActor(speaker)) {
+    return { kind: 'principal', actor: speaker };
+  }
+  return undefined;
+}
+
+/** Principal actor kinds the factory records (user:, service:, cloudflare:, token:, oidc:, test). */
+function isPrincipalActor(actor: string | undefined): boolean {
+  return Boolean(
+    actor &&
+      (actor.startsWith('user:') ||
+        actor.startsWith('service:') ||
+        actor.startsWith('cloudflare:') ||
+        actor.startsWith('token:') ||
+        actor.startsWith('oidc:') ||
+        actor === 'test' ||
+        actor.startsWith('test:')),
   );
-  return isPrincipal ? { kind: 'principal', actor: run.actor } : undefined;
 }
 
 /** A stored requester that is well formed, or `undefined`. Stored data is read as untrusted: a bad one is never `system`. */
