@@ -303,6 +303,12 @@ export type AuthenticatedCaller = {
   relationship?: 'owner' | 'family' | 'child';
 };
 
+/**
+ * The role name a team agent's other members hold in the caller block the skill and the shared runtime see.
+ * Spelled like the other cartridge roles (`Owner`, `Family`). It is not assigned as `Owner`, and it is not `Family`.
+ */
+export const TEAM_MEMBER_AGENT_ROLE = 'TeamMember';
+
 export type IngressPrivilege = 'agents.wake' | 'agents.converse';
 
 export type IngressAuthorizeRequest = {
@@ -311,6 +317,11 @@ export type IngressAuthorizeRequest = {
   agentKind?: 'personal' | 'team';
   privilege?: IngressPrivilege;
   owners?: readonly string[];
+  /**
+   * The one admin-set owner of a team agent (config-store `owners` of length 1). Distinct from the legacy `owners`
+   * list, which stays suppressed on a team agent. Absent on a personal agent.
+   */
+  explicitOwner?: string;
   grants?: readonly EffectiveGrant[];
   link?: {
     actor: string;
@@ -325,6 +336,41 @@ export type IngressAuthorizeRequest = {
 export type IngressAuthorizeResult =
   | { allowed: true; caller?: AuthenticatedCaller }
   | { allowed: false; error: 'unauthorized_caller'; reason: string; required?: Role };
+
+function sameActor(a: string, b: string): boolean {
+  return a.toLowerCase() === b.trim().toLowerCase();
+}
+
+/** True when `actor` is the team agent's single admin-set owner. */
+export function explicitOwnerMatches(actor: string, explicitOwner?: string): boolean {
+  return typeof explicitOwner === 'string' && explicitOwner.trim() !== '' && sameActor(actor, explicitOwner);
+}
+
+/**
+ * Roles the skill and the shared runtime see. On a team agent, `Family` is not a team role (it belongs to personal
+ * agents). The explicit owner is `Owner` and not also `TeamMember`. Another member or the accountable lead is
+ * `TeamMember`. The legacy owners list does not appear here.
+ */
+export function callerAgentRoles(args: {
+  team: boolean;
+  isOwner: boolean;
+  base: readonly string[];
+  agentGrants: readonly { readOnly: boolean; grant: { role: string } }[];
+}): string[] {
+  let roles = [...args.base];
+  if (args.team) roles = roles.filter((r) => r.toLowerCase() !== 'family');
+  const member =
+    args.team &&
+    !args.isOwner &&
+    args.agentGrants.some((eg) => !eg.readOnly && (eg.grant.role === 'member' || eg.grant.role === 'accountable-lead'));
+  const named = roles.some((r) => r.toLowerCase() === TEAM_MEMBER_AGENT_ROLE.toLowerCase());
+  if (args.team && (member || named)) {
+    roles = roles.filter((r) => r.toLowerCase() !== TEAM_MEMBER_AGENT_ROLE.toLowerCase());
+    if (!args.isOwner) roles.push(TEAM_MEMBER_AGENT_ROLE);
+  }
+  if (args.isOwner) roles = ['Owner', ...roles.filter((r) => r.toLowerCase() !== 'owner')];
+  return [...new Set(roles)];
+}
 
 /**
  * Perimeter ingress authorization (GAP-090, A1, A2).
@@ -398,6 +444,7 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
       agentId,
       agentKind: req.agentKind,
       owners,
+      ...(req.explicitOwner ? { explicitOwner: req.explicitOwner } : {}),
       memberRoles: linkAgentRoles,
       grants: req.grants,
     },
@@ -423,7 +470,9 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
   const suppressLegacyOwner = effectiveKind === 'team' || req.grants !== undefined;
 
   const isOwner =
-    hasActiveGrantOwner || (!suppressLegacyOwner && owners.some((o) => o.toLowerCase() === actor.toLowerCase()));
+    explicitOwnerMatches(actor, req.explicitOwner) ||
+    hasActiveGrantOwner ||
+    (!suppressLegacyOwner && owners.some((o) => o.toLowerCase() === actor.toLowerCase()));
   const stripSubrolePrefix = (r: string): string =>
     r.toLowerCase().startsWith('subrole:') ? r.slice('subrole:'.length) : r;
   const grantRoleLabels = agentGrants
@@ -432,15 +481,19 @@ export function authorizeIngress(req: IngressAuthorizeRequest): IngressAuthorize
         !eg.readOnly &&
         eg.grant.role !== 'content-owner' &&
         eg.grant.role !== 'accountable-lead' &&
+        eg.grant.role !== 'member' &&
         eg.grant.role !== 'agent-member' &&
         eg.grant.role !== 'owner',
     )
     .map((eg) => stripSubrolePrefix(eg.grant.role))
     .filter((r) => r.trim() !== '' && r.trim().toLowerCase() !== 'owner');
   const mergedMemberRoles = [...new Set([...linkAgentRoles, ...grantRoleLabels])];
-  const effectiveAgentRoles = isOwner
-    ? ['Owner', ...mergedMemberRoles]
-    : mergedMemberRoles;
+  const effectiveAgentRoles = callerAgentRoles({
+    team: effectiveKind === 'team',
+    isOwner,
+    base: mergedMemberRoles,
+    agentGrants,
+  });
 
   const grantFleetRoles = (req.grants ?? [])
     .filter((eg) => !eg.readOnly && eg.grant.scope.kind === 'fleet' && eg.grant.role in ROLE_PRIVILEGES)
@@ -498,7 +551,7 @@ export function directCaller(
   principal: Principal,
   owners: readonly string[],
   privilege: Privilege,
-  opts?: { agentId?: string; agentKind?: 'personal' | 'team'; grants?: readonly EffectiveGrant[] },
+  opts?: { agentId?: string; agentKind?: 'personal' | 'team'; grants?: readonly EffectiveGrant[]; explicitOwner?: string },
 ): AuthenticatedCaller {
   const agentGrants =
     opts?.grants && opts.agentId
@@ -513,7 +566,9 @@ export function directCaller(
     agentGrants.some((eg) => !eg.readOnly && eg.source === 'direct' && eg.grant.role === 'content-owner');
   const suppressLegacyOwner = effectiveKind === 'team' || opts?.grants !== undefined;
   const isOwner =
-    hasActiveGrantOwner || (!suppressLegacyOwner && owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase()));
+    explicitOwnerMatches(principal.actor, opts?.explicitOwner) ||
+    hasActiveGrantOwner ||
+    (!suppressLegacyOwner && owners.some((o) => o.toLowerCase() === principal.actor.toLowerCase()));
   const grantFleetRoles = (opts?.grants ?? [])
     .filter((eg) => !eg.readOnly && eg.grant.scope.kind === 'fleet' && eg.grant.role in ROLE_PRIVILEGES)
     .map((eg) => eg.grant.role as Role);
@@ -527,6 +582,7 @@ export function directCaller(
         !eg.readOnly &&
         eg.grant.role !== 'content-owner' &&
         eg.grant.role !== 'accountable-lead' &&
+        eg.grant.role !== 'member' &&
         eg.grant.role !== 'agent-member' &&
         eg.grant.role !== 'owner',
     )
@@ -534,10 +590,15 @@ export function directCaller(
     .filter((r) => r.trim() !== '' && r.trim().toLowerCase() !== 'owner');
   const effectiveAgentRoles =
     opts?.grants !== undefined
-      ? isOwner
-        ? ['Owner', ...new Set(grantRoleLabels)]
-        : [...new Set(grantRoleLabels)]
-      : undefined;
+      ? callerAgentRoles({
+          team: effectiveKind === 'team',
+          isOwner,
+          base: [...new Set(grantRoleLabels)],
+          agentGrants,
+        })
+      : isOwner && opts?.explicitOwner
+        ? ['Owner']
+        : undefined;
   const role: AuthenticatedCaller['role'] = allRoles.includes('admin')
     ? 'admin'
     : isOwner

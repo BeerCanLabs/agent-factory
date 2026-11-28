@@ -113,6 +113,19 @@ export function accountableLeadOf(state: FactoryState, agentId: string, record?:
   return kind === 'team' ? agent?.accountableLead : undefined;
 }
 
+/**
+ * The team agent's one explicit owner (Dale, 27 Nov 2026, #440). Admin config: the config-store `owners` list when it
+ * holds exactly one principal. A longer list is the legacy implicit list and stays suppressed (no owner). A personal
+ * agent has no explicit owner here; its content-owner is `ownersOf`. This is not a content-owner grant and is never
+ * assigned through role-assignments.
+ */
+export function explicitOwnerOf(state: FactoryState, agentId: string): string | undefined {
+  const agent = findAgentRecord(state, agentId);
+  if (!agent || effectiveAgentKind(agent) !== 'team') return undefined;
+  const owners = state.configs?.current(agentId)?.owners ?? [];
+  return owners.length === 1 ? owners[0] : undefined;
+}
+
 export const MAX_OWNERS = 10;
 
 /** A list of owners as stored: lower-case principal actors, sorted, unique, at most ten. `[]` is "none". */
@@ -320,8 +333,8 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
     json(res, 400, { error: checked.error });
     return true;
   }
-  if (agent.kind === 'team' && checked.owners.length > 0) {
-    json(res, 409, { error: 'agent_kind_conflict', message: 'team agents cannot have owners / content-owner' });
+  if (agent.kind === 'team' && checked.owners.length > 1) {
+    json(res, 409, { error: 'single_owner_only', message: 'a team agent has exactly one explicit owner' });
     return true;
   }
   if ((agent.kind === 'personal' || state.grants !== undefined) && checked.owners.length > 1) {
@@ -338,7 +351,8 @@ async function handleOwners(state: FactoryState, req: http.IncomingMessage, res:
   }
 
   let storedOwners = checked.owners;
-  if (state.grants) {
+  // A team agent's explicit owner is config, not a content-owner grant (team agents still cannot have one).
+  if (state.grants && agent.kind !== 'team') {
     wireGrantStoreKindLookup(state);
     let byActor = principal.actor;
     try {

@@ -11,6 +11,7 @@ import {
   normalizeOwnersToPrincipals,
   parseActor,
 } from './identity.js';
+import { authorize } from './authorize.js';
 import type { EffectiveGrant } from './grants.js';
 import { PrincipalStore } from './principals.js';
 
@@ -424,8 +425,11 @@ describe('Bouncer authorizeIngress', () => {
     assert.equal(resTeamLead.allowed, true);
     if (resTeamLead.allowed && resTeamLead.caller) {
       assert.equal(resTeamLead.caller.role, 'agent-member');
-      assert.deepEqual(resTeamLead.caller.agentRoles, ['Finance']);
+      assert.deepEqual(resTeamLead.caller.agentRoles, ['Finance', 'TeamMember']);
+      assert.equal(resTeamLead.caller.isOwner, false);
       assert.ok(!resTeamLead.caller.agentRoles.includes('accountable-lead'));
+      assert.ok(!resTeamLead.caller.agentRoles.includes('Owner'));
+      assert.ok(!resTeamLead.caller.agentRoles.includes('Family'));
     }
 
     const resAgentMember = authorizeIngress({
@@ -463,6 +467,145 @@ describe('Bouncer authorizeIngress', () => {
       assert.deepEqual(resAgentMember.caller.agentRoles, []);
       assert.ok(!resAgentMember.caller.agentRoles.includes('agent-member'));
     }
+  });
+});
+
+describe('team agent explicit owner and TeamMember (#440)', () => {
+  const grant = (subject: string, role: string, id = role) => ({
+    grant: {
+      id,
+      subject,
+      subjectKind: 'user' as const,
+      scope: { kind: 'agent' as const, id: 'rosie' },
+      role,
+      state: 'active' as const,
+      version: 1,
+      createdAt: '2026-11-27T00:00:00.000Z',
+      createdBy: 'user:admin',
+      updatedAt: '2026-11-27T00:00:00.000Z',
+      updatedBy: 'user:admin',
+      expiresAt: null,
+    },
+    source: 'direct' as const,
+    sourceSubject: subject,
+    readOnly: false,
+  });
+  const ask = (actor: string, extra: Record<string, unknown> = {}) =>
+    authorizeIngress({
+      requestedBy: { provider: 'discord', id: actor },
+      agentId: 'rosie',
+      agentKind: 'team',
+      owners: ['cloudflare:legacy@example.com'],
+      explicitOwner: 'cloudflare:dale.sackrider@gmail.com',
+      link: { actor, roles: actor === 'cloudflare:op@example.com' ? ['operator'] : [] },
+      grants: [],
+      ...extra,
+    });
+
+  it('the explicit owner is Owner, and a legacy owner on the same team agent is not', () => {
+    const owner = ask('cloudflare:dale.sackrider@gmail.com');
+    assert.equal(owner.allowed, true);
+    if (owner.allowed) {
+      assert.equal(owner.caller?.isOwner, true);
+      assert.deepEqual(owner.caller?.agentRoles, ['Owner']);
+      assert.equal(owner.caller?.role, 'agent-owner');
+    }
+    const legacy = ask('cloudflare:legacy@example.com', { link: { actor: 'cloudflare:legacy@example.com', roles: ['operator'] } });
+    assert.equal(legacy.allowed, true);
+    if (legacy.allowed) {
+      assert.equal(legacy.caller?.isOwner, false);
+      assert.deepEqual(legacy.caller?.agentRoles, []);
+      assert.equal(legacy.caller?.role, 'operator');
+    }
+  });
+
+  it('another team member is TeamMember, not Owner and not Family', () => {
+    const member = ask('user:sam', {
+      link: { actor: 'user:sam', agentRoles: { rosie: ['Family', 'TeamMember'] } },
+      grants: [grant('user:sam', 'member')],
+    });
+    assert.equal(member.allowed, true);
+    if (member.allowed) {
+      assert.equal(member.caller?.isOwner, false);
+      assert.deepEqual(member.caller?.agentRoles, ['TeamMember']);
+      assert.ok(!member.caller?.agentRoles?.includes('Owner'));
+      assert.ok(!member.caller?.agentRoles?.includes('Family'));
+    }
+    const viaGroup = ask('user:geordi', { grants: [{ ...grant('group:home', 'member', 'g-group'), source: 'group' as const }] });
+    assert.equal(viaGroup.allowed, true);
+    if (viaGroup.allowed) {
+      assert.equal(viaGroup.caller?.isOwner, false);
+      assert.deepEqual(viaGroup.caller?.agentRoles, ['TeamMember']);
+    }
+  });
+
+  it('an outsider is neither Owner nor TeamMember', () => {
+    const outsider = ask('cloudflare:op@example.com');
+    assert.equal(outsider.allowed, true);
+    if (outsider.allowed) {
+      assert.equal(outsider.caller?.isOwner, false);
+      assert.equal(outsider.caller?.role, 'operator');
+      assert.deepEqual(outsider.caller?.agentRoles, []);
+    }
+  });
+
+  it('a personal agent still gives Family to a family member and Owner to its owner', () => {
+    const family = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'steph' },
+      agentId: 'donna',
+      agentKind: 'personal',
+      owners: ['cloudflare:dale@example.com'],
+      link: { actor: 'cloudflare:stephanie@example.com', agentRoles: { donna: ['Family'] } },
+    });
+    assert.equal(family.allowed, true);
+    if (family.allowed) {
+      assert.equal(family.caller?.isOwner, false);
+      assert.deepEqual(family.caller?.agentRoles, ['Family']);
+    }
+    const owner = authorizeIngress({
+      requestedBy: { provider: 'discord', id: 'dale' },
+      agentId: 'higgins',
+      agentKind: 'personal',
+      owners: ['cloudflare:dale@example.com'],
+      link: { actor: 'cloudflare:dale@example.com', roles: ['operator'] },
+    });
+    assert.equal(owner.allowed, true);
+    if (owner.allowed) {
+      assert.equal(owner.caller?.isOwner, true);
+      assert.deepEqual(owner.caller?.agentRoles, ['Owner']);
+    }
+    const direct = directCaller(
+      { actor: 'cloudflare:dale.sackrider@gmail.com', roles: ['viewer'] },
+      ['cloudflare:legacy@example.com'],
+      'agents.converse',
+      { agentId: 'rosie', agentKind: 'team', explicitOwner: 'cloudflare:dale.sackrider@gmail.com', grants: [] },
+    );
+    assert.equal(direct.isOwner, true);
+    assert.deepEqual(direct.agentRoles, ['Owner']);
+    const member = directCaller({ actor: 'user:sam', roles: [] }, [], 'agents.converse', {
+      agentId: 'rosie',
+      agentKind: 'team',
+      explicitOwner: 'cloudflare:dale.sackrider@gmail.com',
+      grants: [grant('user:sam', 'member')],
+    });
+    assert.equal(member.isOwner, false);
+    assert.deepEqual(member.agentRoles, ['TeamMember']);
+    assert.equal(
+      authorize({
+        principal: { actor: 'user:sam', roles: [] },
+        privilege: 'agents.settings.set',
+        resource: { agentId: 'rosie', agentKind: 'team', explicitOwner: 'cloudflare:dale.sackrider@gmail.com', grants: [grant('user:sam', 'member')] },
+      }).allowed,
+      false,
+    );
+    assert.equal(
+      authorize({
+        principal: { actor: 'cloudflare:dale.sackrider@gmail.com', roles: [] },
+        privilege: 'agents.settings.set',
+        resource: { agentId: 'rosie', agentKind: 'team', owners: ['cloudflare:legacy@example.com'], explicitOwner: 'cloudflare:dale.sackrider@gmail.com' },
+      }).allowed,
+      true,
+    );
   });
 });
 

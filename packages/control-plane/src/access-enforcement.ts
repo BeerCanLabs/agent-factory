@@ -1,11 +1,12 @@
 // E12 item 4 (TSK-174): what a run's requesting person may reach through the agent's skills' routes. The gatekeeper-egress
 // asks the control plane for the answer with the rest of the run (`GET /api/v1/gatekeeper-egress/runs/:id`) and refuses a
 // call the person's roles do not allow, before any credential is injected. The agent is never asked and cannot change it.
+import { TEAM_MEMBER_AGENT_ROLE } from '@beercanlabs/factory-bouncer';
 import { effectiveAccess, type RouteAccess } from '@beercanlabs/factory-contract';
 import type { Run } from '@beercanlabs/factory-property-manager';
 import { effectiveAgentKind, type AgentRecord } from '@beercanlabs/factory-registrar';
 import { agentKindOf, effectiveGrantsForActor, type FactoryState } from './app.js';
-import { ownersOf } from './config-store.js';
+import { explicitOwnerOf, ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
 import { agentInForce } from './agent-settings.js';
 
@@ -65,27 +66,35 @@ function evaluateGrantStoreAccess(
   const kind = agentKindOf(state, agentId) ?? effectiveAgentKind(agent);
   const declaredRoles = agent.roles ?? [];
   const definesMemberRole = declaredRoles.some((r) => r.name === 'member');
+  const declaresTeamMember = declaredRoles.some((r) => r.name === TEAM_MEMBER_AGENT_ROLE);
+  const isLead = agentGrants.some((eg) => !eg.readOnly && eg.source === 'direct' && eg.grant.role === 'accountable-lead');
+  const isMember = agentGrants.some((eg) => !eg.readOnly && eg.grant.role === 'member');
 
   if (kind === 'personal') {
     if (agentGrants.some((eg) => eg.source === 'direct' && eg.grant.role === 'content-owner')) {
       return NOT_RESTRICTED;
     }
   } else if (kind === 'team') {
-    if (agentGrants.some((eg) => eg.source === 'direct' && eg.grant.role === 'accountable-lead')) {
-      return NOT_RESTRICTED;
-    }
-    if (!definesMemberRole && agentGrants.some((eg) => eg.grant.role === 'member')) {
-      return NOT_RESTRICTED;
+    const owner = explicitOwnerOf(state, agentId);
+    if (owner && owner.toLowerCase() === lowerActor) return NOT_RESTRICTED;
+    // An agent that declares TeamMember checks that role. One that does not keeps today's open member and lead access.
+    if (!declaresTeamMember) {
+      if (isLead) return NOT_RESTRICTED;
+      if (!definesMemberRole && isMember) return NOT_RESTRICTED;
     }
   }
 
-  const heldSet = new Set<string>(legacyHeldRoles);
+  const heldSet = new Set<string>(kind === 'team' ? legacyHeldRoles.filter((r) => r.toLowerCase() !== 'family') : legacyHeldRoles);
   for (const eg of agentGrants) {
     const r = eg.grant.role;
     if (r === 'content-owner' || r === 'accountable-lead' || r === 'agent-member' || r === 'owner') continue;
     if (kind === 'team' && r === 'member' && !definesMemberRole) continue;
+    if (kind === 'team' && r.toLowerCase() === 'family') continue;
     const normalized = r.toLowerCase().startsWith('subrole:') ? r.slice('subrole:'.length) : r;
     if (normalized) heldSet.add(normalized);
+  }
+  if (kind === 'team' && declaresTeamMember && (isMember || isLead) && lowerActor !== (explicitOwnerOf(state, agentId) ?? '').toLowerCase()) {
+    heldSet.add(TEAM_MEMBER_AGENT_ROLE);
   }
   return restrictedTo(agent, [...heldSet]);
 }
@@ -120,7 +129,10 @@ export function accessForRequester(
       return NOT_RESTRICTED;
     }
     const kind = agentKindOf(state, agentId) ?? effectiveAgentKind(agent);
-    if (kind !== 'team') {
+    if (kind === 'team') {
+      const owner = explicitOwnerOf(state, agentId);
+      if (owner && owner.toLowerCase() === lowerActor) return NOT_RESTRICTED;
+    } else {
       const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
       if (owners.includes(lowerActor)) return NOT_RESTRICTED;
     }
@@ -146,7 +158,10 @@ export function accessForRequester(
   const isAdmin = roles.includes('admin');
 
   const kind = agentKindOf(state, agentId) ?? effectiveAgentKind(agent);
-  if (kind !== 'team') {
+  if (kind === 'team') {
+    const owner = explicitOwnerOf(state, agentId);
+    if (owner && owner.toLowerCase() === actor) return NOT_RESTRICTED;
+  } else {
     const owners = ownersOf(state, agentId).map((o) => o.toLowerCase());
     if (owners.includes(actor)) return NOT_RESTRICTED;
   }

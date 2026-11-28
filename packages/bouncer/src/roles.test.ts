@@ -366,7 +366,7 @@ describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D2
       ['agents.converse', 'agents.wake', 'approvals.decide', 'content.submit'].sort(),
     );
 
-    // Stale legacy owners on a team agent grant nothing
+    // Stale legacy owners on a team agent grant nothing. The one explicit owner does.
     const staleOwner = as('user:stale');
     assert.equal(
       allowed(staleOwner, 'agents.settings.set', {
@@ -376,6 +376,16 @@ describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D2
       }),
       false,
     );
+    assert.equal(
+      allowed(staleOwner, 'agents.settings.set', {
+        agentId: 'archie',
+        agentKind: 'team',
+        owners: ['user:stale'],
+        explicitOwner: 'user:stale',
+      }),
+      true,
+    );
+    assert.equal(allowed(geordi, 'agents.settings.set', { ...memberRes, explicitOwner: 'user:sarah' }), false);
 
     // Ingress authorization admits team member via grants without legacy link roles
     const ingress = authorizeIngress({
@@ -391,6 +401,9 @@ describe('S2b: personal vs team agent grant authorization (D7, D11, D15, D24, D2
     if (ingress.allowed) {
       assert.equal(ingress.caller?.role, 'agent-member');
       assert.equal(ingress.caller?.isOwner, false);
+      assert.deepEqual(ingress.caller?.agentRoles, ['TeamMember']);
+      assert.ok(!ingress.caller?.agentRoles?.includes('Owner'));
+      assert.ok(!ingress.caller?.agentRoles?.includes('Family'));
     }
   });
 });

@@ -226,8 +226,75 @@ def _child_speaker(context: dict) -> bool:
     return isinstance(caller, dict) and caller.get("relationship") == "child"
 
 
+TEAM_MEMBER_ROLE = "TeamMember"
+
+
+def _role_rules(roles: list, held: list[str], skill: str) -> list[dict]:
+    by_name = {r.get("name"): r for r in roles if isinstance(r, dict) and isinstance(r.get("name"), str)}
+    rules: list[dict] = []
+    for name in held:
+        role = by_name.get(name)
+        if not role:
+            continue
+        skills = role.get("skills") if isinstance(role.get("skills"), dict) else {}
+        for key in (skill, "*"):
+            rule = skills.get(key)
+            if isinstance(rule, dict):
+                rules.append(rule)
+    return rules
+
+
+def skill_action_refusal(roles: object, caller: object, skill: str, action: str) -> str | None:
+    """Refuse a skill action the caller's config roles do not allow.
+
+    Applies only when the configuration declares `TeamMember` (a team agent). Personal agents, and a team
+    agent that has not declared that role, keep today's behavior: the gatekeeper-egress judges routes.
+    `None` means the call may proceed. A string is the tool result to return instead.
+    """
+    if not isinstance(roles, list) or not any(isinstance(r, dict) and r.get("name") == TEAM_MEMBER_ROLE for r in roles):
+        return None
+    if not isinstance(caller, dict):
+        return None
+    factory_roles = caller.get("roles")
+    if isinstance(factory_roles, list) and any(r in ("admin", "operator") for r in factory_roles):
+        return None
+    actor = caller.get("actor")
+    if not isinstance(actor, str) or not actor or actor == "system":
+        return None
+    held: list[str] = []
+    if caller.get("isOwner") is True:
+        held.append("Owner")
+    named = caller.get("agentRoles")
+    if isinstance(named, list):
+        for role in named:
+            if isinstance(role, str) and role not in held:
+                held.append(role)
+    rules = _role_rules(roles, held, skill)
+    if not rules:
+        return "error: access denied: this caller does not hold a role that allows this action"
+    allow: set[str] = set()
+    deny: set[str] = set()
+    for rule in rules:
+        for item in rule.get("allow") or []:
+            if isinstance(item, str):
+                allow.add(item)
+        for item in rule.get("deny") or []:
+            if isinstance(item, str):
+                deny.add(item)
+    if "*" in deny or action in deny:
+        return "error: access denied: this caller's role denies this action"
+    if "*" in allow or action in allow:
+        return None
+    return "error: access denied: this caller's role does not allow this action"
+
+
 def run_tool(tool: Tool, raw_arguments: str, context: dict) -> str:
     label = f"{tool.skill}/{tool.name}"
+    if not context.get("smoke"):
+        refused = skill_action_refusal(context.get("roles"), context.get("caller"), tool.skill, tool.name)
+        if refused is not None:
+            log_tool_error(label, "reported: role_denied")
+            return refused
     if tool.name in _AGENT_TO_AGENT_TOOLS and _child_speaker(context):
         log_tool_error(label, "reported: child_restricted")
         return json.dumps({

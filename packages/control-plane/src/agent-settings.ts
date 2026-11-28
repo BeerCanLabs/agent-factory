@@ -21,7 +21,7 @@ import type { Principal } from '@beercanlabs/factory-auth';
 import { applySettingsChange, changedParts, type AgentRecord, type AgentSettings, type DeclaredRole } from '@beercanlabs/factory-registrar';
 import { BUILTIN_AGENT_IDS, registryOf } from '@beercanlabs/factory-registrar';
 import { agentKindOf, effectiveGrantsForActor, requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { changeReason, configOf, ledgerVersion, ownersOf } from './config-store.js';
+import { changeReason, configOf, explicitOwnerOf, ledgerVersion, ownersOf } from './config-store.js';
 import { skillRegistry } from './skills.js';
 
 /** The section the factory holds for the agent, if any. */
@@ -71,6 +71,7 @@ export function canReadSettings(state: FactoryState, principal: Principal, agent
       agentId,
       agentKind: agentKindOf(state, agentId),
       owners: ownersOf(state, agentId),
+      ...(explicitOwnerOf(state, agentId) ? { explicitOwner: explicitOwnerOf(state, agentId) } : {}),
       ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   }).allowed;

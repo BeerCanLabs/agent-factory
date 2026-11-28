@@ -11,7 +11,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from runtime.skills import MAX_LOG_CHARS, Tool, load_skills, log_tool_error, run_tool
+from runtime.skills import MAX_LOG_CHARS, Tool, load_skills, log_tool_error, run_tool, skill_action_refusal
 
 
 class TestSkills(unittest.TestCase):
@@ -282,6 +282,65 @@ class ChildSpeakerToolGuard(unittest.TestCase):
         )
         self.assertEqual(out, "should-not-run")
         self.assertEqual(called["n"], 1)
+
+ROSIE_ROLES = [
+    {
+        "name": "TeamMember",
+        "skills": {
+            "home-assistant": {"allow": ["*"], "deny": ["automations"]},
+            "action-scheduling": {"deny": ["*"]},
+        },
+    },
+    {"name": "Owner", "skills": {"*": {"allow": ["*"]}}},
+]
+
+
+class TeamAgentRoleGate(unittest.TestCase):
+    def run_named(self, skill, action, caller):
+        called = {"n": 0}
+
+        def handler(args, ctx):
+            called["n"] += 1
+            return "ran"
+
+        out = run_tool(Tool(skill, action, "", {}, handler), "{}", {"caller": caller, "roles": ROSIE_ROLES})
+        return out, called["n"]
+
+    def test_explicit_owner_may_use_owner_actions(self):
+        for skill, action in (("home-assistant", "turn_on"), ("home-assistant", "automations"), ("action-scheduling", "schedule")):
+            out, n = self.run_named(skill, action, {"actor": "cloudflare:dale.sackrider@gmail.com", "isOwner": True, "agentRoles": ["Owner"]})
+            self.assertEqual(out, "ran", action)
+            self.assertEqual(n, 1)
+
+    def test_team_member_may_control_devices_and_not_owner_actions(self):
+        out, n = self.run_named("home-assistant", "turn_on", {"actor": "user:sam", "agentRoles": ["TeamMember"]})
+        self.assertEqual(out, "ran")
+        self.assertEqual(n, 1)
+        for skill, action in (("home-assistant", "automations"), ("action-scheduling", "schedule")):
+            out, n = self.run_named(skill, action, {"actor": "user:sam", "isOwner": False, "agentRoles": ["TeamMember"]})
+            self.assertIn("access denied", out)
+            self.assertEqual(n, 0)
+
+    def test_outsider_is_refused_and_a_personal_agent_is_not_gated_here(self):
+        out, n = self.run_named("home-assistant", "turn_on", {"actor": "user:stranger", "agentRoles": []})
+        self.assertIn("access denied", out)
+        self.assertEqual(n, 0)
+        called = {"n": 0}
+
+        def handler(args, ctx):
+            called["n"] += 1
+            return "ran"
+
+        personal = [{"name": "Family", "skills": {"home-assistant": {"allow": ["*"]}}}]
+        out = run_tool(
+            Tool("home-assistant", "turn_on", "", {}, handler),
+            "{}",
+            {"caller": {"actor": "user:stephanie", "agentRoles": ["Family"]}, "roles": personal},
+        )
+        self.assertEqual(out, "ran")
+        self.assertEqual(called["n"], 1)
+        self.assertIsNone(skill_action_refusal(personal, {"actor": "user:stephanie", "agentRoles": ["Family"]}, "home-assistant", "turn_on"))
+
 
 if __name__ == "__main__":
     unittest.main()

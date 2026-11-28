@@ -28,7 +28,7 @@ import {
   requestBasePrincipal,
   type FactoryState,
 } from './app.js';
-import { ownersOf } from './config-store.js';
+import { explicitOwnerOf, ownersOf } from './config-store.js';
 import { holdDecider } from './decision-holds.js';
 import { callerMayUseScopedGrantTools, rolesForSubjectActor } from './grants-routes.js';
 import { verifySession } from './login.js';
@@ -633,6 +633,7 @@ export async function handleMcp(
                       agentId: aid,
                       agentKind: agentKindOf(state, aid),
                       owners: ownersOf(state, aid),
+                      ...(explicitOwnerOf(state, aid) ? { explicitOwner: explicitOwnerOf(state, aid) } : {}),
                       grants: grantRes.grants,
                       ownsAnyAgent: ownsAny,
                       ownsPersonalAgent: ownsPersonal,
@@ -695,6 +696,7 @@ export async function handleMcp(
                     agentId: aid,
                     agentKind: agentKindOf(state, aid),
                     owners: ownersOf(state, aid),
+                    ...(explicitOwnerOf(state, aid) ? { explicitOwner: explicitOwnerOf(state, aid) } : {}),
                     grants: grantRes.grants,
                   },
                 }).allowed,
@@ -809,6 +811,7 @@ export async function handleMcp(
                     agentId: targetAgentId,
                     agentKind: agentKindOf(state, targetAgentId),
                     owners: ownersOf(state, targetAgentId),
+                    ...(explicitOwnerOf(state, targetAgentId) ? { explicitOwner: explicitOwnerOf(state, targetAgentId) } : {}),
                   }
                 : {}),
               ownsAnyAgent: ownsAny,

@@ -56,7 +56,7 @@ CALLER_GUIDANCE = (
 )
 
 _RELATIONSHIPS = frozenset({"owner", "family", "child"})
-_ROLE_NAME = frozenset({"Owner", "Family"})
+_ROLE_NAME = frozenset({"Owner", "Family", "TeamMember"})
 
 
 def _plain_token(value: object, max_len: int) -> str | None:
@@ -262,7 +262,7 @@ def converse(factory: Factory, soul: str, mind: Mind, tools: dict[str, Tool], pa
                     log_tool_error(f"memory/{name}", f"{type(err).__name__}: {err}")
                     out = f"error: {err}"
             elif name in tools:
-                out = run_tool(tools[name], fn.get("arguments") or "", {"caller": caller_of(payload), "turnId": payload.get("turnId")})
+                out = run_tool(tools[name], fn.get("arguments") or "", {"caller": caller_of(payload), "turnId": payload.get("turnId"), "roles": getattr(factory, "roles", None)})
             else:
                 log_tool_error(name[:64] or "(unnamed)", "the model called a tool that is not loaded")
                 out = f"error: no tool named {name}"
@@ -360,6 +360,7 @@ def main(factory: Factory | None = None) -> int:
     factory.owners = config.get("owners") if isinstance(config.get("owners"), list) else []
     factory.timezone = config.get("timezone") if isinstance(config.get("timezone"), str) else None
     factory.facts = config.get("facts") if isinstance(config.get("facts"), list) else None
+    factory.roles = config.get("roles") if isinstance(config.get("roles"), list) else []
     relayed = relay_tools(factory, memory_dir, factory.owners)
     reserved = {spec["function"]["name"] for spec, _ in mind.tools()} | {t.name for t in relayed}
     loaded, problems = load_skills(config.get("skills") or [], reserved=reserved)

@@ -19,7 +19,7 @@ import type { Role } from '@beercanlabs/factory-auth';
 import { isProvider, type IdentityProvider } from './identity-links.js';
 import { effectiveRoles } from './agent-settings.js';
 import { agentKindOf, effectiveGrantsForActor, requirePrivilege, json, readJson, type FactoryState } from './app.js';
-import { ownersOf } from './config-store.js';
+import { explicitOwnerOf, ownersOf } from './config-store.js';
 import { requesterOfRun } from './schedules.js';
 import type { Run } from '@beercanlabs/factory-property-manager';
 
@@ -100,6 +100,7 @@ export function mayApproveChange(state: FactoryState, principal: { actor: string
       agentId,
       agentKind: agentKindOf(state, agentId),
       owners: ownersOf(state, agentId),
+      ...(explicitOwnerOf(state, agentId) ? { explicitOwner: explicitOwnerOf(state, agentId) } : {}),
       ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   }).allowed;

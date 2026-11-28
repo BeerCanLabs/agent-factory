@@ -7,7 +7,7 @@ import { ownerOf, skillVisibleTo, visibilityOf, type SkillViewer } from '@beerca
 import type { Principal } from '@beercanlabs/factory-auth';
 import { authorize } from '@beercanlabs/factory-bouncer';
 import { catalogEntryOf, checkPersonalByomModelsForAgent, json, readJson, requirePrivilege, type FactoryState } from './app.js';
-import { ownersOf } from './config-store.js';
+import { explicitOwnerOf, ownersOf } from './config-store.js';
 import { skillRegistry } from './skills.js';
 
 const SKILL_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -281,7 +281,13 @@ export async function applyTrainingForCaller(
   if (!op) return { status: 400, body: { error: 'training_op_invalid' } };
   const known = SKILL_ID.test(id) ? skillRegistry(state).versions(id) : [];
   const ownerAgent = known[0] ? ownerOf(known[0]) : undefined;
-  const resource = ownerAgent ? { agentId: ownerAgent, owners: ownersOf(state, ownerAgent) } : undefined;
+  const resource = ownerAgent
+    ? {
+        agentId: ownerAgent,
+        owners: ownersOf(state, ownerAgent),
+        ...(explicitOwnerOf(state, ownerAgent) ? { explicitOwner: explicitOwnerOf(state, ownerAgent) } : {}),
+      }
+    : undefined;
   const decision = op === 'cap'
     ? authorize({ principal, privilege: 'skills.training.fund', ...(resource ? { resource } : {}) })
     : authorize({ principal, privilege: 'skills.training.run', ...(resource ? { resource } : {}) });

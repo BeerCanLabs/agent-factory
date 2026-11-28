@@ -78,7 +78,7 @@ import { applyKillSwitch } from '@beercanlabs/factory-property-manager';
 import { registryOf } from '@beercanlabs/factory-registrar';
 import { applyConfig, triggerApply, type ApplyOutcome } from './apply.js';
 import { handleSkillGrantTransfer } from './transfers.js';
-import { accountableLeadOf, configOf, ledgerVersion, ownersOf } from './config-store.js';
+import { accountableLeadOf, configOf, explicitOwnerOf, ledgerVersion, ownersOf } from './config-store.js';
 import {
   AdoptionStore,
   FULL_SHA,
@@ -757,6 +757,7 @@ async function register(state: FactoryState, req: http.IncomingMessage, res: htt
                 agentId: manifest.owner,
                 agentKind: agentKindOf(state, manifest.owner),
                 owners: ownersOf(state, manifest.owner),
+                ...(explicitOwnerOf(state, manifest.owner) ? { explicitOwner: explicitOwnerOf(state, manifest.owner) } : {}),
                 ...(grantRes.ok && grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
               },
             }).allowed
@@ -911,6 +912,7 @@ async function decide(
             agentId: owner!,
             agentKind: agentKindOf(state, owner!),
             owners: ownersOf(state, owner!),
+            ...(explicitOwnerOf(state, owner!) ? { explicitOwner: explicitOwnerOf(state, owner!) } : {}),
             ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
           },
         })

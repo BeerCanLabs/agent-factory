@@ -31,6 +31,11 @@ export type AuthorizeResource = {
   agentId?: string;
   agentKind?: 'personal' | 'team';
   owners?: readonly string[];
+  /**
+   * The one admin-set owner of a team agent. Honored even when legacy `owners` are suppressed. A team member is not
+   * this person and does not receive owner privileges from it.
+   */
+  explicitOwner?: string;
   requester?: { actor?: string };
   memberRoles?: readonly string[];
   ownsAnyAgent?: boolean;
@@ -46,6 +51,11 @@ export type AuthorizeRequest = { principal: Principal; privilege: Privilege; res
 export type AuthorizeResult = { allowed: true } | { allowed: false; required: Role };
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** The team agent's one admin-set owner. Kept here so authorize does not import identity (identity imports authorize). */
+function explicitOwnerMatches(actor: string, explicitOwner?: string): boolean {
+  return typeof explicitOwner === 'string' && explicitOwner.trim() !== '' && same(actor, explicitOwner.trim());
+}
 
 /**
  * A2, E4, E9, D7, D11, D15, D29, S2b: may this caller do this? The principal's identity is already verified by the
@@ -233,8 +243,12 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
       }
     }
 
-    if (resource.owners || resource.requester || resource.memberRoles) {
+    if (resource.explicitOwner || resource.owners || resource.requester || resource.memberRoles) {
       const actor = principal.actor;
+      const explicitOwner =
+        explicitOwnerMatches(actor, resource.explicitOwner) &&
+        DERIVED_ROLE_PRIVILEGES['agent-owner'].includes(privilege) &&
+        !(privilege === 'approvals.decide' && resource.requester);
       const owner =
         !suppressLegacyOwner &&
         (resource.owners ?? []).some((o) => same(o, actor)) &&
@@ -248,7 +262,7 @@ function authorizeUnscoped(req: AuthorizeRequest): AuthorizeResult {
       const member =
         (resource.memberRoles ?? []).some((r) => typeof r === 'string' && r.trim() !== '' && r.trim().toLowerCase() !== 'owner') &&
         DERIVED_ROLE_PRIVILEGES['agent-member'].includes(privilege);
-      if (owner || requester || member) return { allowed: true };
+      if (explicitOwner || owner || requester || member) return { allowed: true };
     }
   }
 

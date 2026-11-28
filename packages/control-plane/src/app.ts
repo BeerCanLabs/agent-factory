@@ -111,7 +111,7 @@ import { wireHelperWakes, type HelperWakeLog } from './helper-wakes.js';
 import { agentConfigForRun, applyAgentOwnershipGrant, deployConfigured, handleAgentCreation, handleConvertAgent, handleRuntimeRoutes, registrationRefusal, resolveAgentOwnershipOnSubmit, type SharedRuntimePin } from './agent-creation.js';
 import { handleRoleAssignments, handleRoleRequest, applyApprovedChange, mayApproveChange } from './role-assignments.js';
 import { accessForRequester, accessForRun, hasDeniedRoute } from './access-enforcement.js';
-import { accountableLeadOf, changeReason, configOf, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
+import { accountableLeadOf, changeReason, configOf, explicitOwnerOf, handleConfig, ownersOf, recordConfig, removeConfig } from './config-store.js';
 import { backfillMissingSkillPackages, effectiveAgentSkillActionHolds, handleSkills, resumeSkillChecks } from './skills.js';
 import { applyTrainingForCaller, handleSkillTraining } from './skill-training.js';
 import { buildSkillsFor, isDeploying, runDeploy } from './apply.js';
@@ -651,10 +651,12 @@ export function resolvePrincipalCaller(
       }
     : principal;
   const targetAgent = findAgentRecord(state, agentId);
+  const explicitOwner = explicitOwnerOf(state, agentId);
   const caller = directCaller(targetPrincipal, ownersOf(state, agentId), privilege, {
     agentId,
     agentKind: targetAgent ? effectiveAgentKind(targetAgent) : agentKindOf(state, agentId),
     ...(callerGrantRes.grants !== undefined ? { grants: callerGrantRes.grants } : {}),
+    ...(explicitOwner ? { explicitOwner } : {}),
   });
   return { ok: true, caller };
 }
@@ -1357,6 +1359,7 @@ export function isSenderManager(
             agentId,
             agentKind: agentKindOf(state, agentId),
             owners: ownersOf(state, agentId),
+            ...(explicitOwnerOf(state, agentId) ? { explicitOwner: explicitOwnerOf(state, agentId) } : {}),
             grants: grantRes.grants,
           },
         }).allowed
@@ -1387,6 +1390,7 @@ export function isSenderManager(
           agentId,
           agentKind: agentKindOf(state, agentId),
           owners: ownersOf(state, agentId),
+          ...(explicitOwnerOf(state, agentId) ? { explicitOwner: explicitOwnerOf(state, agentId) } : {}),
           grants: grantRes.grants,
         },
       }).allowed
@@ -1441,6 +1445,7 @@ export function canRunManageModels(
             agentId: run.agentId,
             agentKind: agentKindOf(state, run.agentId),
             owners: ownersOf(state, run.agentId),
+            ...(explicitOwnerOf(state, run.agentId) ? { explicitOwner: explicitOwnerOf(state, run.agentId) } : {}),
             grants: grantRes.grants,
           },
         }).allowed
@@ -1484,6 +1489,7 @@ export function canRunManageModels(
             agentId: run.agentId,
             agentKind: agentKindOf(state, run.agentId),
             owners: ownersOf(state, run.agentId),
+            ...(explicitOwnerOf(state, run.agentId) ? { explicitOwner: explicitOwnerOf(state, run.agentId) } : {}),
             grants: grantRes.grants,
           },
         }).allowed
@@ -1935,6 +1941,7 @@ export async function requirePrivilege(
           agentId: resource.agentId,
           agentKind: agentKindOf(state, resource.agentId),
           owners: normalizedOwners,
+          ...(explicitOwnerOf(state, resource.agentId) ? { explicitOwner: explicitOwnerOf(state, resource.agentId) } : {}),
         }
       : {}),
     ...(resource?.skillId ? { skillId: resource.skillId } : {}),
@@ -3267,6 +3274,7 @@ export function mayDecide(state: FactoryState, principal: { actor: string; roles
       agentId: approval.agentId,
       agentKind: agentKindOf(state, approval.agentId),
       owners: ownersOf(state, approval.agentId),
+      ...(explicitOwnerOf(state, approval.agentId) ? { explicitOwner: explicitOwnerOf(state, approval.agentId) } : {}),
       ...(grantRes.grants !== undefined ? { grants: grantRes.grants } : {}),
     },
   });
@@ -4583,6 +4591,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         agentKind: agentKindOf(state, runCreate[1]),
         privilege: 'agents.wake',
         owners: ownersOf(state, runCreate[1]),
+        ...(explicitOwnerOf(state, runCreate[1]) ? { explicitOwner: explicitOwnerOf(state, runCreate[1]) } : {}),
         grants: linkGrants?.grants,
         link,
         isIngressCaller: isIngress,
@@ -4823,6 +4832,7 @@ async function routeInner(state: FactoryState, req: http.IncomingMessage, res: h
         agentKind: effectiveAgentKind(agent),
         privilege: 'agents.converse',
         owners: ownersOf(state, agent.id),
+        ...(explicitOwnerOf(state, agent.id) ? { explicitOwner: explicitOwnerOf(state, agent.id) } : {}),
         grants: linkGrants?.grants,
         link,
         isIngressCaller: isIngress,

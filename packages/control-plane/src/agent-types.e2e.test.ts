@@ -32,7 +32,7 @@ import {
 } from './app.js';
 import { accessForRun } from './access-enforcement.js';
 import { IdentityLinkStore } from './identity-links.js';
-import { accountableLeadOf, ownersOf } from './config-store.js';
+import { accountableLeadOf, explicitOwnerOf, ownersOf } from './config-store.js';
 import { requesterOfRun, scheduleRunOptions } from './schedules.js';
 import { loadSkills } from './skills.js';
 
@@ -528,7 +528,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     assert.equal(multiOwnerPut.status, 409);
     assert.equal(multiOwnerPut.body.error, 'single_owner_only');
 
-    // 5. Team with non-empty owners -> 409 agent_kind_conflict (on create and on PUT /owners)
+    // 5. Creating a team agent with owners is still a content-owner conflict. Admin config may set exactly one explicit owner.
     const teamWithOwnersCreate = await call(
       'POST',
       '/api/v1/agents',
@@ -544,12 +544,23 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
       { owners: ['user:sarah'] },
       TOKENS.admin,
     );
-    assert.equal(teamWithOwnersPut.status, 409);
-    assert.equal(teamWithOwnersPut.body.error, 'agent_kind_conflict');
+    assert.equal(teamWithOwnersPut.status, 200, JSON.stringify(teamWithOwnersPut.body));
+    assert.deepEqual(ownersOf(state, 'incident-triage'), [], 'the explicit owner is not a content-owner');
+    assert.equal(explicitOwnerOf(state, 'incident-triage'), 'user:sarah');
+    const twoOwners = await call(
+      'PUT',
+      '/api/v1/agents/incident-triage/owners',
+      { owners: ['user:sarah', 'user:dale'] },
+      TOKENS.admin,
+    );
+    assert.equal(twoOwners.status, 409);
+    assert.equal(twoOwners.body.error, 'single_owner_only');
+    assert.equal(explicitOwnerOf(state, 'incident-triage'), 'user:sarah', 'a rejected write leaves the one owner');
     assert.equal(
       (await call('PUT', '/api/v1/agents/incident-triage/owners', { owners: [] }, TOKENS.admin)).status,
       200,
     );
+    assert.equal(explicitOwnerOf(state, 'incident-triage'), undefined);
 
     // 6. Invalid kind -> 400 invalid_kind
     const badKind = await call('POST', '/api/v1/agents', baseSpec('bad-kind', { kind: 'hybrid' }), TOKENS.admin);
@@ -872,7 +883,7 @@ describe('S2b: Agent types (personal vs team) and ownership model (#352)', { con
     );
     assert.equal(sarahIngressWake.status, 202, JSON.stringify(sarahIngressWake.body));
     const sarahIngressRun = state.runs.get(sarahIngressWake.body.runId)!;
-    assert.deepEqual(sarahIngressRun.caller?.agentRoles, ['Finance'], 'F2: structural accountable-lead role does NOT leak, while subrole:Finance is preserved');
+    assert.deepEqual(sarahIngressRun.caller?.agentRoles, ['Finance', 'TeamMember'], 'accountable-lead is not a skill role; a lead who is not the explicit owner is TeamMember');
 
     // Team member Geordi clears a held request on incident-triage (D29)
     const teamHold1 = holdOnRun('incident-triage', { provider: 'discord', id: 'sarah-discord-1' });

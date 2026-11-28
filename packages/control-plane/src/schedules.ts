@@ -16,7 +16,7 @@ import { DEFAULT_TIMEZONE, cronIssue, isTimeZone, type ScheduledAction, type Sch
 import { actorIsAdmin, agentKindOf, effectiveGrantsForActor, json, readJson, requirePrivilege, type FactoryState } from './app.js';
 import { createRun, isTerminal, SYSTEM, type Run } from '@beercanlabs/factory-property-manager';
 import { verifyRun } from '@beercanlabs/factory-gatekeeper/run-token';
-import { ownersOf } from './config-store.js';
+import { explicitOwnerOf, ownersOf } from './config-store.js';
 
 function tokenRolesFromEnv(tokenName: string): Role[] | undefined {
   if (tokenName === 'admin') return ['admin'];
@@ -270,6 +270,7 @@ export function scheduleRunOptions(
       agentKind,
       privilege: 'agents.wake',
       owners,
+      ...(explicitOwnerOf(state, sched.agentId) ? { explicitOwner: explicitOwnerOf(state, sched.agentId) } : {}),
       ...(linkGrants?.grants !== undefined ? { grants: linkGrants.grants } : {}),
       link,
       isIngressCaller: true,
@@ -299,6 +300,7 @@ export function scheduleRunOptions(
     agentKind,
     privilege: 'agents.wake',
     owners,
+    ...(explicitOwnerOf(state, sched.agentId) ? { explicitOwner: explicitOwnerOf(state, sched.agentId) } : {}),
     ...(principalGrants.grants !== undefined ? { grants: principalGrants.grants } : {}),
     link: bareCandidate.link,
     isIngressCaller: true,
@@ -322,6 +324,7 @@ export function scheduleRunOptions(
       agentKind,
       privilege: 'agents.wake',
       owners,
+      ...(explicitOwnerOf(state, sched.agentId) ? { explicitOwner: explicitOwnerOf(state, sched.agentId) } : {}),
       ...(principalGrants.grants !== undefined ? { grants: principalGrants.grants } : {}),
       link,
       isIngressCaller: true,
