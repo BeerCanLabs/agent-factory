@@ -18,16 +18,16 @@ export const LegacyCredentialsView: React.FC = () => {
           if (!cancelled) setError(err instanceof Error ? err.message : String(err));
         });
     };
-    load();
     const refresh = () => {
       if (document.visibilityState === 'visible') load();
     };
-    window.addEventListener('factory-grants-stale', refresh);
+    // Do not refetch this report on factory-grants-stale. Its own response still carries that
+    // header while the token's grants_v is behind, which would fetch again forever.
     document.addEventListener('visibilitychange', refresh);
     const interval = window.setInterval(refresh, 60_000);
+    refresh();
     return () => {
       cancelled = true;
-      window.removeEventListener('factory-grants-stale', refresh);
       document.removeEventListener('visibilitychange', refresh);
       window.clearInterval(interval);
     };
