@@ -279,4 +279,44 @@ describe('bindSecrets', () => {
     const throwing = { name: 'broken', async get(): Promise<string | undefined> { throw new Error('down'); } };
     assert.equal(await secretPresent('A', [throwing, envProvider({ A: 'example-value' })]), true);
   });
+
+  it('#505: a hung httpProvider fetch returns undefined within the timeout and preserves bindSecrets missing semantics', async () => {
+    const { createServer } = await import('node:http');
+    const server = createServer((_req, _res) => {
+      // Intentionally never respond to simulate a stalled HTTP secrets backend.
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('no port');
+    try {
+      const provider = httpProvider(`http://127.0.0.1:${addr.port}`, undefined, { timeoutMs: 25 });
+      assert.equal(await provider.get('API_KEY'), undefined);
+      const bound = await bindSecrets(['API_KEY'], [provider]);
+      assert.deepEqual(bound, { ok: false, missing: ['API_KEY'] });
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('#505: a hung GCP REST call returns within the bound: get is undefined, has is false, put/present reject, and the request is aborted', async () => {
+    const { gcpSecretManagerProvider } = await import('./index.js');
+    let signal: AbortSignal | undefined;
+    // Never settles and ignores its abort signal, simulating a stuck fetch.
+    const hungFetch: typeof fetch = (_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise(() => {});
+    };
+    const gcp = gcpSecretManagerProvider('proj-1', undefined, {
+      prefix: 'factory-prod-',
+      fetch: hungFetch,
+      getAccessToken: async () => 'tok-123',
+      timeoutMs: 25,
+    });
+    assert.equal(await gcp.get('X'), undefined);
+    assert.equal(signal?.aborted, true, 'the GCP request was aborted when the bound passed');
+    assert.equal(await gcp.has!('X'), false);
+    await assert.rejects(gcp.put!('X', 'v'), /timed out after 25 ms/);
+    await assert.rejects(gcp.present!(), /timed out after 25 ms/);
+  });
 });
